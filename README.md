@@ -50,6 +50,7 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.anonymous` | none | The user unmapped uids and AUTH_NONE stand for; none refuses them |
 | `parley.nfs.authCacheTime` | 60s | How long a permission answer is kept |
 | `parley.nfs.fileIdleTime` | 30s | How long an unused file stays open |
+| `parley.nfs.replayCacheSize` | 1024 | How many replies of COMPOUNDs that changed something are kept for a client that sends the call again; 0 for none |
 
 ## Who may do what
 
@@ -66,3 +67,8 @@ whether to trust that.
 
 `mvn test` runs the protocol tests against a memory file system with a small test client. The
 server has also been tried with libnfs (`nfs-ls`, `nfs-cat`, `nfs-cp`, `nfs-stat` with `?version=4`).
+
+It has also been run against pynfs's NFSv4.0 server tests (`nfs4.0/testserver.py ... all`). What still
+fails there is phase 2 and 3 work (LOCK, LOCKT, LOCKU, RELEASE_LOCKOWNER), objects a FileSource can't
+make (symbolic links, devices, sockets, fifos), and checks the server leaves to the user registry:
+UNIX mode bits (OPEN20, WRT19) and changing a file's owner (SATT18).

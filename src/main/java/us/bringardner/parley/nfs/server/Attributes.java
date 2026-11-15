@@ -68,6 +68,12 @@ public class Attributes {
 	/** Attributes that are only set, never returned by GETATTR. */
 	private static final int[] WRITE_ONLY = bitmap(Nfs4.FATTR4_TIME_ACCESS_SET, Nfs4.FATTR4_TIME_MODIFY_SET);
 
+	/**
+	 * The most words of a bitmap4 a client may send (attributes up to 2047): words beyond the
+	 * attributes this server knows are read and ignored, as RFC 7530 section 5.1 asks.
+	 */
+	public static final int MAX_BITMAP_WORDS = 64;
+
 	public static final String NOBODY = "nobody";
 
 	private final String domain;
@@ -122,6 +128,16 @@ public class Attributes {
 			ret[i] = a[i] & b[i];
 		}
 		return ret;
+	}
+
+	/** @return true if bitmap asks for a write-only attribute (GETATTR and READDIR answer NFS4ERR_INVAL) */
+	public static boolean hasWriteOnly(int[] bitmap) {
+		for (int i = 0; i < bitmap.length && i < WRITE_ONLY.length; i++) {
+			if( (bitmap[i] & WRITE_ONLY[i]) != 0 ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** @return true if bitmap has a bit not in allowed */
@@ -361,7 +377,7 @@ public class Attributes {
 	 * NFS4ERR_INVAL for one that can't be set, NFS4ERR_BADXDR if the values don't decode
 	 */
 	public static Settings decodeSettings(XdrDecoder in) throws Nfs4Exception, XdrException {
-		int[] bits = in.readIntArray(8);
+		int[] bits = in.readIntArray(MAX_BITMAP_WORDS);
 		byte[] vals = in.readOpaque(64*1024);
 		if( hasOtherThan(bits, SUPPORTED) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_ATTRNOTSUPP);

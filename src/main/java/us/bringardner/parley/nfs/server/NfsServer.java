@@ -87,6 +87,7 @@ public class NfsServer extends NioServer {
 	public static final String PROPERTY_ANONYMOUS = "anonymous";
 	public static final String PROPERTY_AUTH_CACHE_TIME = "authCacheTime";
 	public static final String PROPERTY_FILE_IDLE_TIME = "fileIdleTime";
+	public static final String PROPERTY_REPLAY_CACHE_SIZE = "replayCacheSize";
 	/** Names the settings file ({@link ServerMain}); default parley-nfs.properties in Parley's CONF folder. */
 	public static final String CONFIG_PROPERTY = PROPERTY_PREFIX+".configFile";
 
@@ -98,6 +99,7 @@ public class NfsServer extends NioServer {
 	public static final int DEFAULT_WORKER_THREADS = 16;
 	public static final long DEFAULT_AUTH_CACHE_TIME = 60_000;
 	public static final long DEFAULT_FILE_IDLE_TIME = 30_000;
+	public static final int DEFAULT_REPLAY_CACHE_SIZE = 1024;
 	/** Room for the RPC and COMPOUND headers around the largest WRITE. */
 	static final int RECORD_OVERHEAD = 64*1024;
 	private static final int MAX_EXCLUSIVE = 10_000;
@@ -107,6 +109,7 @@ public class NfsServer extends NioServer {
 	private final OpenFiles openFiles = new OpenFiles();
 	private volatile Attributes attributes;
 	private volatile Authorizer authorizer;
+	private volatile ReplayCache replayCache;
 	private volatile int ioSize = DEFAULT_IO_SIZE;
 	private volatile boolean authNoneAllowed = true;
 	private final byte[] writeVerifier = new byte[Nfs4.NFS4_VERIFIER_SIZE];
@@ -203,6 +206,8 @@ public class NfsServer extends NioServer {
 		}
 		attributes = new Attributes(domain.trim(), lease/1000, ioSize, ioSize);
 		stateManager = new StateManager((int) (System.currentTimeMillis()/1000), lease);
+		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
+		replayCache = replays > 0 ? new ReplayCache(replays) : null;
 
 		IdMap idMap = null;
 		String idmap = getProperty(propertyName(PROPERTY_IDMAP));
@@ -361,6 +366,11 @@ public class NfsServer extends NioServer {
 
 	public Attributes getFileAttributes() {
 		return attributes;
+	}
+
+	/** @return the duplicate request cache, or null when {@value #PROPERTY_REPLAY_CACHE_SIZE} is 0 */
+	public ReplayCache getReplayCache() {
+		return replayCache;
 	}
 
 	public Authorizer getAuthorizer() {
