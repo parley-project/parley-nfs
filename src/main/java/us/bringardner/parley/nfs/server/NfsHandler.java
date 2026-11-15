@@ -66,6 +66,7 @@ public class NfsHandler implements INioHandler {
 	 * @return the reply (record marking header reserved), or null for none (a REPLY message)
 	 */
 	XdrEncoder handle(INioConnection connection, ByteBuffer frame) {
+		ByteBuffer whole = frame.duplicate();
 		RpcCall call;
 		try {
 			call = RpcCall.decode(frame);
@@ -112,14 +113,29 @@ public class NfsHandler implements INioHandler {
 		case Nfs4.PROC_NULL:
 			return Rpc.startAccepted(xid, Rpc.SUCCESS, 64);
 		case Nfs4.PROC_COMPOUND:
+			InetAddress from = address(connection.getRemoteAddress());
+			ReplayCache cache = server.getReplayCache();
+			if( cache != null ) {
+				byte[] saved = cache.find(from, xid, whole);
+				if( saved != null ) {
+					server.logDebug(() -> "Connection "+connection.getId()+": xid "+Integer.toUnsignedString(xid)
+						+" sent again, its saved reply is sent");
+					XdrEncoder ret = new XdrEncoder(saved.length);
+					ret.writeRaw(saved, 0, saved.length);
+					return ret;
+				}
+			}
 			XdrEncoder reply = Rpc.startAccepted(xid, Rpc.SUCCESS, 1024);
 			int start = reply.size();
+			Compound compound = new Compound(server, caller, from, port(connection.getLocalAddress()));
 			try {
-				new Compound(server, caller, address(connection.getRemoteAddress()), port(connection.getLocalAddress()))
-					.run(call.getArguments(), reply);
+				compound.run(call.getArguments(), reply);
 			} catch (XdrException e) {
 				reply.truncate(start-4);
 				reply.writeInt(Rpc.GARBAGE_ARGS);
+			}
+			if( cache != null && compound.isNonIdempotent() ) {
+				cache.save(from, xid, whole, reply.toByteArray());
 			}
 			return reply;
 		default:

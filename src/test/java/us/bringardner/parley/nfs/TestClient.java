@@ -216,6 +216,12 @@ public class TestClient implements Closeable {
 		return compound(ops, 0);
 	}
 
+	/** Send a COMPOUND again with the xid of the last call, as a client does after a reconnect. */
+	public Result compoundAgain(Ops ops) throws IOException {
+		xid--;
+		return compound(ops, 0);
+	}
+
 	public Result compound(Ops ops, int minor) throws IOException {
 		XdrEncoder a = new XdrEncoder();
 		a.writeString("test");

@@ -198,6 +198,12 @@ public class StateManager {
 		volatile int access;
 		volatile int deny;
 		volatile boolean closed;
+		/**
+		 * The share access and deny pairs an OPEN_DOWNGRADE may ask for: the unions of the pairs of
+		 * some of the OPENs in effect (RFC 7530 section 16.19.4). Bit {@code access | deny<<2} is
+		 * set for each pair.
+		 */
+		int reachable;
 
 		OpenState(byte[] other, OpenOwner owner, Node node, int access, int deny) {
 			this.other = other;
@@ -205,6 +211,36 @@ public class StateManager {
 			this.node = node;
 			this.access = access;
 			this.deny = deny;
+			opened(access, deny);
+		}
+
+		/** An OPEN with this pair is in effect: it and its unions with the others can be downgraded to. */
+		void opened(int access, int deny) {
+			int p = access | deny<<2;
+			int r = reachable | 1 << p;
+			for (int q = 0; q < 16; q++) {
+				if( (reachable & 1 << q) != 0 ) {
+					r |= 1 << (q | p);
+				}
+			}
+			reachable = r;
+		}
+
+		/** @return true if an OPEN_DOWNGRADE may ask for this pair */
+		boolean canDowngradeTo(int access, int deny) {
+			return (reachable & 1 << (access | deny<<2)) != 0;
+		}
+
+		/** After an OPEN_DOWNGRADE only the pairs within the new one are in effect. */
+		void downgraded(int access, int deny) {
+			int p = access | deny<<2;
+			int r = 0;
+			for (int q = 0; q < 16; q++) {
+				if( (reachable & 1 << q) != 0 && (q & ~p) == 0 ) {
+					r |= 1 << q;
+				}
+			}
+			reachable = r | 1 << p;
 		}
 
 		public Node getNode() {
@@ -341,10 +377,11 @@ public class StateManager {
 				return;
 			}
 			if( c != null ) {
-				// the client rebooted: its old state goes
+				// the client rebooted: its old state goes, and its stateids are NFS4ERR_EXPIRED
 				confirmedByName.remove(c.name);
 				confirmedById.remove(c.clientid);
 				dropState(c);
+				rememberExpired(c);
 			}
 			u.confirmed = true;
 			u.lastRenew = System.currentTimeMillis();
@@ -408,23 +445,24 @@ public class StateManager {
 
 	/**
 	 * Open a file for an owner: a new open, or an upgrade of the owner's open of the same file.
-	 * @throws Nfs4Exception NFS4ERR_SHARE_DENIED if another owner's open conflicts
+	 * @throws Nfs4Exception NFS4ERR_SHARE_DENIED if an open conflicts, the owner's own open too
+	 * (RFC 7530 sections 9.9 and 16.16.5)
 	 */
 	public synchronized OpenState open(OpenOwner owner, Node node, int access, int deny) throws Nfs4Exception {
 		{
 			OpenState mine = null;
 			for (OpenState s : node.opens) {
-				if( s.owner == owner ) {
-					mine = s;
-					continue;
-				}
 				if( (access & s.deny) != 0 || (deny & s.access) != 0 ) {
 					throw new Nfs4Exception(Nfs4.NFS4ERR_SHARE_DENIED);
+				}
+				if( s.owner == owner ) {
+					mine = s;
 				}
 			}
 			if( mine != null ) {
 				mine.access |= access;
 				mine.deny |= deny;
+				mine.opened(access, deny);
 				mine.seqid++;
 				return mine;
 			}
@@ -447,15 +485,18 @@ public class StateManager {
 	}
 
 	/**
-	 * OPEN_DOWNGRADE: access and deny must be subsets of what the open has.
+	 * OPEN_DOWNGRADE: access and deny must be the union of what some of the open's OPENs asked
+	 * for (RFC 7530 section 16.19.4).
 	 */
 	public synchronized void downgrade(OpenState state, int access, int deny) throws Nfs4Exception {
 		{
-			if( (access & ~state.access) != 0 || (deny & ~state.deny) != 0 || access == 0 ) {
+			if( access < Nfs4.OPEN4_SHARE_ACCESS_READ || access > Nfs4.OPEN4_SHARE_ACCESS_BOTH
+					|| deny < 0 || deny > Nfs4.OPEN4_SHARE_DENY_BOTH || !state.canDowngradeTo(access, deny) ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
 			}
 			state.access = access;
 			state.deny = deny;
+			state.downgraded(access, deny);
 			state.seqid++;
 		}
 	}
@@ -565,12 +606,7 @@ public class StateManager {
 				i.remove();
 				confirmedByName.remove(c.name);
 				ret.addAll(dropState(c));
-				expired.add((int) c.clientid);
-				if( expired.size() > EXPIRED_REMEMBERED ) {
-					Iterator<Integer> e = expired.iterator();
-					e.next();
-					e.remove();
-				}
+				rememberExpired(c);
 			}
 		}
 		for (Iterator<ClientRecord> i = unconfirmedById.values().iterator(); i.hasNext();) {
@@ -581,6 +617,15 @@ public class StateManager {
 			}
 		}
 		return ret;
+	}
+
+	private void rememberExpired(ClientRecord c) {
+		expired.add((int) c.clientid);
+		if( expired.size() > EXPIRED_REMEMBERED ) {
+			Iterator<Integer> e = expired.iterator();
+			e.next();
+			e.remove();
+		}
 	}
 
 	private List<Node> dropState(ClientRecord c) {

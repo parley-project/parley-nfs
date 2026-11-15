@@ -53,6 +53,9 @@ public class Compound {
 	/** The most operations one COMPOUND may have (more is NFS4ERR_RESOURCE). */
 	public static final int MAX_OPERATIONS = 128;
 
+	/** The size of a READDIR4resok with no entries: the cookie verifier, the end of the list and eof. */
+	private static final int READDIR_EMPTY = Nfs4.NFS4_VERIFIER_SIZE+8;
+
 	private final NfsServer server;
 	private final Export export;
 	private final StateManager state;
@@ -68,6 +71,8 @@ public class Compound {
 	private XdrEncoder out;
 	/** where the status of the operation running now is in out */
 	private int statusPos;
+	/** true once an operation that mustn't run twice ran (its reply goes in the {@link ReplayCache}) */
+	private boolean nonIdempotent;
 
 	public Compound(NfsServer server, Caller caller, InetAddress client, int localPort) {
 		this.server = server;
@@ -119,8 +124,27 @@ public class Compound {
 		out.setInt(countPos, count);
 	}
 
+	/**
+	 * @return true if the COMPOUND ran an operation that would answer differently if it ran
+	 * again: CREATE, REMOVE, RENAME, LINK or SETATTR
+	 */
+	public boolean isNonIdempotent() {
+		return nonIdempotent;
+	}
+
 	private int operation(int op) {
 		boolean known = op >= Nfs4.OP_ACCESS && op <= Nfs4.OP_RELEASE_LOCKOWNER;
+		switch (op) {
+		case Nfs4.OP_CREATE:
+		case Nfs4.OP_REMOVE:
+		case Nfs4.OP_RENAME:
+		case Nfs4.OP_LINK:
+		case Nfs4.OP_SETATTR:
+			nonIdempotent = true;
+			break;
+		default:
+			break;
+		}
 		out.writeInt(known ? op : Nfs4.OP_ILLEGAL);
 		statusPos = out.reserve(4);
 		int status;
@@ -186,7 +210,7 @@ public class Compound {
 		case Nfs4.OP_GETATTR: getattr(); break;
 		case Nfs4.OP_GETFH: getfh(); break;
 		case Nfs4.OP_LINK: link(); break;
-		case Nfs4.OP_LOCK:
+		case Nfs4.OP_LOCK: lock(); break;
 		case Nfs4.OP_LOCKT:
 		case Nfs4.OP_LOCKU:
 		case Nfs4.OP_RELEASE_LOCKOWNER:
@@ -455,14 +479,17 @@ public class Compound {
 	}
 
 	private void getattr() throws Nfs4Exception, IOException {
-		int[] request = in.readIntArray(8);
+		int[] request = in.readIntArray(Attributes.MAX_BITMAP_WORDS);
 		FileSource f = currentFile();
 		allowRead();
+		if( Attributes.hasWriteOnly(request) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "write-only attribute asked for");
+		}
 		attributes.encode(source(current, f), request, out);
 	}
 
 	private void verify(boolean same) throws Nfs4Exception, IOException {
-		int[] bits = in.readIntArray(8);
+		int[] bits = in.readIntArray(Attributes.MAX_BITMAP_WORDS);
 		byte[] theirs = in.readOpaque(64*1024);
 		FileSource f = currentFile();
 		allowRead();
@@ -510,11 +537,12 @@ public class Compound {
 	private void access() throws Nfs4Exception, IOException {
 		int asked = in.readInt();
 		FileSource f = currentFile();
-		int all = Nfs4.ACCESS4_READ | Nfs4.ACCESS4_LOOKUP | Nfs4.ACCESS4_MODIFY | Nfs4.ACCESS4_EXTEND
-				| Nfs4.ACCESS4_DELETE | Nfs4.ACCESS4_EXECUTE;
-		int supported = asked & all;
-		int allowed = 0;
 		boolean dir = f.isDirectory();
+		// RFC 7530 section 16.1.4: LOOKUP and DELETE mean something only for a folder, EXECUTE only for a file
+		int meaningful = Nfs4.ACCESS4_READ | Nfs4.ACCESS4_MODIFY | Nfs4.ACCESS4_EXTEND
+				| (dir ? Nfs4.ACCESS4_LOOKUP | Nfs4.ACCESS4_DELETE : Nfs4.ACCESS4_EXECUTE);
+		int supported = asked & meaningful;
+		int allowed = 0;
 		if( permitted(false) ) {
 			allowed |= Nfs4.ACCESS4_READ;
 			if( dir ) {
@@ -554,12 +582,19 @@ public class Compound {
 		in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
 		long dircount = in.readUnsignedInt();
 		long maxcount = in.readUnsignedInt();
-		int[] request = in.readIntArray(8);
+		int[] request = in.readIntArray(Attributes.MAX_BITMAP_WORDS);
 		Node dir = current();
 		FileSource d = currentDir();
 		allowRead();
 		if( cookie == 1 || cookie == 2 ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_COOKIE);
+		}
+		if( Attributes.hasWriteOnly(request) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "write-only attribute asked for");
+		}
+		if( maxcount < READDIR_EMPTY ) {
+			// not even room for the verifier and an empty list
+			throw new Nfs4Exception(Nfs4.NFS4ERR_TOOSMALL);
 		}
 		String[] names = d.list();
 		if( names == null ) {
@@ -662,7 +697,7 @@ public class Compound {
 		}
 		dir.changed();
 		Node node = export.getNodes().get(path);
-		int[] set = applyCreated(settings, f);
+		int[] set = applyCreated(settings, null, f);
 		changeInfo(before, change(dir, d));
 		out.writeIntArray(set);
 		current = node;
@@ -670,28 +705,47 @@ public class Compound {
 
 	/**
 	 * Attributes given when a file is made: what can't be set is left out of attrset.
+	 *
+	 * @param node the new regular file, whose size is set through its open stream; null for a
+	 * folder, which has no size to set
 	 */
-	private int[] applyCreated(Attributes.Settings s, FileSource f) {
-		if( s.isEmpty() ) {
+	private int[] applyCreated(Attributes.Settings s, Node node, FileSource f) {
+		if( s == null || s.isEmpty() ) {
 			return new int[0];
 		}
 		Attributes.Settings rest = new Attributes.Settings();
 		rest.mode = s.mode;
 		rest.atime = s.atime;
 		rest.mtime = s.mtime;
-		try {
-			attributes.apply(rest, f);
-			int[] ret = s.bits.clone();
-			// a new file is already empty; owner and group are the server's
-			for (int b : new int[] {Nfs4.FATTR4_OWNER, Nfs4.FATTR4_OWNER_GROUP}) {
-				if( b/32 < ret.length ) {
-					ret[b/32] &= ~(1 << (b%32));
+		int[] ret = s.bits.clone();
+		// owner and group are the server's
+		clear(ret, Nfs4.FATTR4_OWNER);
+		clear(ret, Nfs4.FATTR4_OWNER_GROUP);
+		if( s.size != null ) {
+			if( node == null ) {
+				clear(ret, Nfs4.FATTR4_SIZE);
+			} else if( s.size != 0 ) {
+				// a new file is empty: only another size needs setting
+				try {
+					files.setLength(node, f, s.size);
+				} catch (IOException | Nfs4Exception e) {
+					server.logDebug(() -> "size of new "+f.getAbsolutePath()+" not set: "+e.getMessage());
+					clear(ret, Nfs4.FATTR4_SIZE);
 				}
 			}
+		}
+		try {
+			attributes.apply(rest, f);
 			return ret;
 		} catch (IOException | Nfs4Exception e) {
 			server.logDebug(() -> "attributes of new "+f.getAbsolutePath()+" not set: "+e.getMessage());
-			return Attributes.isSet(s.bits, Nfs4.FATTR4_SIZE) ? Attributes.bitmap(Nfs4.FATTR4_SIZE) : new int[0];
+			return Attributes.isSet(ret, Nfs4.FATTR4_SIZE) ? Attributes.bitmap(Nfs4.FATTR4_SIZE) : new int[0];
+		}
+	}
+
+	private static void clear(int[] bitmap, int bit) {
+		if( bit/32 < bitmap.length ) {
+			bitmap[bit/32] &= ~(1 << (bit%32));
 		}
 	}
 
@@ -860,10 +914,13 @@ public class Compound {
 	}
 
 	private void commit() throws Nfs4Exception, IOException {
-		in.readLong();
-		in.readUnsignedInt();
+		long offset = in.readLong();
+		long count = in.readUnsignedInt();
 		Node node = current();
 		currentRegular();
+		if( Long.compareUnsigned(offset+count, offset) < 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "offset + count is past 2^64");
+		}
 		files.commit(node);
 		out.writeFixedOpaque(server.getWriteVerifier());
 	}
@@ -999,12 +1056,11 @@ public class Compound {
 				if( !exists ) {
 					create(f, path);
 					dir.changed();
-					attrset = applyCreated(settings, f);
-				} else if( settings != null && settings.size != null ) {
-					if( settings.size != 0 && settings.size != f.length() ) {
-						throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "OPEN may only truncate");
-					}
-					truncate = settings.size == 0;
+					attrset = applyCreated(settings, export.getNodes().get(path), f);
+				} else if( settings != null && settings.size != null && settings.size == 0 ) {
+					// an existing file: only a size of 0 (truncate) counts, the other attributes
+					// are ignored (RFC 7530 section 16.16.5)
+					truncate = true;
 					attrset = Attributes.bitmap(Nfs4.FATTR4_SIZE);
 				}
 			}
@@ -1089,6 +1145,36 @@ public class Compound {
 			state.downgrade(s, access, deny);
 			writeStateid(s.stateId());
 			return null;
+		});
+	}
+
+	/**
+	 * LOCK isn't supported yet (phase 2, decision D1), but a LOCK for a new lock-owner is a seqid
+	 * operation of the open-owner: NFS4ERR_NOTSUPP counts as its next seqid (RFC 7530 section
+	 * 9.1.7), as the client counts it, so the owner's next OPEN or CLOSE isn't NFS4ERR_BAD_SEQID.
+	 */
+	private void lock() throws Nfs4Exception, IOException {
+		in.readInt(); // locktype
+		in.readBoolean(); // reclaim
+		in.readLong(); // offset
+		in.readLong(); // length
+		if( !in.readBoolean() ) {
+			// exist_lock_owner4: there are no lock-owners yet
+			stateid();
+			in.readInt();
+			current();
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
+		}
+		int openSeqid = in.readInt();
+		StateId openId = stateid();
+		in.readInt(); // lock_seqid
+		in.readLong(); // lock_owner4 clientid
+		in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT); // lock_owner4 owner
+		Node node = current();
+		OpenState s = openOf(openId, node);
+		sequenced(s.getOwner(), openSeqid, Nfs4.OP_LOCK, () -> {
+			state.find(openId, node, true);
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
 		});
 	}
 

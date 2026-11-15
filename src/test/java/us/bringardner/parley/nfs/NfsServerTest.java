@@ -574,8 +574,120 @@ public class NfsServerTest {
 		ops.args().writeInt(0x3f);
 		r = c.compound(ops);
 		r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_ACCESS);
-		assertEquals(0x3f, r.in.readInt());
+		// EXECUTE means nothing for a folder (RFC 7530 section 16.1.4)
+		assertEquals(0x3f & ~Nfs4.ACCESS4_EXECUTE, r.in.readInt());
 		assertEquals(Nfs4.ACCESS4_READ | Nfs4.ACCESS4_LOOKUP, r.in.readInt());
+	}
+
+	/** Problems pynfs (the Linux NFS server tests) found. */
+	@Test
+	public void pynfsFindings() throws Exception {
+		TestClient c = start("test.nfs.pynfs", false);
+		long id = clientid(c, "client-pynfs");
+
+		// OPEN creating a file with a size (WRT1, OPEN2)
+		XdrEncoder sized = new XdrEncoder();
+		sized.writeInt(1).writeInt(Nfs4.OPEN4_SHARE_ACCESS_BOTH).writeInt(Nfs4.OPEN4_SHARE_DENY_NONE).writeLong(id)
+			.writeOpaque(bytes("sized")).writeInt(Nfs4.OPEN4_CREATE).writeInt(Nfs4.UNCHECKED4)
+			.writeIntArray(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_SIZE));
+		XdrEncoder size32 = new XdrEncoder();
+		size32.writeLong(32);
+		sized.writeOpaque(size32.toByteArray()).writeInt(Nfs4.CLAIM_NULL).writeString("sized");
+		Ops ops = new Ops().putroot().op(Nfs4.OP_OPEN);
+		ops.args().write(sized);
+		ops.getfh();
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_OPEN);
+		Opened s = new Opened();
+		s.seqid = r.in.readInt();
+		s.other = r.in.readFixedOpaque(12);
+		r.in.readBoolean();
+		r.in.readLong();
+		r.in.readLong();
+		r.in.readInt();
+		assertTrue(us.bringardner.parley.nfs.server.Attributes.isSet(r.in.readIntArray(8), Nfs4.FATTR4_SIZE));
+		r.in.readInt();
+		r.ok(Nfs4.OP_GETFH);
+		s.fh = r.in.readOpaque(128);
+		confirm(c, s, 2);
+		assertEquals(32, size(c, s.fh));
+		assertEquals(Nfs4.NFS4_OK, write(c, s.fh, s, 0, bytes("data"), Nfs4.UNSTABLE4));
+		byte[] got = read(c, s.fh, 0, 20);
+		assertEquals(20, got.length);
+		assertArrayEquals(bytes("data"), Arrays.copyOf(got, 4));
+		// UNCHECKED4 of an existing file ignores a size other than 0 (OPEN2)
+		ops = new Ops().putroot().op(Nfs4.OP_OPEN);
+		XdrEncoder again = new XdrEncoder();
+		size32 = new XdrEncoder();
+		size32.writeLong(16);
+		again.writeInt(3).writeInt(Nfs4.OPEN4_SHARE_ACCESS_BOTH).writeInt(Nfs4.OPEN4_SHARE_DENY_NONE).writeLong(id)
+			.writeOpaque(bytes("sized")).writeInt(Nfs4.OPEN4_CREATE).writeInt(Nfs4.UNCHECKED4)
+			.writeIntArray(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_SIZE))
+			.writeOpaque(size32.toByteArray()).writeInt(Nfs4.CLAIM_NULL).writeString("sized");
+		ops.args().write(again);
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertEquals(32, size(c, s.fh));
+
+		// the owner's own open denies it too (OPEN21, OPEN25)
+		Opened d = open(c, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_READ, id, "deny", true, "denied");
+		assertEquals(Nfs4.NFS4_OK, d.status);
+		confirm(c, d, 2);
+		assertEquals(Nfs4.NFS4ERR_SHARE_DENIED,
+				open(c, 3, Nfs4.OPEN4_SHARE_ACCESS_READ, Nfs4.OPEN4_SHARE_DENY_NONE, id, "deny", false, "denied").status);
+
+		// OPEN_DOWNGRADE to a pair no OPEN asked for (OPDG2): the failed OPEN used seqid 3
+		ops = new Ops().putfh(d.fh).op(Nfs4.OP_OPEN_DOWNGRADE);
+		d.write(ops.args());
+		ops.args().writeInt(4).writeInt(Nfs4.OPEN4_SHARE_ACCESS_READ).writeInt(Nfs4.OPEN4_SHARE_DENY_READ);
+		assertEquals(Nfs4.NFS4ERR_INVAL, c.compound(ops).status);
+
+		// LOCK isn't supported, but counts as the open-owner's seqid 5 (LOCK16, OPDG11)
+		ops = new Ops().putfh(d.fh).op(Nfs4.OP_LOCK);
+		ops.args().writeInt(1 /* READ_LT */).writeBoolean(false).writeLong(0).writeLong(10).writeBoolean(true).writeInt(5);
+		d.write(ops.args());
+		ops.args().writeInt(0).writeLong(id).writeOpaque(bytes("lock-owner"));
+		r = c.compound(ops);
+		assertEquals(Nfs4.NFS4ERR_NOTSUPP, r.status);
+		assertEquals(Nfs4.NFS4_OK, close(c, d.fh, d, 6));
+
+		// ACCESS of a file: LOOKUP and DELETE mean nothing (ACC2r)
+		ops = new Ops().putfh(s.fh).op(Nfs4.OP_ACCESS);
+		ops.args().writeInt(0x3f);
+		r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_ACCESS);
+		assertEquals(0x3f & ~(Nfs4.ACCESS4_LOOKUP | Nfs4.ACCESS4_DELETE), r.in.readInt());
+
+		// GETATTR: write-only attributes are NFS4ERR_INVAL (GATT3), unknown ones are left out (GATT4)
+		assertEquals(Nfs4.NFS4ERR_INVAL, c.compound(new Ops().putfh(s.fh).getattr(Nfs4.FATTR4_TIME_ACCESS_SET)).status);
+		r = c.compound(new Ops().putfh(s.fh).getattr(Nfs4.FATTR4_SIZE, 1000));
+		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_GETATTR);
+		assertArrayEquals(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_SIZE), r.in.readIntArray(8));
+
+		// READDIR: too small for an empty list (RDDR8), a write-only attribute (RDDR9)
+		ops = new Ops().putroot().op(Nfs4.OP_READDIR);
+		ops.args().writeLong(0).writeFixedOpaque(new byte[8]).writeInt(15).writeInt(15).writeIntArray(new int[0]);
+		assertEquals(Nfs4.NFS4ERR_TOOSMALL, c.compound(ops).status);
+		ops = new Ops().putroot().op(Nfs4.OP_READDIR);
+		ops.args().writeLong(0).writeFixedOpaque(new byte[8]).writeInt(4096).writeInt(4096)
+			.writeIntArray(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_TIME_MODIFY_SET));
+		assertEquals(Nfs4.NFS4ERR_INVAL, c.compound(ops).status);
+
+		// COMMIT past 2^64 (CMT4)
+		ops = new Ops().putfh(s.fh).op(Nfs4.OP_COMMIT);
+		ops.args().writeLong(0xfffffffffffffff0L).writeInt(64);
+		assertEquals(Nfs4.NFS4ERR_INVAL, c.compound(ops).status);
+
+		// a CREATE sent again gets its saved reply, not NFS4ERR_EXIST (RPLY14)
+		ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+		ops.args().writeInt(Nfs4.NF4DIR).writeString("again").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertEquals(Nfs4.NFS4_OK, c.compoundAgain(ops).status);
+		assertEquals(Nfs4.NFS4ERR_EXIST, c.compound(ops).status);
+		ops = new Ops().putroot().op(Nfs4.OP_REMOVE);
+		ops.args().writeString("again");
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertEquals(Nfs4.NFS4_OK, c.compoundAgain(ops).status);
+		assertEquals(Nfs4.NFS4ERR_NOENT, c.compound(ops).status);
 	}
 
 	@Test
