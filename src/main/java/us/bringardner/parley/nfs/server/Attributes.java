@@ -1,0 +1,461 @@
+/**
+ * <PRE>
+ *
+ * Copyright Tony Bringardner 1998, 2026 <A href="http://bringardner.com/tony">Tony Bringardner</A>
+ *
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *       <A href="http://www.apache.org/licenses/LICENSE-2.0">http://www.apache.org/licenses/LICENSE-2.0</A>
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ *  </PRE>
+ *
+ *
+ *	@author Tony Bringardner
+ *
+ *
+ */
+package us.bringardner.parley.nfs.server;
+
+import java.io.IOException;
+import java.nio.file.attribute.GroupPrincipal;
+import java.nio.file.attribute.UserPrincipal;
+
+import us.bringardner.parley.files.FileSource;
+import us.bringardner.parley.nfs.protocol.Nfs4;
+import us.bringardner.parley.nfs.rpc.XdrDecoder;
+import us.bringardner.parley.nfs.rpc.XdrEncoder;
+import us.bringardner.parley.nfs.rpc.XdrException;
+
+/**
+ * File attributes (RFC 7530 section 5): which are supported, encoding fattr4 for GETATTR and
+ * READDIR, and decoding the attributes a client sets.
+ * <p>
+ * What a FileSource doesn't have is answered the way RFC 7530 allows: no hard links
+ * (link_support false, numlinks 1), symbolic links are followed (symlink_support false), no
+ * named attributes or ACLs, and the metadata time is the modify time. Space and file counts
+ * (df) aren't supported (decision D9).
+ *
+ * @author Tony Bringardner
+ */
+public class Attributes {
+
+	/** The attributes this server returns. */
+	public static final int[] SUPPORTED = bitmap(
+			Nfs4.FATTR4_SUPPORTED_ATTRS, Nfs4.FATTR4_TYPE, Nfs4.FATTR4_FH_EXPIRE_TYPE, Nfs4.FATTR4_CHANGE,
+			Nfs4.FATTR4_SIZE, Nfs4.FATTR4_LINK_SUPPORT, Nfs4.FATTR4_SYMLINK_SUPPORT, Nfs4.FATTR4_NAMED_ATTR,
+			Nfs4.FATTR4_FSID, Nfs4.FATTR4_UNIQUE_HANDLES, Nfs4.FATTR4_LEASE_TIME, Nfs4.FATTR4_RDATTR_ERROR,
+			Nfs4.FATTR4_ACLSUPPORT, Nfs4.FATTR4_CANSETTIME, Nfs4.FATTR4_CASE_INSENSITIVE,
+			Nfs4.FATTR4_CASE_PRESERVING, Nfs4.FATTR4_CHOWN_RESTRICTED, Nfs4.FATTR4_FILEHANDLE,
+			Nfs4.FATTR4_FILEID, Nfs4.FATTR4_HIDDEN, Nfs4.FATTR4_HOMOGENEOUS, Nfs4.FATTR4_MAXFILESIZE,
+			Nfs4.FATTR4_MAXLINK, Nfs4.FATTR4_MAXNAME, Nfs4.FATTR4_MAXREAD, Nfs4.FATTR4_MAXWRITE,
+			Nfs4.FATTR4_MODE, Nfs4.FATTR4_NO_TRUNC, Nfs4.FATTR4_NUMLINKS, Nfs4.FATTR4_OWNER,
+			Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_RAWDEV, Nfs4.FATTR4_TIME_ACCESS, Nfs4.FATTR4_TIME_ACCESS_SET,
+			Nfs4.FATTR4_TIME_CREATE, Nfs4.FATTR4_TIME_DELTA, Nfs4.FATTR4_TIME_METADATA,
+			Nfs4.FATTR4_TIME_MODIFY, Nfs4.FATTR4_TIME_MODIFY_SET, Nfs4.FATTR4_MOUNTED_ON_FILEID);
+
+	/** The attributes a client can set. */
+	public static final int[] WRITABLE = bitmap(Nfs4.FATTR4_SIZE, Nfs4.FATTR4_MODE, Nfs4.FATTR4_OWNER,
+			Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_TIME_ACCESS_SET, Nfs4.FATTR4_TIME_MODIFY_SET);
+
+	/** Attributes that are only set, never returned by GETATTR. */
+	private static final int[] WRITE_ONLY = bitmap(Nfs4.FATTR4_TIME_ACCESS_SET, Nfs4.FATTR4_TIME_MODIFY_SET);
+
+	public static final String NOBODY = "nobody";
+
+	private final String domain;
+	private final long leaseSeconds;
+	private final long maxRead;
+	private final long maxWrite;
+
+	/**
+	 * @param domain the domain of owner names (owner@domain), which clients must agree on
+	 * @param leaseSeconds the lease_time attribute
+	 * @param maxRead the most a READ returns
+	 * @param maxWrite the most a WRITE takes
+	 */
+	public Attributes(String domain, long leaseSeconds, long maxRead, long maxWrite) {
+		this.domain = domain;
+		this.leaseSeconds = leaseSeconds;
+		this.maxRead = maxRead;
+		this.maxWrite = maxWrite;
+	}
+
+	public String getDomain() {
+		return domain;
+	}
+
+	// ------------------------------------------------------------ bitmaps
+
+	public static int[] bitmap(int... bits) {
+		int max = 0;
+		for (int b : bits) {
+			max = Math.max(max, b);
+		}
+		int[] ret = new int[max/32+1];
+		for (int b : bits) {
+			ret[b/32] |= 1 << (b%32);
+		}
+		return ret;
+	}
+
+	public static boolean isSet(int[] bitmap, int bit) {
+		int w = bit/32;
+		return w < bitmap.length && (bitmap[w] & (1 << (bit%32))) != 0;
+	}
+
+	/** @return a and b, without trailing zero words */
+	public static int[] and(int[] a, int[] b) {
+		int n = Math.min(a.length, b.length);
+		while( n > 0 && (a[n-1] & b[n-1]) == 0 ) {
+			n--;
+		}
+		int[] ret = new int[n];
+		for (int i = 0; i < n; i++) {
+			ret[i] = a[i] & b[i];
+		}
+		return ret;
+	}
+
+	/** @return true if bitmap has a bit not in allowed */
+	public static boolean hasOtherThan(int[] bitmap, int[] allowed) {
+		for (int i = 0; i < bitmap.length; i++) {
+			int a = i < allowed.length ? allowed[i] : 0;
+			if( (bitmap[i] & ~a) != 0 ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// ------------------------------------------------------------ GETATTR
+
+	/** What one file's attributes are read from, each read once. */
+	public static final class Source {
+		final Export export;
+		final Node node;
+		final FileSource file;
+		final Long openLength;
+		private Boolean dir;
+		private Long modified;
+
+		/**
+		 * @param openLength the size from an open stream (written data the file hasn't seen yet), or null
+		 */
+		public Source(Export export, Node node, FileSource file, Long openLength) {
+			this.export = export;
+			this.node = node;
+			this.file = file;
+			this.openLength = openLength;
+		}
+
+		boolean isDirectory() throws IOException {
+			if( dir == null ) {
+				dir = file.isDirectory();
+			}
+			return dir;
+		}
+
+		long modified() throws IOException {
+			if( modified == null ) {
+				modified = file.lastModified();
+			}
+			return modified;
+		}
+
+		long length() throws IOException {
+			if( openLength != null ) {
+				return openLength;
+			}
+			return isDirectory() ? 4096 : file.length();
+		}
+	}
+
+	/**
+	 * Write a fattr4: the bitmap of what is returned, then the values.
+	 *
+	 * @param requested the attributes asked for; those not supported (and the write-only ones) are left out
+	 * @throws IOException if the file can't be read
+	 */
+	public void encode(Source src, int[] requested, XdrEncoder out) throws IOException {
+		int[] bits = and(requested, SUPPORTED);
+		for (int i = 0; i < bits.length && i < WRITE_ONLY.length; i++) {
+			bits[i] &= ~WRITE_ONLY[i];
+		}
+		XdrEncoder values = new XdrEncoder(256);
+		for (int w = 0; w < bits.length; w++) {
+			for (int b = 0; b < 32; b++) {
+				if( (bits[w] & (1 << b)) != 0 ) {
+					value(w*32+b, src, values);
+				}
+			}
+		}
+		out.writeIntArray(bits);
+		out.writeOpaque(values.array(), 0, values.size());
+	}
+
+	/**
+	 * A fattr4 with only rdattr_error, for a READDIR entry whose attributes can't be read.
+	 */
+	public static void encodeError(int status, XdrEncoder out) {
+		out.writeIntArray(bitmap(Nfs4.FATTR4_RDATTR_ERROR));
+		out.writeInt(4);
+		out.writeInt(status);
+	}
+
+	private void value(int attr, Source src, XdrEncoder out) throws IOException {
+		switch (attr) {
+		case Nfs4.FATTR4_SUPPORTED_ATTRS: out.writeIntArray(SUPPORTED); break;
+		case Nfs4.FATTR4_TYPE: out.writeInt(src.isDirectory() ? Nfs4.NF4DIR : Nfs4.NF4REG); break;
+		case Nfs4.FATTR4_FH_EXPIRE_TYPE: out.writeInt(Nfs4.FH4_PERSISTENT); break;
+		case Nfs4.FATTR4_CHANGE: out.writeLong(change(src)); break;
+		case Nfs4.FATTR4_SIZE: out.writeLong(src.length()); break;
+		case Nfs4.FATTR4_LINK_SUPPORT: out.writeBoolean(false); break;
+		case Nfs4.FATTR4_SYMLINK_SUPPORT: out.writeBoolean(false); break;
+		case Nfs4.FATTR4_NAMED_ATTR: out.writeBoolean(false); break;
+		case Nfs4.FATTR4_FSID:
+			out.writeLong(src.export.getFsidMajor());
+			out.writeLong(src.export.getFsidMinor());
+			break;
+		case Nfs4.FATTR4_UNIQUE_HANDLES: out.writeBoolean(true); break;
+		case Nfs4.FATTR4_LEASE_TIME: out.writeInt((int) leaseSeconds); break;
+		case Nfs4.FATTR4_RDATTR_ERROR: out.writeInt(Nfs4.NFS4_OK); break;
+		case Nfs4.FATTR4_ACLSUPPORT: out.writeInt(0); break;
+		case Nfs4.FATTR4_CANSETTIME: out.writeBoolean(true); break;
+		case Nfs4.FATTR4_CASE_INSENSITIVE: out.writeBoolean(false); break;
+		case Nfs4.FATTR4_CASE_PRESERVING: out.writeBoolean(true); break;
+		case Nfs4.FATTR4_CHOWN_RESTRICTED: out.writeBoolean(true); break;
+		case Nfs4.FATTR4_FILEHANDLE: out.writeOpaque(src.export.toHandle(src.node)); break;
+		case Nfs4.FATTR4_FILEID: out.writeLong(src.node.getFileid()); break;
+		case Nfs4.FATTR4_HIDDEN: out.writeBoolean(src.file.isHidden()); break;
+		case Nfs4.FATTR4_HOMOGENEOUS: out.writeBoolean(true); break;
+		case Nfs4.FATTR4_MAXFILESIZE: out.writeLong(Long.MAX_VALUE); break;
+		case Nfs4.FATTR4_MAXLINK: out.writeInt(1); break;
+		case Nfs4.FATTR4_MAXNAME: out.writeInt(Export.MAX_NAME); break;
+		case Nfs4.FATTR4_MAXREAD: out.writeLong(maxRead); break;
+		case Nfs4.FATTR4_MAXWRITE: out.writeLong(maxWrite); break;
+		case Nfs4.FATTR4_MODE: out.writeInt(mode(src)); break;
+		case Nfs4.FATTR4_NO_TRUNC: out.writeBoolean(true); break;
+		case Nfs4.FATTR4_NUMLINKS: out.writeInt(src.isDirectory() ? 2 : 1); break;
+		case Nfs4.FATTR4_OWNER: out.writeString(owner(src.file)); break;
+		case Nfs4.FATTR4_OWNER_GROUP: out.writeString(group(src.file)); break;
+		case Nfs4.FATTR4_RAWDEV: out.writeInt(0); out.writeInt(0); break;
+		case Nfs4.FATTR4_TIME_ACCESS: time(out, orModified(src, src.file.lastAccessTime())); break;
+		case Nfs4.FATTR4_TIME_CREATE: time(out, orModified(src, src.file.creationTime())); break;
+		case Nfs4.FATTR4_TIME_DELTA: time(out, 1); break;
+		case Nfs4.FATTR4_TIME_METADATA: time(out, src.modified()); break;
+		case Nfs4.FATTR4_TIME_MODIFY: time(out, src.modified()); break;
+		case Nfs4.FATTR4_MOUNTED_ON_FILEID: out.writeLong(src.node.getFileid()); break;
+		default:
+			throw new IllegalStateException("attribute "+attr+" is in SUPPORTED but not encoded");
+		}
+	}
+
+	private static long orModified(Source src, long t) throws IOException {
+		return t > 0 ? t : src.modified();
+	}
+
+	/**
+	 * The change attribute: the modify time, plus the changes made through this server, so a
+	 * change within the time's resolution still changes it.
+	 */
+	private static long change(Source src) throws IOException {
+		return src.modified()*1000+(src.node.getChanges() % 1000);
+	}
+
+	/** nfstime4 from milliseconds */
+	static void time(XdrEncoder out, long millis) {
+		out.writeLong(Math.floorDiv(millis, 1000));
+		out.writeInt((int) (Math.floorMod(millis, 1000)*1000000));
+	}
+
+	static int mode(Source src) {
+		FileSource f = src.file;
+		int m = 0;
+		try {
+			if( f.canOwnerRead() ) m |= Nfs4.MODE4_RUSR;
+			if( f.canOwnerWrite() ) m |= Nfs4.MODE4_WUSR;
+			if( f.canOwnerExecute() ) m |= Nfs4.MODE4_XUSR;
+			if( f.canGroupRead() ) m |= Nfs4.MODE4_RGRP;
+			if( f.canGroupWrite() ) m |= Nfs4.MODE4_WGRP;
+			if( f.canGroupExecute() ) m |= Nfs4.MODE4_XGRP;
+			if( f.canOtherRead() ) m |= Nfs4.MODE4_ROTH;
+			if( f.canOtherWrite() ) m |= Nfs4.MODE4_WOTH;
+			if( f.canOtherExecute() ) m |= Nfs4.MODE4_XOTH;
+		} catch (IOException | RuntimeException e) {
+			try {
+				m = src.isDirectory() ? 0755 : 0644;
+			} catch (IOException e1) {
+				m = 0644;
+			}
+		}
+		return m;
+	}
+
+	String owner(FileSource f) {
+		try {
+			UserPrincipal p = f.getOwner();
+			return p == null ? qualify(NOBODY) : qualify(p.getName());
+		} catch (IOException | RuntimeException e) {
+			return qualify(NOBODY);
+		}
+	}
+
+	String group(FileSource f) {
+		try {
+			GroupPrincipal p = f.getGroup();
+			return p == null ? qualify(NOBODY) : qualify(p.getName());
+		} catch (IOException | RuntimeException e) {
+			return qualify(NOBODY);
+		}
+	}
+
+	/** RFC 7530 section 5.9: user@dns_domain, unless the name is a number or already has a domain. */
+	String qualify(String name) {
+		if( name.indexOf('@') >= 0 || name.chars().allMatch(Character::isDigit) ) {
+			return name;
+		}
+		return name+"@"+domain;
+	}
+
+	/** @return the name without @domain when the domain is this server's, else as given */
+	String unqualify(String name) {
+		String suffix = "@"+domain;
+		return name.endsWith(suffix) ? name.substring(0, name.length()-suffix.length()) : name;
+	}
+
+	// ------------------------------------------------------------ SETATTR / CREATE / OPEN
+
+	/** The attributes a client asked to set. */
+	public static final class Settings {
+		/** what was asked for (the attrsset of a successful reply) */
+		public int[] bits = new int[0];
+		public Long size;
+		public Integer mode;
+		public String owner;
+		public String group;
+		/** null: not set; -1: the server's time; else ms */
+		public Long atime;
+		public Long mtime;
+
+		public boolean isEmpty() {
+			for (int b : bits) {
+				if( b != 0 ) {
+					return false;
+				}
+			}
+			return true;
+		}
+	}
+
+	/**
+	 * Read a fattr4 a client sent to set attributes.
+	 * @throws Nfs4Exception NFS4ERR_ATTRNOTSUPP for an attribute this server doesn't support,
+	 * NFS4ERR_INVAL for one that can't be set, NFS4ERR_BADXDR if the values don't decode
+	 */
+	public static Settings decodeSettings(XdrDecoder in) throws Nfs4Exception, XdrException {
+		int[] bits = in.readIntArray(8);
+		byte[] vals = in.readOpaque(64*1024);
+		if( hasOtherThan(bits, SUPPORTED) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_ATTRNOTSUPP);
+		}
+		if( hasOtherThan(bits, WRITABLE) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "attribute can't be set");
+		}
+		Settings ret = new Settings();
+		ret.bits = bits;
+		XdrDecoder v = new XdrDecoder(vals);
+		try {
+			if( isSet(bits, Nfs4.FATTR4_SIZE) ) {
+				ret.size = v.readLong();
+				if( ret.size < 0 ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_FBIG);
+				}
+			}
+			if( isSet(bits, Nfs4.FATTR4_MODE) ) {
+				int m = v.readInt();
+				if( (m & ~07777) != 0 ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "mode "+Integer.toOctalString(m));
+				}
+				ret.mode = m;
+			}
+			if( isSet(bits, Nfs4.FATTR4_OWNER) ) {
+				ret.owner = v.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+			}
+			if( isSet(bits, Nfs4.FATTR4_OWNER_GROUP) ) {
+				ret.group = v.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+			}
+			if( isSet(bits, Nfs4.FATTR4_TIME_ACCESS_SET) ) {
+				ret.atime = settime(v);
+			}
+			if( isSet(bits, Nfs4.FATTR4_TIME_MODIFY_SET) ) {
+				ret.mtime = settime(v);
+			}
+		} catch (XdrDecoder.InvalidUtf8Exception e) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "owner isn't UTF-8");
+		}
+		if( v.remaining() != 0 ) {
+			throw new XdrException("attribute values longer than their attributes");
+		}
+		return ret;
+	}
+
+	private static Long settime(XdrDecoder v) throws XdrException, Nfs4Exception {
+		int how = v.readInt();
+		if( how == Nfs4.SET_TO_SERVER_TIME4 ) {
+			return -1L;
+		}
+		if( how != Nfs4.SET_TO_CLIENT_TIME4 ) {
+			throw new XdrException("time_how4 "+how);
+		}
+		long sec = v.readLong();
+		long nsec = v.readUnsignedInt();
+		if( nsec >= 1000000000L ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "nseconds "+nsec);
+		}
+		return sec*1000+nsec/1000000;
+	}
+
+	/**
+	 * Apply settings other than size (the caller sets the size, through the open stream).
+	 * @throws Nfs4Exception NFS4ERR_PERM for an owner or group change (the FileSource keeps its
+	 * owner), NFS4ERR_IO if the FileSource refuses a change
+	 */
+	public void apply(Settings s, FileSource f) throws IOException, Nfs4Exception {
+		if( s.owner != null && !unqualify(s.owner).equals(unqualify(owner(f))) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "changing the owner isn't supported");
+		}
+		if( s.group != null && !unqualify(s.group).equals(unqualify(group(f))) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "changing the group isn't supported");
+		}
+		if( s.mode != null ) {
+			int m = s.mode;
+			boolean ok = f.setOwnerReadable((m & Nfs4.MODE4_RUSR) != 0)
+					& f.setOwnerWritable((m & Nfs4.MODE4_WUSR) != 0)
+					& f.setOwnerExecutable((m & Nfs4.MODE4_XUSR) != 0)
+					& f.setGroupReadable((m & Nfs4.MODE4_RGRP) != 0)
+					& f.setGroupWritable((m & Nfs4.MODE4_WGRP) != 0)
+					& f.setGroupExecutable((m & Nfs4.MODE4_XGRP) != 0)
+					& f.setOtherReadable((m & Nfs4.MODE4_ROTH) != 0)
+					& f.setOtherWritable((m & Nfs4.MODE4_WOTH) != 0)
+					& f.setOtherExecutable((m & Nfs4.MODE4_XOTH) != 0);
+			if( !ok ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_IO, "the file system didn't take mode "+Integer.toOctalString(m));
+			}
+		}
+		long now = System.currentTimeMillis();
+		if( s.atime != null && !f.setLastAccessTime(s.atime < 0 ? now : s.atime) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_IO, "the file system didn't take the access time");
+		}
+		if( s.mtime != null && !f.setLastModifiedTime(s.mtime < 0 ? now : s.mtime) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_IO, "the file system didn't take the modify time");
+		}
+	}
+}
