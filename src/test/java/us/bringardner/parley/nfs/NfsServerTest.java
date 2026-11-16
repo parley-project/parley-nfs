@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import us.bringardner.parley.files.FileSource;
+import us.bringardner.parley.files.DelegatingFileSource;
 import us.bringardner.parley.files.memory.MemoryFileSourceFactory;
 import us.bringardner.parley.iam.ParleyPrincipal;
 import us.bringardner.parley.iam.permission.BasicParleyPermission;
@@ -346,6 +347,67 @@ public class NfsServerTest {
 		v.readLong();
 		assertEquals(90, v.readInt());
 		assertEquals(0, v.remaining());
+	}
+
+	/** df: space comes from the export's FileSource; what it can't tell or fails to answer is 0 (decision D24). */
+	@Test
+	public void spaceAttributes() throws Exception {
+		mem = new MemoryFileSourceFactory();
+		mem.connect(new Properties());
+		root = mem.createFileSource("/export");
+		assertTrue(root.mkdirs());
+		FileSource spaced = new DelegatingFileSource(root) {
+			@Override
+			public long getTotalSpace() {
+				return 1000L;
+			}
+
+			@Override
+			public long getFreeSpace() {
+				return 400L;
+			}
+
+			@Override
+			public long getUsableSpace() throws IOException {
+				throw new IOException("can't tell");
+			}
+		};
+		server = new NfsServer("test.nfs.space", 0);
+		server.setExport(new Export("test", spaced, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+
+		Result r = c.compound(new Ops().putroot().getattr(Nfs4.FATTR4_SPACE_AVAIL, Nfs4.FATTR4_SPACE_FREE,
+				Nfs4.FATTR4_SPACE_TOTAL));
+		r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_GETATTR);
+		int[] bits = r.in.readIntArray(8);
+		assertTrue(us.bringardner.parley.nfs.server.Attributes.isSet(bits, Nfs4.FATTR4_SPACE_AVAIL));
+		assertTrue(us.bringardner.parley.nfs.server.Attributes.isSet(bits, Nfs4.FATTR4_SPACE_FREE));
+		assertTrue(us.bringardner.parley.nfs.server.Attributes.isSet(bits, Nfs4.FATTR4_SPACE_TOTAL));
+		XdrDecoder v = new XdrDecoder(r.in.readOpaque(4096));
+		assertEquals(0L, v.readLong(), "a FileSource that fails to answer is 0");
+		assertEquals(400L, v.readLong());
+		assertEquals(1000L, v.readLong());
+		assertEquals(0, v.remaining());
+	}
+
+	/** What a FileSource can't make is refused with errors a Linux client can name (decision D24). */
+	@Test
+	public void unsupportedObjectsGiveNamedErrors() throws Exception {
+		TestClient c = start("test.nfs.unsupported", false);
+		Ops ops = new Ops().putroot().op(Nfs4.OP_SAVEFH).op(Nfs4.OP_LINK);
+		ops.args().writeString("hard");
+		assertEquals(Nfs4.NFS4ERR_XDEV, c.compound(ops).status, "hard links");
+
+		ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+		ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes("target")).writeString("sym").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4ERR_PERM, c.compound(ops).status, "symbolic links");
+
+		ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+		ops.args().writeInt(Nfs4.NF4FIFO).writeString("pipe").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4ERR_PERM, c.compound(ops).status, "fifos");
+		assertFalse(root.getChild("sym").exists());
+		assertFalse(root.getChild("pipe").exists());
 	}
 
 	@Test

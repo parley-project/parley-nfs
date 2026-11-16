@@ -24,7 +24,13 @@ Not yet (answered with NFS4ERR_NOTSUPP):
 
 1. Delegations, ACLs and named attributes (phase 3).
 2. RPCSEC_GSS / Kerberos V5 (its own phase).
-3. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos.
+3. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos. A FileSource
+   can't make them, so a client gets errors it can name: `ln` says "Invalid cross-device link"
+   (NFS4ERR_XDEV) and `ln -s`, `mkfifo` and `mknod` say "Operation not permitted" (NFS4ERR_PERM).
+   NFS4ERR_NOTSUPP and NFS4ERR_BADTYPE have no Linux error text ("Unknown error 524").
+
+`df` shows the space of the export's FileSource (total, free and usable by the server); a FileSource
+that can't tell shows 0. File counts (`df -i`) aren't reported.
 
 There is no stable storage of client state, so a restarted server has no grace period: clients
 start over with SETCLIENTID and can't reclaim opens.
