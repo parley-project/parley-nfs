@@ -391,7 +391,7 @@ public class NfsServerTest {
 		assertEquals(0, v.remaining());
 	}
 
-	/** What a FileSource can't make is refused with errors a Linux client can name (decision D24). */
+	/** What the server doesn't serve (links, devices, sockets, fifos) is refused with errors a Linux client can name (decision D24). */
 	@Test
 	public void unsupportedObjectsGiveNamedErrors() throws Exception {
 		TestClient c = start("test.nfs.unsupported", false);
