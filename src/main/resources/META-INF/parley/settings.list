@@ -20,3 +20,6 @@ parley.nfs.anonymous
 parley.nfs.authCacheTime
 parley.nfs.fileIdleTime
 parley.nfs.replayCacheSize
+parley.nfs.sec
+parley.nfs.krb5.principal
+parley.nfs.krb5.keytab

@@ -99,6 +99,16 @@ public class NfsServer extends NioServer {
 	public static final String PROPERTY_AUTH_CACHE_TIME = "authCacheTime";
 	public static final String PROPERTY_FILE_IDLE_TIME = "fileIdleTime";
 	public static final String PROPERTY_REPLAY_CACHE_SIZE = "replayCacheSize";
+	/** The security flavors taken, comma separated: sys, krb5, krb5i, krb5p (decision D34). */
+	public static final String PROPERTY_SEC = "sec";
+	public static final String PROPERTY_KRB5_PRINCIPAL = "krb5.principal";
+	public static final String PROPERTY_KRB5_KEYTAB = "krb5.keytab";
+	public static final String SEC_SYS = "sys";
+	public static final String SEC_KRB5 = "krb5";
+	public static final String SEC_KRB5I = "krb5i";
+	public static final String SEC_KRB5P = "krb5p";
+	/** The most RPCSEC_GSS contexts kept; the one idle longest goes when there are more. */
+	static final int MAX_GSS_CONTEXTS = 4096;
 	/** Names the settings file ({@link ServerMain}); default parley-nfs.properties in Parley's CONF folder. */
 	public static final String CONFIG_PROPERTY = PROPERTY_PREFIX+".configFile";
 
@@ -131,6 +141,8 @@ public class NfsServer extends NioServer {
 	private volatile ReplayCache replayCache;
 	private volatile int ioSize = DEFAULT_IO_SIZE;
 	private volatile boolean authNoneAllowed = true;
+	private volatile GssServer gss;
+	private volatile java.util.Set<String> secs = Collections.singleton(SEC_SYS);
 	private final byte[] writeVerifier = new byte[Nfs4.NFS4_VERIFIER_SIZE];
 	private final Map<String, byte[]> exclusive = new LinkedHashMap<String, byte[]>() {
 		private static final long serialVersionUID = 1L;
@@ -257,6 +269,7 @@ public class NfsServer extends NioServer {
 				getName(), getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME),
 				message -> logInfo(message));
 		authNoneAllowed = !authorizer.isChecking() || anonymous != null;
+		prepareSecurity();
 		if( !authorizer.isChecking() ) {
 			logWarn("Server "+getName()+": no user registry, so every client that can connect may use "+describeExports());
 		}
@@ -341,6 +354,11 @@ public class NfsServer extends NioServer {
 				Thread.currentThread().interrupt();
 			}
 			shutdownExecutors();
+			GssServer g = gss;
+			gss = null;
+			if( g != null ) {
+				g.close();
+			}
 			List<IOException> errors = openFiles.closeAll();
 			for (IOException e : errors) {
 				logError("Closing a file failed", e);
@@ -563,6 +581,53 @@ public class NfsServer extends NioServer {
 
 	public int getMaxRead() {
 		return ioSize;
+	}
+
+	/** Read the security flavors and, for Kerberos, log in as the server's principal (decisions D33 to D36). */
+	private void prepareSecurity() throws IOException {
+		GssServer old = gss;
+		gss = null;
+		if( old != null ) {
+			old.close();
+		}
+		java.util.Set<String> set = new HashSet<String>();
+		String list = getProperty(propertyName(PROPERTY_SEC), SEC_SYS);
+		for (String s : list.split(",")) {
+			s = s.trim().toLowerCase();
+			if( s.isEmpty() ) {
+				continue;
+			}
+			if( !s.equals(SEC_SYS) && !s.equals(SEC_KRB5) && !s.equals(SEC_KRB5I) && !s.equals(SEC_KRB5P) ) {
+				throw new IOException(propertyName(PROPERTY_SEC)+" has "+s+": it is a list of sys, krb5, krb5i and krb5p");
+			}
+			set.add(s);
+		}
+		if( set.isEmpty() ) {
+			throw new IOException(propertyName(PROPERTY_SEC)+" is empty: it is a list of sys, krb5, krb5i and krb5p");
+		}
+		if( set.contains(SEC_KRB5) || set.contains(SEC_KRB5I) || set.contains(SEC_KRB5P) ) {
+			String principal = getProperty(propertyName(PROPERTY_KRB5_PRINCIPAL));
+			String keytab = getProperty(propertyName(PROPERTY_KRB5_KEYTAB));
+			if( principal == null || principal.trim().isEmpty() ) {
+				throw new IOException(propertyName(PROPERTY_KRB5_PRINCIPAL)+" isn't set: it is the server's Kerberos principal, nfs/<host>@<REALM>");
+			}
+			if( keytab == null || keytab.trim().isEmpty() ) {
+				throw new IOException(propertyName(PROPERTY_KRB5_KEYTAB)+" isn't set: it is the file with the server's keys");
+			}
+			gss = new GssServer(principal.trim(), keytab.trim(), MAX_GSS_CONTEXTS);
+			logInfo("Server "+getName()+": Kerberos as "+principal.trim()+", realm "+gss.getRealm()+", flavors "+set);
+		}
+		secs = set;
+	}
+
+	/** @return true if the flavor (sys, krb5, krb5i or krb5p) is one the server takes */
+	public boolean allowsSec(String flavor) {
+		return secs.contains(flavor);
+	}
+
+	/** @return the Kerberos side, null when no krb5 flavor is taken */
+	public GssServer getGss() {
+		return gss;
 	}
 
 	/** @return true if AUTH_NONE calls are taken (no registry, or an anonymous user) */

@@ -498,9 +498,32 @@ public class Compound {
 		if( !export.resolve(Export.childPath(dir, name)).exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
+		// the flavors the server takes, strongest first (decision D37)
 		boolean none = server.isAuthNoneAllowed();
-		out.writeInt(none ? 2 : 1);
-		out.writeInt(Rpc.AUTH_SYS);
+		boolean sys = server.allowsSec(NfsServer.SEC_SYS);
+		int[] services = { GssServer.SVC_PRIVACY, GssServer.SVC_INTEGRITY, GssServer.SVC_NONE };
+		String[] names = { NfsServer.SEC_KRB5P, NfsServer.SEC_KRB5I, NfsServer.SEC_KRB5 };
+		List<Integer> gss = new ArrayList<Integer>();
+		for (int i = 0; i < names.length; i++) {
+			if( server.allowsSec(names[i]) ) {
+				gss.add(services[i]);
+			}
+		}
+		out.writeInt(gss.size()+(sys ? 1 : 0)+(none ? 1 : 0));
+		for (int service : gss) {
+			out.writeInt(Rpc.RPCSEC_GSS);
+			// the OID is DER: tag 6, its length, then the bytes (RFC 7530 section 3.2.1 sec_oid4)
+			byte[] oid = new byte[GssServer.KRB5_OID.length+2];
+			oid[0] = 6;
+			oid[1] = (byte) GssServer.KRB5_OID.length;
+			System.arraycopy(GssServer.KRB5_OID, 0, oid, 2, GssServer.KRB5_OID.length);
+			out.writeOpaque(oid);
+			out.writeInt(0); // GSS_C_QOP_DEFAULT
+			out.writeInt(service);
+		}
+		if( sys ) {
+			out.writeInt(Rpc.AUTH_SYS);
+		}
 		if( none ) {
 			out.writeInt(Rpc.AUTH_NONE);
 		}

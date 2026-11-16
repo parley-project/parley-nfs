@@ -44,9 +44,10 @@ public final class RpcCall {
 	private final int verfFlavor;
 	private final byte[] verfBody;
 	private final XdrDecoder arguments;
+	private final byte[] header;
 
 	private RpcCall(int xid, int rpcVersion, int program, int version, int procedure,
-			int credFlavor, byte[] credBody, int verfFlavor, byte[] verfBody, XdrDecoder arguments) {
+			int credFlavor, byte[] credBody, int verfFlavor, byte[] verfBody, XdrDecoder arguments, byte[] header) {
 		this.xid = xid;
 		this.rpcVersion = rpcVersion;
 		this.program = program;
@@ -57,6 +58,7 @@ public final class RpcCall {
 		this.verfFlavor = verfFlavor;
 		this.verfBody = verfBody;
 		this.arguments = arguments;
+		this.header = header;
 	}
 
 	/**
@@ -66,6 +68,7 @@ public final class RpcCall {
 	 * is in {@link BadCallException#getXid()}
 	 */
 	public static RpcCall decode(ByteBuffer record) throws XdrException {
+		int start = record.position();
 		XdrDecoder in = new XdrDecoder(record);
 		int xid = in.readInt();
 		try {
@@ -82,9 +85,12 @@ public final class RpcCall {
 			int proc = in.readInt();
 			int cf = in.readInt();
 			byte[] cb = in.readOpaque(Rpc.MAX_AUTH_BYTES);
+			// what RPCSEC_GSS checksums: the call as far as the end of the credential (RFC 2203 section 5.3.1)
+			byte[] head = new byte[in.position()-start];
+			record.duplicate().position(start).get(head);
 			int vf = in.readInt();
 			byte[] vb = in.readOpaque(Rpc.MAX_AUTH_BYTES);
-			return new RpcCall(xid, rpcvers, prog, vers, proc, cf, cb, vf, vb, in);
+			return new RpcCall(xid, rpcvers, prog, vers, proc, cf, cb, vf, vb, in, head);
 		} catch (XdrException e) {
 			throw new BadCallException(xid, e.getMessage());
 		}
@@ -124,6 +130,11 @@ public final class RpcCall {
 
 	public byte[] getVerifierBody() {
 		return verfBody.clone();
+	}
+
+	/** @return the bytes of the call from the xid to the end of the credential, which a RPCSEC_GSS verifier checksums */
+	public byte[] getHeaderThroughCredential() {
+		return header.clone();
 	}
 
 	/** @return the procedure's arguments, positioned after the header */

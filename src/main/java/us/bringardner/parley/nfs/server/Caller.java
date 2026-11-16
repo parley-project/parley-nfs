@@ -36,10 +36,39 @@ public final class Caller {
 
 	private final int flavor;
 	private final AuthSys sys;
+	private final String principal;
+	private final String user;
 
 	public Caller(int flavor, AuthSys sys) {
 		this.flavor = flavor;
 		this.sys = sys;
+		this.principal = null;
+		this.user = null;
+	}
+
+	private Caller(String principal, String user) {
+		this.flavor = Rpc.RPCSEC_GSS;
+		this.sys = null;
+		this.principal = principal;
+		this.user = user;
+	}
+
+	/**
+	 * @param principal the Kerberos principal the client proved, alice@EXAMPLE.COM
+	 * @param user the user it is for the registry (decision D36)
+	 */
+	public static Caller gss(String principal, String user) {
+		return new Caller(principal, user);
+	}
+
+	/** @return the Kerberos principal of an RPCSEC_GSS caller, else null */
+	public String getPrincipal() {
+		return principal;
+	}
+
+	/** @return the registry user of an RPCSEC_GSS caller, else null */
+	public String getUser() {
+		return user;
 	}
 
 	public static Caller none() {
@@ -65,11 +94,17 @@ public final class Caller {
 	 * principal that made a client ID is the only one that may change it)
 	 */
 	public String getStateKey() {
+		if( principal != null ) {
+			return "gss:"+principal;
+		}
 		return sys == null ? "none" : "sys:"+sys.getUid();
 	}
 
 	@Override
 	public String toString() {
+		if( principal != null ) {
+			return "RPCSEC_GSS "+principal;
+		}
 		return sys == null ? "AUTH_NONE" : sys.toString();
 	}
 }
