@@ -12,6 +12,9 @@
   for the `read` or `write` permission on the export.
 - A duplicate request cache (`parley.nfs.replayCacheSize`, 1024): a COMPOUND that changed something
   (CREATE, REMOVE, RENAME, LINK, SETATTR) and is sent again with the same xid gets its first reply.
+- A file whose owner is a user in the id map (`parley.nfs.idmap`) is sent as owned by that uid
+  (the lowest when the user has several), so a Linux client shows the owner it mapped instead of
+  `nobody`; other owners are still sent as `name@domain`.
 
 ### Fixed (found by pynfs, the Linux NFS server tests)
 

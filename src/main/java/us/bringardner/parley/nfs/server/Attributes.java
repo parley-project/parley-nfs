@@ -77,6 +77,8 @@ public class Attributes {
 	public static final String NOBODY = "nobody";
 
 	private final String domain;
+	/** owners in it are sent as their uid numbers (decision D15); may be null */
+	private final IdMap idMap;
 	private final long leaseSeconds;
 	private final long maxRead;
 	private final long maxWrite;
@@ -88,7 +90,19 @@ public class Attributes {
 	 * @param maxWrite the most a WRITE takes
 	 */
 	public Attributes(String domain, long leaseSeconds, long maxRead, long maxWrite) {
+		this(domain, null, leaseSeconds, maxRead, maxWrite);
+	}
+
+	/**
+	 * @param domain the domain of owner names (owner@domain), which clients must agree on
+	 * @param idMap owners whose names are in it are sent as their uid numbers; null for none
+	 * @param leaseSeconds the lease_time attribute
+	 * @param maxRead the most a READ returns
+	 * @param maxWrite the most a WRITE takes
+	 */
+	public Attributes(String domain, IdMap idMap, long leaseSeconds, long maxRead, long maxWrite) {
 		this.domain = domain;
+		this.idMap = idMap;
 		this.leaseSeconds = leaseSeconds;
 		this.maxRead = maxRead;
 		this.maxWrite = maxWrite;
@@ -315,13 +329,48 @@ public class Attributes {
 		return m;
 	}
 
+	/**
+	 * The owner attribute: the uid number when the id map has the owner's name (RFC 7530
+	 * section 5.9 allows numbers with AUTH_SYS, so a client shows the uid the server maps to
+	 * that user), else name@domain.
+	 */
 	String owner(FileSource f) {
 		try {
 			UserPrincipal p = f.getOwner();
-			return p == null ? qualify(NOBODY) : qualify(p.getName());
+			if( p == null ) {
+				return qualify(NOBODY);
+			}
+			Long uid = idMap == null ? null : idMap.uid(p.getName());
+			return uid != null ? Long.toString(uid) : qualify(p.getName());
 		} catch (IOException | RuntimeException e) {
 			return qualify(NOBODY);
 		}
+	}
+
+	/**
+	 * @return true if a SETATTR owner names the file's owner: as the attribute is sent, by name,
+	 * or by a uid the id map maps to that name
+	 */
+	private boolean isOwner(String asked, FileSource f) {
+		String name = unqualify(asked);
+		if( name.equals(unqualify(owner(f))) ) {
+			return true;
+		}
+		try {
+			UserPrincipal p = f.getOwner();
+			if( p == null ) {
+				return false;
+			}
+			if( name.equals(p.getName()) ) {
+				return true;
+			}
+			if( idMap != null && !name.isEmpty() && name.chars().allMatch(Character::isDigit) ) {
+				return p.getName().equals(idMap.userName(Long.parseLong(name)));
+			}
+		} catch (IOException | RuntimeException e) {
+			return false;
+		}
+		return false;
 	}
 
 	String group(FileSource f) {
@@ -445,7 +494,7 @@ public class Attributes {
 	 * owner), NFS4ERR_IO if the FileSource refuses a change
 	 */
 	public void apply(Settings s, FileSource f) throws IOException, Nfs4Exception {
-		if( s.owner != null && !unqualify(s.owner).equals(unqualify(owner(f))) ) {
+		if( s.owner != null && !isOwner(s.owner, f) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "changing the owner isn't supported");
 		}
 		if( s.group != null && !unqualify(s.group).equals(unqualify(group(f))) ) {

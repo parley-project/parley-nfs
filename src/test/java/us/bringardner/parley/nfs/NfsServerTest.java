@@ -734,6 +734,59 @@ public class NfsServerTest {
 		assertEquals(Nfs4.NFS4_OK, t.compound(mk).status);
 	}
 
+	private static String owner(TestClient c, byte[] fh) throws IOException {
+		Result r = c.compound(new Ops().putfh(fh).getattr(Nfs4.FATTR4_OWNER));
+		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_GETATTR);
+		r.in.readIntArray(8);
+		r.in.readInt();
+		return r.in.readString(1024);
+	}
+
+	private static int setOwner(TestClient c, byte[] fh, String owner) throws IOException {
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_SETATTR);
+		XdrEncoder vals = new XdrEncoder().writeString(owner);
+		ops.args().writeInt(0).writeFixedOpaque(new byte[12])
+			.writeIntArray(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_OWNER)).writeOpaque(vals.toByteArray());
+		return c.compound(ops).status;
+	}
+
+	/** Decision D15: an owner in the id map is sent as its uid number. */
+	@Test
+	public void ownersInTheIdMapAreUidNumbers(@TempDir Path tmp) throws Exception {
+		mem = new MemoryFileSourceFactory();
+		mem.connect(new Properties());
+		root = mem.createFileSource("/export");
+		assertTrue(root.mkdirs());
+		String name = root.getOwner().getName();
+		Path idmap = tmp.resolve("idmap.properties");
+		Files.write(idmap, ("uid.1000="+name+"\nuid.1500="+name+"\nuid.1001=pat\n").getBytes(StandardCharsets.UTF_8));
+		property("test.nfs.owner.idmap", idmap.toString());
+		property("test.nfs.owner.domain", "example.org");
+		server = new NfsServer("test.nfs.owner", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+		byte[] fh = c.compound(new Ops().putroot().getfh()).ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_GETFH).in.readOpaque(128);
+
+		// the lowest uid the name is mapped from
+		assertEquals("1000", owner(c, fh));
+		// the owner as it is (a number or the name) isn't a change; another is NFS4ERR_PERM
+		assertEquals(Nfs4.NFS4_OK, setOwner(c, fh, "1000"));
+		assertEquals(Nfs4.NFS4_OK, setOwner(c, fh, "1500"));
+		assertEquals(Nfs4.NFS4_OK, setOwner(c, fh, name+"@example.org"));
+		assertEquals(Nfs4.NFS4ERR_PERM, setOwner(c, fh, "1001"));
+		assertEquals(Nfs4.NFS4ERR_PERM, setOwner(c, fh, "2000"));
+	}
+
+	@Test
+	public void ownersNotInTheIdMapAreNames() throws Exception {
+		property("test.nfs.owner2.domain", "example.org");
+		TestClient c = start("test.nfs.owner2", false);
+		byte[] fh = c.compound(new Ops().putroot().getfh()).ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_GETFH).in.readOpaque(128);
+		assertEquals(root.getOwner().getName()+"@example.org", owner(c, fh));
+		assertEquals(Nfs4.NFS4ERR_PERM, setOwner(c, fh, "1000"));
+	}
+
 	@Test
 	public void leaseExpires() throws Exception {
 		property("test.nfs.lease.leaseTime", "1s");
