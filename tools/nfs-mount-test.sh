@@ -4,6 +4,9 @@
 #
 #   ./nfs-mount-test.sh [mount point]        default /mnt/parley
 #   READ_UID=1001 DENIED_UID=1002 ./nfs-mount-test.sh
+#   EXPORTS="docs media" ./nfs-mount-test.sh   a server with several exports mounted at its root:
+#                                              checks the folder of exports, then run the script
+#                                              again against one export (./nfs-mount-test.sh /mnt/parley/docs)
 #
 # With a user registry (docs: "Who may do what"), READ_UID is a uid the registry lets read the
 # export but not write it, and DENIED_UID one it refuses; each adds checks run with
@@ -55,6 +58,21 @@ cleanup() {
 	rm -rf "$WORK" "$LOCAL" 2>/dev/null
 }
 trap cleanup EXIT
+
+if [ -n "${EXPORTS:-}" ]; then
+	echo "== Folder of exports ($EXPORTS)"
+	WORK=""
+	check "$MNT is an NFS mount" findmnt -t nfs4 "$MNT"
+	check "it lists the exports" sh -c "[ \"\$(ls '$MNT' | tr '\n' ' ' | sed 's/ \$//')\" = \"$(echo $EXPORTS | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ \$//')\" ]"
+	refused_with "nothing can be made in it" "Read-only file system" touch "$MNT/not-an-export"
+	for name in $EXPORTS; do
+		check "$name is its own mount"   findmnt -t nfs4 "$MNT/$name"
+		check "$name: write and read"    sh -c "echo $name > '$MNT/$name/folder-test-$$' && [ \"\$(cat '$MNT/$name/folder-test-$$')\" = $name ] && rm '$MNT/$name/folder-test-$$'"
+	done
+	echo
+	echo "$PASSED passed, $FAILED failed"
+	exit $FAILED
+fi
 
 echo "== Mount"
 if [ "$(id -u)" = 0 ]; then
