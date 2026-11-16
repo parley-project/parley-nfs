@@ -37,7 +37,8 @@ import us.bringardner.parley.nfs.protocol.Nfs4;
 /**
  * A folder the server shares: the root of what clients see (PUTROOTFH), on any FileSource.
  * <p>
- * File handles: version (1 byte), fileid (8), then the path inside the export as UTF-8 when it
+ * File handles: version (1 byte), on a server with several exports a tag (4) that names the export
+ * (version 2, decision D32), fileid (8), then the path inside the export as UTF-8 when it
  * fits in the {@value Nfs4#NFS4_FHSIZE} bytes. While the server runs the fileid finds the node
  * (a renamed file keeps its handle); after a restart the path finds the file again. A handle
  * without the path (a long path) is stale after a restart.
@@ -48,8 +49,12 @@ public class Export implements ProtectedResource {
 
 	/** The type of resource an export is, for permission checks. */
 	public static final String RESOURCE_TYPE = "nfs-export";
+	/** Handles of a server with one export; the export is the whole server */
 	static final int HANDLE_VERSION = 1;
+	/** Handles of a server with several exports (decision D32): the version, an export tag, the fileid */
+	static final int HANDLE_VERSION_TAGGED = 2;
 	static final int HANDLE_HEADER = 9;
+	static final int HANDLE_HEADER_TAGGED = 13;
 	/** RFC 7530 leaves the maximum name length to the server; 255 is what most file systems allow. */
 	public static final int MAX_NAME = 255;
 
@@ -58,7 +63,11 @@ public class Export implements ProtectedResource {
 	private final boolean readOnly;
 	private final long fsidMajor;
 	private final long fsidMinor;
-	private final NodeTable nodes = new NodeTable();
+	private final NodeTable nodes = new NodeTable(this);
+	/** the tag in this export's handles; 0 with the version 1 handles of a one export server */
+	private int tag;
+	private boolean tagged;
+	private boolean pseudo;
 	private final EntityId id;
 
 	/**
@@ -110,6 +119,68 @@ public class Export implements ProtectedResource {
 
 	public long getFsidMinor() {
 		return fsidMinor;
+	}
+
+	/** @return the tag in this export's handles (decision D32), 0 when untagged */
+	public int getTag() {
+		return tag;
+	}
+
+	/** @return true if this export's handles carry a tag, as on a server with several exports */
+	public boolean isTagged() {
+		return tagged;
+	}
+
+	/** Give this export's handles the tag that tells it from the others' (decision D32). */
+	Export tagged(int tag) {
+		this.tag = tag;
+		this.tagged = true;
+		return this;
+	}
+
+	/** @return true for the folder that holds the exports (decision D27): read-only, with no file system of its own */
+	public boolean isPseudo() {
+		return pseudo;
+	}
+
+	/**
+	 * The folder of exports (decision D27): a read-only folder with one empty folder for each name,
+	 * kept in memory.
+	 * @param names the exports' names
+	 */
+	static Export pseudoRoot(java.util.Collection<String> names) throws IOException {
+		us.bringardner.parley.files.memory.MemoryFileSourceFactory mem = new us.bringardner.parley.files.memory.MemoryFileSourceFactory();
+		mem.connect(new java.util.Properties());
+		FileSource root = mem.createFileSource("/exports");
+		if( !root.mkdirs() ) {
+			throw new IOException("can't make the folder of exports");
+		}
+		for (String n : names) {
+			if( !root.getChild(n).mkdir() ) {
+				throw new IOException("can't make "+n+" in the folder of exports");
+			}
+		}
+		Export ret = new Export("/", root, true);
+		ret.pseudo = true;
+		return ret.tagged(NodeTable.hash("/") == 0 ? 1 : (int) (NodeTable.hash("/") & 0x7fffffff));
+	}
+
+	/**
+	 * @return the tag in a handle of a server with several exports, null for a version 1 handle
+	 * @throws Nfs4Exception NFS4ERR_BADHANDLE if it isn't one of this server's handles
+	 */
+	public static Integer handleTag(byte[] handle) throws Nfs4Exception {
+		if( handle.length >= HANDLE_HEADER && (handle[0] & 0x7f) == HANDLE_VERSION ) {
+			return null;
+		}
+		if( handle.length >= HANDLE_HEADER_TAGGED && handle.length <= Nfs4.NFS4_FHSIZE && (handle[0] & 0x7f) == HANDLE_VERSION_TAGGED ) {
+			return ByteBuffer.wrap(handle, 1, 4).getInt();
+		}
+		throw new Nfs4Exception(Nfs4.NFS4ERR_BADHANDLE);
+	}
+
+	private int header() {
+		return tagged ? HANDLE_HEADER_TAGGED : HANDLE_HEADER;
 	}
 
 	public NodeTable getNodes() {
@@ -169,9 +240,14 @@ public class Export implements ProtectedResource {
 
 	public byte[] toHandle(Node node) {
 		byte[] path = node.getPath().getBytes(StandardCharsets.UTF_8);
-		boolean withPath = HANDLE_HEADER+path.length <= Nfs4.NFS4_FHSIZE;
-		ByteBuffer b = ByteBuffer.allocate(HANDLE_HEADER+(withPath ? path.length : 0));
-		b.put((byte) (withPath ? HANDLE_VERSION : HANDLE_VERSION | 0x80));
+		int header = header();
+		int version = tagged ? HANDLE_VERSION_TAGGED : HANDLE_VERSION;
+		boolean withPath = header+path.length <= Nfs4.NFS4_FHSIZE;
+		ByteBuffer b = ByteBuffer.allocate(header+(withPath ? path.length : 0));
+		b.put((byte) (withPath ? version : version | 0x80));
+		if( tagged ) {
+			b.putInt(tag);
+		}
 		b.putLong(node.getFileid());
 		if( withPath ) {
 			b.put(path);
@@ -185,17 +261,22 @@ public class Export implements ProtectedResource {
 	 * NFS4ERR_STALE if its file is gone
 	 */
 	public Node fromHandle(byte[] handle) throws Nfs4Exception {
-		if( handle.length < HANDLE_HEADER || handle.length > Nfs4.NFS4_FHSIZE
-				|| (handle[0] & 0x7f) != HANDLE_VERSION ) {
+		int header = header();
+		int version = tagged ? HANDLE_VERSION_TAGGED : HANDLE_VERSION;
+		if( handle.length < header || handle.length > Nfs4.NFS4_FHSIZE
+				|| (handle[0] & 0x7f) != version ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BADHANDLE);
 		}
 		boolean withPath = (handle[0] & 0x80) == 0;
 		ByteBuffer b = ByteBuffer.wrap(handle);
 		b.get();
+		if( tagged && b.getInt() != tag ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE, "a handle of another export");
+		}
 		long fileid = b.getLong();
 		Node ret = nodes.find(fileid);
 		if( ret == null && withPath ) {
-			String path = new String(handle, HANDLE_HEADER, handle.length-HANDLE_HEADER, StandardCharsets.UTF_8);
+			String path = new String(handle, header, handle.length-header, StandardCharsets.UTF_8);
 			if( !validPath(path) ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_BADHANDLE);
 			}

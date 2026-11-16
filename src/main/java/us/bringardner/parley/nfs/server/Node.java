@@ -36,6 +36,7 @@ import java.util.List;
 public final class Node {
 
 	private final long fileid;
+	private final Export export;
 	private volatile String path;
 	private volatile long changes;
 	/** The opens of this file, guarded by the StateManager. */
@@ -43,12 +44,18 @@ public final class Node {
 	/** The lock states of this file (decision D17), guarded by the StateManager. */
 	final List<StateManager.LockState> locks = new ArrayList<StateManager.LockState>();
 
-	Node(long fileid, String path) {
+	Node(long fileid, String path, Export export) {
 		this.fileid = fileid;
+		this.export = export;
 		this.path = path;
 	}
 
 	/** @return the fileid attribute, also in the file handle */
+	/** @return the export this node is in (the pseudo root, for a node of the folder of exports) */
+	public Export getExport() {
+		return export;
+	}
+
 	public long getFileid() {
 		return fileid;
 	}

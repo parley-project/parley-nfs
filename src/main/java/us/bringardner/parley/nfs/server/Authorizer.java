@@ -113,7 +113,8 @@ public class Authorizer {
 	 * @throws Nfs4Exception NFS4ERR_ACCESS if not allowed, NFS4ERR_DELAY if the registry is unavailable
 	 */
 	public void check(Export export, Caller caller, InetAddress client, int localPort, boolean write) throws Nfs4Exception {
-		if( registry == null ) {
+		if( registry == null || export.isPseudo() ) {
+			// nothing to check, or the folder of exports, which holds no files (decision D29)
 			return;
 		}
 		String permission = write ? StandardPermissions.WRITE : StandardPermissions.READ;

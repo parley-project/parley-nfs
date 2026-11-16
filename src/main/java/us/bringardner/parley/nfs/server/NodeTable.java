@@ -41,8 +41,19 @@ import java.util.Map;
  */
 public class NodeTable {
 
+	private final Export owner;
 	private final Map<Long, Node> byId = new HashMap<Long, Node>();
 	private final Map<String, Node> byPath = new HashMap<String, Node>();
+
+	/** Nodes that belong to no export (for tests of the table). */
+	public NodeTable() {
+		this(null);
+	}
+
+	/** @param owner the export these nodes are in */
+	public NodeTable(Export owner) {
+		this.owner = owner;
+	}
 
 	/**
 	 * @return the node for a path, made if there isn't one
@@ -63,7 +74,7 @@ public class NodeTable {
 			while( id == 0 || byId.containsKey(id) ) {
 				id = mix(id+1);
 			}
-			ret = new Node(id, path);
+			ret = new Node(id, path, owner);
 			byPath.put(path, ret);
 			byId.put(id, ret);
 		}

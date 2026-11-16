@@ -51,6 +51,10 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.export` | none | The folder to share: a path on the default FileSource factory or a `filesource:` URL |
 | `parley.nfs.exportName` | export | Its name in logs and permission checks |
 | `parley.nfs.readOnly` | false | |
+| `parley.nfs.exports` | none | Instead of `export`: the names of several exports, comma separated (see below) |
+| `parley.nfs.export.<name>` | none | The folder to share as that export (a path or `filesource:` URL) |
+| `parley.nfs.export.<name>.readOnly` | false | |
+| `parley.nfs.hideUnreadableExports` | true | List in the folder of exports only the exports the client may read; false lists them all |
 | `parley.nfs.domain` | this host's DNS domain, else localdomain | The NFSv4 domain of owner names (user@domain); it must match the clients' |
 | `parley.nfs.leaseTime` | 90s | |
 | `parley.nfs.ioSize` | 1048576 | The most bytes one READ returns or one WRITE takes |
@@ -60,6 +64,27 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.authCacheTime` | 60s | How long a permission answer is kept |
 | `parley.nfs.fileIdleTime` | 30s | How long an unused file stays open |
 | `parley.nfs.replayCacheSize` | 1024 | How many replies of COMPOUNDs that changed something are kept for a client that sends the call again; 0 for none |
+
+## More than one export
+
+`parley.nfs.export` shares one folder, which is what a client sees at `server:/`. To share several,
+list their names and give each a folder:
+
+```
+parley.nfs.exports=docs,media
+parley.nfs.export.docs=/srv/docs
+parley.nfs.export.media=/srv/media
+parley.nfs.export.media.readOnly=true
+```
+
+A client then sees a read-only folder at `server:/` that holds one folder for each export, so
+`mount server:/` gives them all and `mount server:/docs` just one. Each export is a separate
+file system: it has its own fsid and its own permission (`nfs-export:<name>`), and a RENAME from
+one to another is refused with "Invalid cross-device link". The folder of exports itself needs no
+permission; with a registry it lists only the exports the client may read (a lookup of one it
+may not read is "Permission denied"), unless `parley.nfs.hideUnreadableExports` is false.
+The names are single folder names (no `/`), so the layout is flat. Set either `export` or
+`exports`, not both.
 
 ## Who may do what
 

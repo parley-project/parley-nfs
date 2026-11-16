@@ -2,6 +2,18 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-16: more than one export)
+
+- **Several exports in a read-only folder of exports (RFC 7530 section 7).** `parley.nfs.exports`
+  names them, each has `parley.nfs.export.<name>` and optionally `.readOnly`; `parley.nfs.export`
+  alone still shares one folder as the root. Each export is authorized separately, has its own
+  fsid, and a RENAME between two is NFS4ERR_XDEV. The folder lists only the exports the client may
+  read, unless `parley.nfs.hideUnreadableExports` is false. File handles of a server with several
+  exports carry an export tag (version 2); the path that fits in a handle is 115 bytes there.
+  `NfsServer.setExports`, `getExports`, `findExport`; a `Node` knows its `Export`.
+- The test of the settings list now checks the names the server really asks for (it didn't before:
+  it used a prefix that doesn't start with `parley.`).
+
 ### Fixed (2026-11-16: found mounting with a user registry)
 
 - **The start-up warnings about `parley.nfs.*` settings are gone.** The module now lists its setting

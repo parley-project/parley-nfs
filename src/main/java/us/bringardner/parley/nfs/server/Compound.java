@@ -29,7 +29,9 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.NoSuchFileException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 import us.bringardner.parley.files.FileSource;
 import us.bringardner.parley.nfs.protocol.Nfs4;
@@ -61,7 +63,6 @@ public class Compound {
 	private static final int READDIR_EMPTY = Nfs4.NFS4_VERIFIER_SIZE+8;
 
 	private final NfsServer server;
-	private final Export export;
 	private final StateManager state;
 	private final OpenFiles files;
 	private final Attributes attributes;
@@ -80,7 +81,6 @@ public class Compound {
 
 	public Compound(NfsServer server, Caller caller, InetAddress client, int localPort) {
 		this.server = server;
-		this.export = server.getExport();
 		this.state = server.getStateManager();
 		this.files = server.getOpenFiles();
 		this.attributes = server.getFileAttributes();
@@ -231,7 +231,7 @@ public class Compound {
 		case Nfs4.OP_OPEN_DOWNGRADE: openDowngrade(); break;
 		case Nfs4.OP_PUTFH: putfh(); break;
 		case Nfs4.OP_PUTPUBFH:
-		case Nfs4.OP_PUTROOTFH: current = export.getRootNode(); break;
+		case Nfs4.OP_PUTROOTFH: current = server.getRootExport().getRootNode(); break;
 		case Nfs4.OP_READ: read(); break;
 		case Nfs4.OP_READDIR: readdir(); break;
 		case Nfs4.OP_READLINK: readlink(); break;
@@ -337,7 +337,7 @@ public class Compound {
 	}
 
 	private FileSource existing(Node node) throws Nfs4Exception, IOException {
-		FileSource f = export.resolve(node);
+		FileSource f = node.getExport().resolve(node);
 		if( !f.exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE);
 		}
@@ -362,11 +362,17 @@ public class Compound {
 		return f;
 	}
 
+	/** @return the export (or the folder of exports) the current file is in */
+	private Export exp() throws Nfs4Exception {
+		return current().getExport();
+	}
+
 	private void allowRead() throws Nfs4Exception {
-		server.getAuthorizer().check(export, caller, client, localPort, false);
+		server.getAuthorizer().check(exp(), caller, client, localPort, false);
 	}
 
 	private void allowWrite() throws Nfs4Exception {
+		Export export = exp();
 		if( export.isReadOnly() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_ROFS);
 		}
@@ -427,11 +433,11 @@ public class Compound {
 
 	private void putfh() throws Nfs4Exception, XdrException {
 		byte[] fh = in.readOpaque(Nfs4.NFS4_FHSIZE);
-		current = export.fromHandle(fh);
+		current = server.fromHandle(fh);
 	}
 
 	private void getfh() throws Nfs4Exception {
-		out.writeOpaque(export.toHandle(current()));
+		out.writeOpaque(current().getExport().toHandle(current()));
 	}
 
 	private void savefh() throws Nfs4Exception {
@@ -449,6 +455,17 @@ public class Compound {
 		String name = component();
 		Node dir = current();
 		currentDir();
+		Export export = dir.getExport();
+		if( export.isPseudo() ) {
+			// into an export (decision D27); one the caller may not read is NFS4ERR_ACCESS
+			Export target = server.findExport(name);
+			if( target == null ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
+			}
+			server.getAuthorizer().check(target, caller, client, localPort, false);
+			current = target.getRootNode();
+			return;
+		}
 		allowRead();
 		String path = Export.childPath(dir, name);
 		if( !export.resolve(path).exists() ) {
@@ -462,14 +479,21 @@ public class Compound {
 		currentDir();
 		allowRead();
 		if( node.isRoot() ) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
+			// the root of an export is in the folder of exports, if there is one (decision D27)
+			Export pseudo = server.getPseudoRoot();
+			if( pseudo == null || node.getExport().isPseudo() ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
+			}
+			current = pseudo.getRootNode();
+			return;
 		}
-		current = export.getNodes().get(node.getParentPath());
+		current = node.getExport().getNodes().get(node.getParentPath());
 	}
 
 	private void secinfo() throws Nfs4Exception, IOException {
 		String name = component();
 		Node dir = current();
+		Export export = dir.getExport();
 		currentDir();
 		if( !export.resolve(Export.childPath(dir, name)).exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
@@ -487,7 +511,7 @@ public class Compound {
 	// ================================================================ attributes
 
 	private Attributes.Source source(Node node, FileSource f) throws IOException {
-		return new Attributes.Source(export, node, f, f.isDirectory() ? null : files.length(node));
+		return new Attributes.Source(node.getExport(), node, f, f.isDirectory() ? null : files.length(node));
 	}
 
 	private void getattr() throws Nfs4Exception, IOException {
@@ -570,6 +594,19 @@ public class Compound {
 		out.writeInt(supported & allowed);
 	}
 
+	/** @return true if the caller may read the export; NFS4ERR_DELAY (registry unavailable) is thrown */
+	private boolean mayRead(Export target) throws Nfs4Exception {
+		try {
+			server.getAuthorizer().check(target, caller, client, localPort, false);
+			return true;
+		} catch (Nfs4Exception e) {
+			if( e.getStatus() == Nfs4.NFS4ERR_DELAY ) {
+				throw e;
+			}
+			return false;
+		}
+	}
+
 	/** @return true if allowed; NFS4ERR_DELAY (registry unavailable) still fails the ACCESS */
 	private boolean permitted(boolean write) throws Nfs4Exception {
 		try {
@@ -596,6 +633,7 @@ public class Compound {
 		long maxcount = in.readUnsignedInt();
 		int[] request = in.readIntArray(Attributes.MAX_BITMAP_WORDS);
 		Node dir = current();
+		Export export = dir.getExport();
 		FileSource d = currentDir();
 		allowRead();
 		if( cookie == 1 || cookie == 2 ) {
@@ -611,6 +649,17 @@ public class Compound {
 		String[] names = d.list();
 		if( names == null ) {
 			names = new String[0];
+		}
+		if( export.isPseudo() && server.isHidingUnreadableExports() ) {
+			// only the exports the caller may read (decision D30)
+			List<String> shown = new ArrayList<String>();
+			for (String n : names) {
+				Export target = server.findExport(n);
+				if( target != null && mayRead(target) ) {
+					shown.add(n);
+				}
+			}
+			names = shown.toArray(new String[0]);
 		}
 		Arrays.sort(names);
 		long first = cookie == 0 ? 0 : cookie-2;
@@ -633,9 +682,11 @@ public class Compound {
 			out.writeLong(i+3);
 			out.writeString(name);
 			String path = Export.childPath(dir, name);
-			Node node = export.getNodes().get(path);
+			Export target = export.isPseudo() ? server.findExport(name) : null;
+			// in the folder of exports an entry is the export's own root, with its own fsid
+			Node node = target != null ? target.getRootNode() : export.getNodes().get(path);
 			try {
-				FileSource f = export.resolve(path);
+				FileSource f = target != null ? target.getRoot() : export.resolve(path);
 				attributes.encode(source(node, f), request, out);
 			} catch (IOException e) {
 				if( !rdattrError ) {
@@ -686,6 +737,7 @@ public class Compound {
 		String name = component();
 		Attributes.Settings settings = Attributes.decodeSettings(in);
 		Node dir = current();
+		Export export = dir.getExport();
 		FileSource d = currentDir();
 		if( type == Nfs4.NF4REG ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BADTYPE);
@@ -766,6 +818,7 @@ public class Compound {
 	private void remove() throws Nfs4Exception, IOException {
 		String name = component();
 		Node dir = current();
+		Export export = dir.getExport();
 		FileSource d = currentDir();
 		allowWrite();
 		String path = Export.childPath(dir, name);
@@ -800,6 +853,11 @@ public class Compound {
 		}
 		Node fromDir = saved;
 		Node toDir = current();
+		Export export = toDir.getExport();
+		if( fromDir.getExport() != toDir.getExport() ) {
+			// separate file systems (decision D31)
+			throw new Nfs4Exception(Nfs4.NFS4ERR_XDEV, "from one export to another");
+		}
 		FileSource fd = existing(fromDir);
 		FileSource td = currentDir();
 		if( !fd.isDirectory() ) {
@@ -1041,6 +1099,7 @@ public class Compound {
 	private Node openNull(OpenOwner owner, Node dir, String name, int access, int deny, int opentype, int how,
 			Attributes.Settings settings, byte[] exclusive) throws Nfs4Exception, IOException {
 		FileSource d = currentDir();
+		Export export = dir.getExport();
 		if( (access & Nfs4.OPEN4_SHARE_ACCESS_READ) != 0 ) {
 			allowRead();
 		}

@@ -801,25 +801,30 @@ public class NfsServerTest {
 
 	/** Every setting the server reads is in this module's list, so the start-up check doesn't warn about them. */
 	@Test
-	public void everySettingTheServerReadsIsListed() throws Exception {
-		String prefix = "test.nfs.known";
+	public void everySettingTheServerReadsIsListed(@TempDir Path tmp) throws Exception {
+		// a name must start with parley. for the check to look at it
+		String prefix = "parley.nfs";
 		KnownSettings known = KnownSettings.load().addPrefix(prefix);
-		KnownSettings.RecordingProperties recording = new KnownSettings.RecordingProperties();
-		mem = new MemoryFileSourceFactory();
-		mem.connect(new Properties());
-		root = mem.createFileSource("/export");
-		assertTrue(root.mkdirs());
+		Path folder = Files.createDirectory(tmp.resolve("docs"));
+		Properties values = new Properties();
+		values.setProperty(prefix+".exports", "docs");
+		values.setProperty(prefix+".export.docs", folder.toString());
+		values.setProperty(prefix+".export.docs.readOnly", "true");
+		KnownSettings.RecordingProperties recording = new KnownSettings.RecordingProperties(values);
 		server = new NfsServer(prefix, 0);
 		server.setConfiguration(recording);
-		server.setExport(new Export("test", root, false));
 		server.startAndWait(10000);
 		List<String> asked = new ArrayList<String>(recording.asked());
 		assertTrue(asked.contains(prefix+".leaseTime"), asked.toString());
+		assertTrue(asked.contains(prefix+".export.docs.readOnly"), asked.toString());
+		assertTrue(asked.contains(prefix+".hideUnreadableExports"), asked.toString());
 		assertEquals(List.of(), known.undeclared(asked));
 		assertEquals(List.of(), known.undeclared(KnownSettings.settingConstants(NfsServer.class)));
 		// the names a deployment sets
-		assertEquals(List.of(), KnownSettings.load().addPrefix("parley.nfs").undeclared(List.of("parley.nfs.configFile",
-				"parley.nfs.export", "parley.nfs.idmap", "parley.nfs.anonymous", "parley.nfs.authenticationProvider", "parley.nfs.userFile")));
+		assertEquals(List.of(), known.undeclared(List.of("parley.nfs.configFile", "parley.nfs.export", "parley.nfs.idmap",
+				"parley.nfs.anonymous", "parley.nfs.authenticationProvider", "parley.nfs.userFile")));
+		// and a misspelled one is found
+		assertEquals(List.of("parley.nfs.exprot"), known.undeclared(List.of("parley.nfs.exprot")));
 	}
 
 	/** A refusal is reported once for each fresh answer, not for each call. */
@@ -842,6 +847,210 @@ public class NfsServerTest {
 		}
 		assertEquals(1, told.size(), told.toString());
 		assertTrue(told.get(0).startsWith("Refused read on test to AUTH_NONE"), told.get(0));
+	}
+
+	// ------------------------------------------------------------------ several exports (D27 to D32)
+
+	private FileSource makeExportRoot(String path) throws IOException {
+		FileSource f = mem.createFileSource(path);
+		assertTrue(f.mkdirs());
+		return f;
+	}
+
+	private static void write(FileSource f, int length) throws IOException {
+		assertTrue(f.createNewFile());
+		try (java.io.OutputStream out = f.getOutputStream()) {
+			out.write(new byte[length]);
+		}
+	}
+
+	private static byte[] fhOf(TestClient c, String... path) throws IOException {
+		Ops ops = new Ops().putroot();
+		for (String n : path) {
+			ops.lookup(n);
+		}
+		Result r = c.compound(ops.getfh());
+		r.ok(Nfs4.OP_PUTROOTFH);
+		for (int i = 0; i < path.length; i++) {
+			r.ok(Nfs4.OP_LOOKUP);
+		}
+		r.ok(Nfs4.OP_GETFH);
+		return r.in.readOpaque(128);
+	}
+
+	private void startExports(String prefix, Export... exports) throws IOException {
+		server = new NfsServer(prefix, 0);
+		server.setExports(Arrays.asList(exports));
+		server.startAndWait(10000);
+	}
+
+	/** Decisions D27, D29, D31, D32: a read-only folder of exports, handles that name their export. */
+	@Test
+	public void exportsAreInAReadOnlyFolder() throws Exception {
+		mem = new MemoryFileSourceFactory();
+		mem.connect(new Properties());
+		FileSource docs = makeExportRoot("/docs");
+		FileSource media = makeExportRoot("/media");
+		FileSource archive = makeExportRoot("/archive");
+		write(docs.getChild("x"), 10);
+		write(media.getChild("x"), 20);
+		startExports("test.nfs.multi", new Export("docs", docs, false), new Export("media", media, false),
+				new Export("archive", archive, true));
+		TestClient c = client();
+
+		byte[] top = rootFh(c);
+		assertEquals(Arrays.asList("archive", "docs", "media"), readdir(c, top, 4096));
+		byte[] d = fhOf(c, "docs");
+		byte[] m = fhOf(c, "media");
+		assertEquals(Arrays.asList("x"), readdir(c, d, 4096));
+
+		// the same path in two exports: different handles, each in its own export
+		byte[] dx = fhOf(c, "docs", "x");
+		byte[] mx = fhOf(c, "media", "x");
+		assertFalse(Arrays.equals(dx, mx));
+		assertEquals(10, size(c, dx));
+		assertEquals(20, size(c, mx));
+
+		// the fsid of an export isn't the folder's
+		assertDifferent(fsid(c, top), fsid(c, d));
+		assertDifferent(fsid(c, d), fsid(c, m));
+
+		// LOOKUPP: from an export's root to the folder of exports, and no further
+		Result r = c.compound(new Ops().putfh(d).op(Nfs4.OP_LOOKUPP).getfh());
+		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_LOOKUPP).ok(Nfs4.OP_GETFH);
+		assertArrayEquals(top, r.in.readOpaque(128));
+		assertEquals(Nfs4.NFS4ERR_NOENT, c.compound(new Ops().putfh(top).op(Nfs4.OP_LOOKUPP)).status);
+		assertEquals(Nfs4.NFS4ERR_NOENT, c.compound(new Ops().putroot().lookup("nothing")).status);
+
+		// the folder of exports can't be changed, and a read-only export keeps its own flag
+		Ops mk = new Ops().putfh(top).op(Nfs4.OP_CREATE);
+		mk.args().writeInt(Nfs4.NF4DIR).writeString("sub").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4ERR_ROFS, c.compound(mk).status);
+		Ops mk2 = new Ops().putfh(fhOf(c, "archive")).op(Nfs4.OP_CREATE);
+		mk2.args().writeInt(Nfs4.NF4DIR).writeString("sub").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4ERR_ROFS, c.compound(mk2).status);
+		Ops mk3 = new Ops().putfh(d).op(Nfs4.OP_CREATE);
+		mk3.args().writeInt(Nfs4.NF4DIR).writeString("sub").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4_OK, c.compound(mk3).status);
+		assertTrue(docs.getChild("sub").isDirectory());
+
+		// RENAME from one export to another is XDEV
+		Ops mv = new Ops().putfh(d).op(Nfs4.OP_SAVEFH).putfh(m).op(Nfs4.OP_RENAME);
+		mv.args().writeString("x").writeString("moved");
+		assertEquals(Nfs4.NFS4ERR_XDEV, c.compound(mv).status);
+		assertTrue(docs.getChild("x").exists());
+
+		// a handle that names no export is stale, and a short one is bad
+		byte[] other = dx.clone();
+		other[1] ^= 0x55;
+		assertEquals(Nfs4.NFS4ERR_STALE, c.compound(new Ops().putfh(other).getattr(Nfs4.FATTR4_SIZE)).status);
+		assertEquals(Nfs4.NFS4ERR_BADHANDLE, c.compound(new Ops().putfh(new byte[5])).status);
+	}
+
+	private static long[] fsid(TestClient c, byte[] fh) throws IOException {
+		Result r = c.compound(new Ops().putfh(fh).getattr(Nfs4.FATTR4_FSID));
+		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_GETATTR);
+		r.in.readIntArray(8);
+		r.in.readInt();
+		return new long[] { r.in.readLong(), r.in.readLong() };
+	}
+
+	private static void assertDifferent(long[] a, long[] b) {
+		assertFalse(Arrays.equals(a, b), Arrays.toString(a));
+	}
+
+	/** Decisions D29, D30: each export is authorized by itself; the folder hides what a caller can't read, or lists it. */
+	@Test
+	public void unreadableExportsAreHiddenOrListed(@TempDir Path tmp) throws Exception {
+		Path idmap = tmp.resolve("idmap.properties");
+		Files.write(idmap, "uid.1000=tony\n".getBytes(StandardCharsets.UTF_8));
+		property("test.nfs.hide.idmap", idmap.toString());
+		mem = new MemoryFileSourceFactory();
+		mem.connect(new Properties());
+		Export docs = new Export("docs", makeExportRoot("/docs"), false);
+		Export media = new Export("media", makeExportRoot("/media"), false);
+		BasicUserRegistry registry = new BasicUserRegistry(1000);
+		ParleyPrincipal tony = registry.createUser("tony");
+		registry.grant(tony, new BasicParleyPermission(StandardPermissions.READ, docs.getId()));
+		server = new NfsServer("test.nfs.hide", 0);
+		server.setExports(Arrays.asList(docs, media));
+		server.setUserRegistry(registry);
+		server.startAndWait(10000);
+
+		TestClient c = client();
+		c.uid = 1000;
+		byte[] top = rootFh(c);
+		assertEquals(Arrays.asList("docs"), readdir(c, top, 4096));
+		assertEquals(Nfs4.NFS4_OK, c.compound(new Ops().putroot().lookup("docs")).status);
+		assertEquals(Nfs4.NFS4ERR_ACCESS, c.compound(new Ops().putroot().lookup("media")).status);
+		assertEquals(Nfs4.NFS4ERR_NOENT, c.compound(new Ops().putroot().lookup("nothing")).status);
+
+		// listed all: the setting, read when the server starts
+		server.stop();
+		assertTrue(server.awaitStopped(10000));
+		property("test.nfs.hide.hideUnreadableExports", "false");
+		server.startAndWait(10000);
+		TestClient t = client();
+		t.uid = 1000;
+		assertEquals(Arrays.asList("docs", "media"), readdir(t, rootFh(t), 4096));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, t.compound(new Ops().putroot().lookup("media")).status);
+	}
+
+	/** Decision D28: the settings name the exports; the old one-folder setting stays as it was. */
+	@Test
+	public void exportsFromSettings(@TempDir Path tmp) throws Exception {
+		Path a = Files.createDirectory(tmp.resolve("a"));
+		Path b = Files.createDirectory(tmp.resolve("b"));
+		Files.write(a.resolve("in-a"), new byte[3]);
+		property("test.nfs.set.exports", "docs, media");
+		property("test.nfs.set.export.docs", a.toString());
+		property("test.nfs.set.export.media", b.toString());
+		property("test.nfs.set.export.media.readOnly", "true");
+		server = new NfsServer("test.nfs.set", 0);
+		server.startAndWait(10000);
+		assertEquals(2, server.getExports().size());
+		assertTrue(server.findExport("media").isReadOnly());
+		assertFalse(server.findExport("docs").isReadOnly());
+		TestClient c = client();
+		assertEquals(Arrays.asList("docs", "media"), readdir(c, rootFh(c), 4096));
+		assertEquals(Arrays.asList("in-a"), readdir(c, fhOf(c, "docs"), 4096));
+		server.stop();
+		assertTrue(server.awaitStopped(10000));
+
+		// one folder and a list of names is a mistake
+		property("test.nfs.set.export", a.toString());
+		NfsServer both = new NfsServer("test.nfs.set", 0);
+		try {
+			both.startAndWait(5000);
+			org.junit.jupiter.api.Assertions.fail("started");
+		} catch (IOException e) {
+			assertTrue(e.getMessage().contains("both set"), e.getMessage());
+		}
+		System.clearProperty("test.nfs.set.export");
+		// a name with no folder
+		System.clearProperty("test.nfs.set.export.media");
+		NfsServer missing = new NfsServer("test.nfs.set", 0);
+		try {
+			missing.startAndWait(5000);
+			org.junit.jupiter.api.Assertions.fail("started");
+		} catch (IOException e) {
+			assertTrue(e.getMessage().contains("test.nfs.set.export.media"), e.getMessage());
+		}
+	}
+
+	/** Two exports can't have the same name. */
+	@Test
+	public void exportNamesAreUnique() throws Exception {
+		mem = new MemoryFileSourceFactory();
+		mem.connect(new Properties());
+		NfsServer s = new NfsServer("test.nfs.dup", 0);
+		s.setExports(Arrays.asList(new Export("docs", makeExportRoot("/one"), false), new Export("docs", makeExportRoot("/two"), false)));
+		try {
+			s.startAndWait(5000);
+			org.junit.jupiter.api.Assertions.fail("started");
+		} catch (IOException e) {
+			assertTrue(e.getMessage().contains("two exports named docs"), e.getMessage());
+		}
 	}
 
 	private static String owner(TestClient c, byte[] fh) throws IOException {
