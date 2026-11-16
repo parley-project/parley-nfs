@@ -6,6 +6,10 @@ parley.nfs.configFile
 parley.nfs.port
 parley.nfs.export
 parley.nfs.exportName
+parley.nfs.exports
+parley.nfs.export.*
+parley.nfs.export.*.readOnly
+parley.nfs.hideUnreadableExports
 parley.nfs.readOnly
 parley.nfs.domain
 parley.nfs.leaseTime

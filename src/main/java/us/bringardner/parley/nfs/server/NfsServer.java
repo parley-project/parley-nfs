@@ -27,7 +27,11 @@ package us.bringardner.parley.nfs.server;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +61,11 @@ import us.bringardner.parley.net.server.ServerMain;
  * filesource: URL. It has no default: the installer must decide what is shared.</li>
  * <li>{@code exportName}: its name in logs and permission checks, default {@value #DEFAULT_EXPORT_NAME}</li>
  * <li>{@code readOnly}: true to refuse every change, default false</li>
+ * <li>{@code exports}: instead of {@code export}, the names of several exports, comma separated; each
+ * has {@code export.<name>} (the folder, as {@code export}) and optionally {@code export.<name>.readOnly}.
+ * Clients then see a read-only folder of the exports (decisions D27 to D32)</li>
+ * <li>{@code hideUnreadableExports}: true (the default) to list in that folder only the exports a client
+ * may read, false to list them all</li>
  * <li>{@code domain}: the domain of owner names (user@domain), which must match the clients'
  * NFSv4 domain; default the DNS domain of this host's name, else {@value #DEFAULT_DOMAIN}</li>
  * <li>{@code leaseTime}: default 90s</li>
@@ -78,6 +87,8 @@ public class NfsServer extends NioServer {
 	public static final String PROPERTY_PREFIX = "parley.nfs";
 	public static final String PROPERTY_EXPORT = "export";
 	public static final String PROPERTY_EXPORT_NAME = "exportName";
+	public static final String PROPERTY_EXPORTS = "exports";
+	public static final String PROPERTY_HIDE_UNREADABLE = "hideUnreadableExports";
 	public static final String PROPERTY_READ_ONLY = "readOnly";
 	public static final String PROPERTY_DOMAIN = "domain";
 	public static final String PROPERTY_LEASE_TIME = "leaseTime";
@@ -104,7 +115,13 @@ public class NfsServer extends NioServer {
 	static final int RECORD_OVERHEAD = 64*1024;
 	private static final int MAX_EXCLUSIVE = 10_000;
 
+	/** the one export of a server that has no folder of exports */
 	private volatile Export export;
+	/** the exports of a server that has a folder of exports (null when it has one export) */
+	private volatile List<Export> exports;
+	/** the folder of exports (null when the server has one export) */
+	private volatile Export pseudo;
+	private volatile boolean hideUnreadable = true;
 	private volatile StateManager stateManager;
 	private final OpenFiles openFiles = new OpenFiles();
 	private volatile Attributes attributes;
@@ -188,18 +205,29 @@ public class NfsServer extends NioServer {
 
 	private synchronized void prepare() throws IOException {
 		shutdownExecutors();
-		if( export == null ) {
-			String location = getProperty(propertyName(PROPERTY_EXPORT));
-			if( location == null || location.trim().isEmpty() ) {
-				throw new IOException(propertyName(PROPERTY_EXPORT)+" isn't set: it names the folder to share");
+		if( export == null && exports == null ) {
+			String names = getProperty(propertyName(PROPERTY_EXPORTS));
+			if( names != null && !names.trim().isEmpty() ) {
+				readExports(names);
+			} else {
+				String location = getProperty(propertyName(PROPERTY_EXPORT));
+				if( location == null || location.trim().isEmpty() ) {
+					throw new IOException(propertyName(PROPERTY_EXPORT)+" isn't set: it names the folder to share");
+				}
+				FileSource root = FileSourceFactory.getDefaultFactory().resolve(location.trim());
+				export = new Export(getProperty(propertyName(PROPERTY_EXPORT_NAME), DEFAULT_EXPORT_NAME).trim(), root,
+						getBooleanProperty(propertyName(PROPERTY_READ_ONLY), false));
 			}
-			FileSource root = FileSourceFactory.getDefaultFactory().resolve(location.trim());
-			export = new Export(getProperty(propertyName(PROPERTY_EXPORT_NAME), DEFAULT_EXPORT_NAME).trim(), root,
-					getBooleanProperty(propertyName(PROPERTY_READ_ONLY), false));
 		}
-		if( !export.getRoot().isDirectory() ) {
-			throw new IOException("The export "+export+" doesn't exist or isn't a folder");
+		if( exports != null ) {
+			arrange(exports);
 		}
+		for (Export e : getExports()) {
+			if( !e.getRoot().isDirectory() ) {
+				throw new IOException("The export "+e+" doesn't exist or isn't a folder");
+			}
+		}
+		hideUnreadable = getBooleanProperty(propertyName(PROPERTY_HIDE_UNREADABLE), true);
 		long lease = getDuration(propertyName(PROPERTY_LEASE_TIME), DEFAULT_LEASE_TIME);
 		if( lease < 1000 ) {
 			throw new IOException(propertyName(PROPERTY_LEASE_TIME)+" must be at least 1s");
@@ -230,7 +258,7 @@ public class NfsServer extends NioServer {
 				message -> logInfo(message));
 		authNoneAllowed = !authorizer.isChecking() || anonymous != null;
 		if( !authorizer.isChecking() ) {
-			logWarn("Server "+getName()+": no user registry, so every client that can connect may use "+export);
+			logWarn("Server "+getName()+": no user registry, so every client that can connect may use "+describeExports());
 		}
 
 		final int record = ioSize+RECORD_OVERHEAD;
@@ -249,7 +277,7 @@ public class NfsServer extends NioServer {
 		long period = Math.max(500, Math.min(lease/4, 5000));
 		t.scheduleWithFixedDelay(() -> housekeeping(idle), period, period, TimeUnit.MILLISECONDS);
 		timer = t;
-		logInfo("Server "+getName()+" shares "+export+", lease "+lease/1000+"s, domain "+domain
+		logInfo("Server "+getName()+" shares "+describeExports()+", lease "+lease/1000+"s, domain "+domain
 				+(authorizer.isChecking() ? ", users checked by the registry" : ""));
 	}
 
@@ -356,6 +384,7 @@ public class NfsServer extends NioServer {
 
 	// ------------------------------------------------------------ for the handler and Compound
 
+	/** @return the export of a server that has just one, else null */
 	public Export getExport() {
 		return export;
 	}
@@ -363,6 +392,152 @@ public class NfsServer extends NioServer {
 	/** @param export the folder to share, instead of the one {@code <prefix>.export} names */
 	public void setExport(Export export) {
 		this.export = export;
+		this.exports = null;
+		this.pseudo = null;
+	}
+
+	/**
+	 * Share several exports in a read-only folder of exports (decisions D27 to D32), instead of the
+	 * ones {@code <prefix>.exports} names. Each export's name is its name in the folder.
+	 */
+	public void setExports(Collection<Export> exports) {
+		this.export = null;
+		this.pseudo = null;
+		this.exports = new ArrayList<Export>(exports);
+	}
+
+	/** @return every export (the one export, or the ones in the folder of exports) */
+	public List<Export> getExports() {
+		List<Export> list = exports;
+		if( list != null ) {
+			return Collections.unmodifiableList(list);
+		}
+		return export == null ? Collections.<Export>emptyList() : Collections.singletonList(export);
+	}
+
+	/** @return what PUTROOTFH gives: the folder of exports, else the one export */
+	public Export getRootExport() {
+		Export p = pseudo;
+		return p != null ? p : export;
+	}
+
+	/** @return the folder of exports, null when the server has one export */
+	public Export getPseudoRoot() {
+		return pseudo;
+	}
+
+	/** @return the export in the folder of exports with that name, or null */
+	public Export findExport(String name) {
+		for (Export e : getExports()) {
+			if( e.getName().equals(name) ) {
+				return e;
+			}
+		}
+		return null;
+	}
+
+	/** @return the export (or the folder of exports) with that handle tag, or null */
+	public Export findExport(int tag) {
+		Export p = pseudo;
+		if( p != null && p.getTag() == tag ) {
+			return p;
+		}
+		for (Export e : getExports()) {
+			if( e.isTagged() && e.getTag() == tag ) {
+				return e;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * @return the node of a file handle, in the export its tag names
+	 * @throws Nfs4Exception NFS4ERR_BADHANDLE if it isn't one of this server's handles, NFS4ERR_STALE
+	 * for the handle of an export this server doesn't have
+	 */
+	public Node fromHandle(byte[] handle) throws Nfs4Exception {
+		Integer tag = Export.handleTag(handle);
+		Export e = tag == null ? export : findExport(tag);
+		if( e == null ) {
+			throw new Nfs4Exception(tag == null ? Nfs4.NFS4ERR_BADHANDLE : Nfs4.NFS4ERR_STALE, "no such export");
+		}
+		return e.fromHandle(handle);
+	}
+
+	/** @return true to list in the folder of exports only the exports a client may read */
+	public boolean isHidingUnreadableExports() {
+		return hideUnreadable;
+	}
+
+	private String describeExports() {
+		Export one = export;
+		if( one != null ) {
+			return one.toString();
+		}
+		List<Export> list = getExports();
+		StringBuilder b = new StringBuilder("exports");
+		for (Export e : list) {
+			b.append(b.length() == 7 ? " " : ", ").append(e);
+		}
+		return b.toString();
+	}
+
+	/** Make the exports from the {@code exports} setting. */
+	private void readExports(String names) throws IOException {
+		String single = getProperty(propertyName(PROPERTY_EXPORT));
+		if( single != null && !single.trim().isEmpty() ) {
+			throw new IOException(propertyName(PROPERTY_EXPORT)+" and "+propertyName(PROPERTY_EXPORTS)
+				+" are both set: use one folder, or a list of names");
+		}
+		List<Export> list = new ArrayList<Export>();
+		for (String n : names.split(",")) {
+			String name = n.trim();
+			if( name.isEmpty() ) {
+				continue;
+			}
+			String key = propertyName(PROPERTY_EXPORT+"."+name);
+			String location = getProperty(key);
+			if( location == null || location.trim().isEmpty() ) {
+				throw new IOException(key+" isn't set: it names the folder to share as "+name);
+			}
+			FileSource root = FileSourceFactory.getDefaultFactory().resolve(location.trim());
+			list.add(new Export(name, root, getBooleanProperty(key+".readOnly", false)));
+		}
+		if( list.isEmpty() ) {
+			throw new IOException(propertyName(PROPERTY_EXPORTS)+" names no export");
+		}
+		exports = list;
+	}
+
+	/** Check the names, give each export its handle tag and make the folder of exports (once). */
+	private void arrange(List<Export> list) throws IOException {
+		if( pseudo != null ) {
+			return;
+		}
+		java.util.Set<String> names = new HashSet<String>();
+		java.util.Set<Integer> tags = new HashSet<Integer>();
+		for (Export e : list) {
+			try {
+				Export.checkName(e.getName());
+			} catch (Nfs4Exception ex) {
+				throw new IOException("The export name '"+e.getName()+"' can't be a folder name: "+ex.getMessage());
+			}
+			if( !names.add(e.getName()) ) {
+				throw new IOException("There are two exports named "+e.getName());
+			}
+			int tag = (int) (NodeTable.hash(e.getName()) & 0x7fffffff);
+			if( tag == 0 || !tags.add(tag) ) {
+				throw new IOException("The export "+e.getName()+" has the same handle tag as another: rename one");
+			}
+		}
+		Export p = Export.pseudoRoot(names);
+		if( tags.contains(p.getTag()) ) {
+			throw new IOException("An export has the handle tag of the folder of exports: rename it");
+		}
+		for (Export e : list) {
+			e.tagged((int) (NodeTable.hash(e.getName()) & 0x7fffffff));
+		}
+		pseudo = p;
 	}
 
 	public StateManager getStateManager() {
