@@ -51,9 +51,16 @@ public class IdMap {
 	public static final String UID_PREFIX = "uid.";
 
 	private final Map<Long, String> users;
+	/** user name to uid: the lowest uid when a name is mapped from several */
+	private final Map<String, Long> uids;
 
 	public IdMap(Map<Long, String> users) {
 		this.users = Collections.unmodifiableMap(new HashMap<Long, String>(users));
+		Map<String, Long> byName = new HashMap<String, Long>();
+		for (Map.Entry<Long, String> e : users.entrySet()) {
+			byName.merge(e.getValue(), e.getKey(), Math::min);
+		}
+		this.uids = Collections.unmodifiableMap(byName);
 	}
 
 	/**
@@ -86,6 +93,14 @@ public class IdMap {
 	/** @return the user name for a uid, null if it isn't mapped */
 	public String userName(long uid) {
 		return users.get(uid);
+	}
+
+	/**
+	 * @return the uid a user name is mapped from (the lowest when there are several), null if
+	 * the name isn't in the map
+	 */
+	public Long uid(String userName) {
+		return uids.get(userName);
 	}
 
 	public int size() {

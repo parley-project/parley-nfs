@@ -204,16 +204,15 @@ public class NfsServer extends NioServer {
 		if( domain == null || domain.trim().isEmpty() ) {
 			domain = defaultDomain();
 		}
-		attributes = new Attributes(domain.trim(), lease/1000, ioSize, ioSize);
-		stateManager = new StateManager((int) (System.currentTimeMillis()/1000), lease);
-		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
-		replayCache = replays > 0 ? new ReplayCache(replays) : null;
-
 		IdMap idMap = null;
 		String idmap = getProperty(propertyName(PROPERTY_IDMAP));
 		if( idmap != null && !idmap.trim().isEmpty() ) {
 			idMap = IdMap.load(FileSourceFactory.getDefaultFactory().resolve(idmap.trim()));
 		}
+		attributes = new Attributes(domain.trim(), idMap, lease/1000, ioSize, ioSize);
+		stateManager = new StateManager((int) (System.currentTimeMillis()/1000), lease);
+		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
+		replayCache = replays > 0 ? new ReplayCache(replays) : null;
 		String anonymous = getProperty(propertyName(PROPERTY_ANONYMOUS));
 		if( anonymous != null && anonymous.trim().isEmpty() ) {
 			anonymous = null;

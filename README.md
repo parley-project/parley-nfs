@@ -46,7 +46,7 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.leaseTime` | 90s | |
 | `parley.nfs.ioSize` | 1048576 | The most bytes one READ returns or one WRITE takes |
 | `parley.nfs.workerThreads` | 16 | Threads that run requests (one at a time per connection) |
-| `parley.nfs.idmap` | none | Properties file of `uid.<number>=<user name>` |
+| `parley.nfs.idmap` | none | Properties file of `uid.<number>=<user name>`; a file whose owner is a user in it shows as owned by that uid on clients |
 | `parley.nfs.anonymous` | none | The user unmapped uids and AUTH_NONE stand for; none refuses them |
 | `parley.nfs.authCacheTime` | 60s | How long a permission answer is kept |
 | `parley.nfs.fileIdleTime` | 30s | How long an unused file stays open |
