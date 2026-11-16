@@ -2,6 +2,14 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-16)
+
+- **`df` shows space.** space_avail, space_free and space_total come from the export's FileSource
+  (0 when it can't tell). File counts are still not reported.
+- **Hard links, symbolic links, devices, sockets and fifos give errors a Linux client can name.**
+  LINK answers NFS4ERR_XDEV ("Invalid cross-device link") and CREATE of the others NFS4ERR_PERM
+  ("Operation not permitted"), where NFS4ERR_NOTSUPP showed as "Unknown error 524".
+
 ### Added
 
 - **An NFS version 4.0 server (RFC 7530), phase 1.** `NfsServer` on parley-net's `NioServer` shares one

@@ -40,8 +40,8 @@ import us.bringardner.parley.nfs.rpc.XdrException;
  * <p>
  * What a FileSource doesn't have is answered the way RFC 7530 allows: no hard links
  * (link_support false, numlinks 1), symbolic links are followed (symlink_support false), no
- * named attributes or ACLs, and the metadata time is the modify time. Space and file counts
- * (df) aren't supported (decision D9).
+ * named attributes or ACLs, and the metadata time is the modify time. Space (df) is the
+ * export's FileSource's own (0 where it can't tell); file counts aren't supported (decisions D9, D24).
  *
  * @author Tony Bringardner
  */
@@ -59,7 +59,8 @@ public class Attributes {
 			Nfs4.FATTR4_MODE, Nfs4.FATTR4_NO_TRUNC, Nfs4.FATTR4_NUMLINKS, Nfs4.FATTR4_OWNER,
 			Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_RAWDEV, Nfs4.FATTR4_TIME_ACCESS, Nfs4.FATTR4_TIME_ACCESS_SET,
 			Nfs4.FATTR4_TIME_CREATE, Nfs4.FATTR4_TIME_DELTA, Nfs4.FATTR4_TIME_METADATA,
-			Nfs4.FATTR4_TIME_MODIFY, Nfs4.FATTR4_TIME_MODIFY_SET, Nfs4.FATTR4_MOUNTED_ON_FILEID);
+			Nfs4.FATTR4_TIME_MODIFY, Nfs4.FATTR4_TIME_MODIFY_SET, Nfs4.FATTR4_MOUNTED_ON_FILEID,
+			Nfs4.FATTR4_SPACE_AVAIL, Nfs4.FATTR4_SPACE_FREE, Nfs4.FATTR4_SPACE_TOTAL);
 
 	/** The attributes a client can set. */
 	public static final int[] WRITABLE = bitmap(Nfs4.FATTR4_SIZE, Nfs4.FATTR4_MODE, Nfs4.FATTR4_OWNER,
@@ -240,6 +241,21 @@ public class Attributes {
 		out.writeInt(status);
 	}
 
+	/**
+	 * Space on the storage of the export (the same for every file in it): usable by this server,
+	 * free, or total, in bytes. 0 when the FileSource can't tell or fails, which is what a client's
+	 * df shows for it.
+	 */
+	private static long space(Source src, int kind) {
+		FileSource root = src.export.getRoot();
+		try {
+			long ret = kind == 0 ? root.getUsableSpace() : kind == 1 ? root.getFreeSpace() : root.getTotalSpace();
+			return ret < 0 ? 0 : ret;
+		} catch (IOException e) {
+			return 0;
+		}
+	}
+
 	private void value(int attr, Source src, XdrEncoder out) throws IOException {
 		switch (attr) {
 		case Nfs4.FATTR4_SUPPORTED_ATTRS: out.writeIntArray(SUPPORTED); break;
@@ -283,6 +299,9 @@ public class Attributes {
 		case Nfs4.FATTR4_TIME_METADATA: time(out, src.modified()); break;
 		case Nfs4.FATTR4_TIME_MODIFY: time(out, src.modified()); break;
 		case Nfs4.FATTR4_MOUNTED_ON_FILEID: out.writeLong(src.node.getFileid()); break;
+		case Nfs4.FATTR4_SPACE_AVAIL: out.writeLong(space(src, 0)); break;
+		case Nfs4.FATTR4_SPACE_FREE: out.writeLong(space(src, 1)); break;
+		case Nfs4.FATTR4_SPACE_TOTAL: out.writeLong(space(src, 2)); break;
 		default:
 			throw new IllegalStateException("attribute "+attr+" is in SUPPORTED but not encoded");
 		}
