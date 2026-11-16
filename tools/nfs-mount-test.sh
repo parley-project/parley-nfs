@@ -113,9 +113,10 @@ if command -v git > /dev/null; then
 	check "git init, add, commit" sh -c "cd '$WORK' && git init -q repo && cd repo && echo x > f \
 	                                     && git add f && git -c user.name=t -c user.email=t@t commit -qm test \
 	                                     && git log --oneline | grep -q test"
-	check "git status is clean"   sh -c "cd '$WORK/repo' && [ -z \"\$(git status --porcelain)\" ]"
+	check "git status is clean"   sh -c "cd '$WORK/repo' && out=\$(git status --porcelain) && [ -z \"\$out\" ]"
 fi
-check "tar a tree in"           sh -c "mkdir '$WORK/doc' && tar -C /usr/share/doc -cf - bash coreutils 2>/dev/null | tar -C '$WORK/doc' -xf -"
+# -h copies what symbolic links point at: the server can't make links (D9)
+check "tar a tree in"           sh -c "mkdir '$WORK/doc' && tar -h -C /usr/share/doc -cf - bash coreutils 2>/dev/null | tar -C '$WORK/doc' -xf -"
 check "the tree is the same"    diff -r /usr/share/doc/bash "$WORK/doc/bash"
 check "two writers at once"     sh -c "(for i in \$(seq 1 200); do echo \$i; done > '$WORK/w1') & \
                                        (for i in \$(seq 1 200); do echo \$i; done > '$WORK/w2') & wait; \
