@@ -134,17 +134,17 @@ else
 	# open the folder to everyone, so a refusal below is the registry's, not the file mode's
 	check "set up: a shared folder and file" sh -c "echo shared > '$WORK/shared.txt' && chmod 777 '$WORK' && chmod 666 '$WORK/shared.txt'"
 	if [ -n "${READ_UID:-}" ]; then
-		as_reader() { sudo -n -u "#$READ_UID" "$@"; }
+		as_reader() { sudo -n -u "#$READ_UID" "$@" </dev/null; }
 		check "uid $READ_UID can list the folder"  as_reader ls "$WORK"
-		check "uid $READ_UID can read a file"      sh -c "[ \"\$(sudo -n -u '#$READ_UID' cat '$WORK/shared.txt')\" = shared ]"
+		check "uid $READ_UID can read a file"      sh -c "[ \"\$(sudo -n -u '#$READ_UID' cat '$WORK/shared.txt' </dev/null)\" = shared ]"
 		refused_with "uid $READ_UID can't write a file" "Permission denied" as_reader sh -c "echo x > '$WORK/by-reader.txt'"
 		refused_with "uid $READ_UID can't change a file" "Permission denied" as_reader sh -c "echo x >> '$WORK/shared.txt'"
 		refused_with "uid $READ_UID can't make a folder" "Permission denied" as_reader mkdir "$WORK/by-reader"
-		refused_with "uid $READ_UID can't remove a file" "Permission denied" as_reader rm "$WORK/shared.txt"
+		refused_with "uid $READ_UID can't remove a file" "Permission denied" as_reader rm -f "$WORK/shared.txt"
 		check "the file is as it was"             sh -c "[ \"\$(cat '$WORK/shared.txt')\" = shared ]"
 	fi
 	if [ -n "${DENIED_UID:-}" ]; then
-		as_denied() { sudo -n -u "#$DENIED_UID" "$@"; }
+		as_denied() { sudo -n -u "#$DENIED_UID" "$@" </dev/null; }
 		refused_with "uid $DENIED_UID can't list the folder" "Permission denied" as_denied ls "$WORK"
 		refused_with "uid $DENIED_UID can't read a file"     "Permission denied" as_denied cat "$WORK/shared.txt"
 		refused_with "uid $DENIED_UID can't write a file"    "Permission denied" as_denied sh -c "echo x > '$WORK/by-denied.txt'"
