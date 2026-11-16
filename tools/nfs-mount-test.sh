@@ -6,7 +6,8 @@
 #
 # Run it as a normal user (not with sudo). Everything happens in a new folder under the
 # mount, which is removed at the end. Each check prints PASS or FAIL; checks of things the
-# server doesn't support (links, chown, fifos) pass when they fail the expected way.
+# server doesn't support (links, chown, fifos) pass when they fail with the message Linux
+# shows for the error the server answers (never "Unknown error 524").
 # The exit status is the number of failures.
 #
 set -u
@@ -33,6 +34,15 @@ refused() {
 	local out
 	if out=$("$@" 2>&1); then fail "$name" "it worked, but the server isn't expected to support it"
 	else pass "$name ($(echo "$out" | tail -1 | sed 's/.*: //'))"; fi
+}
+
+# refused_with "name" "message" command...  : PASS when the command fails with that message
+refused_with() {
+	local name=$1 message=$2; shift 2
+	local out
+	if out=$("$@" 2>&1); then fail "$name" "it worked, but the server isn't expected to support it"
+	elif echo "$out" | grep -q "$message"; then pass "$name ($message)"
+	else fail "$name" "expected '$message', got: $(echo "$out" | tail -1)"; fi
 }
 
 same() { [ "$1" = "$2" ] || { echo "expected '$2', got '$1'"; return 1; }; }
@@ -100,11 +110,16 @@ check "mtime moves on write"    sh -c "echo more >> '$WORK/a.txt' && [ \$(stat -
 echo "        owner as the VM sees it: $(stat -c '%U:%G (%u:%g)' "$WORK/a.txt")"
 
 echo "== Not supported (should fail)"
-refused "symbolic link"         ln -s a.txt "$WORK/sym"
-refused "hard link"             ln "$WORK/a.txt" "$WORK/hard"
+refused_with "symbolic link"    "Operation not permitted"      ln -s a.txt "$WORK/sym"
+refused_with "hard link"        "Invalid cross-device link"    ln "$WORK/a.txt" "$WORK/hard"
 # root on the client may ask; the server keeps the owner (NFS4ERR_PERM)
 refused "chown (as root)"       sudo -n chown 0 "$WORK/a.txt"
-refused "fifo"                  mkfifo "$WORK/fifo"
+refused_with "fifo"             "Operation not permitted"      mkfifo "$WORK/fifo"
+
+echo "== Space (df)"
+# the space is the export's FileSource's own; one that can't tell shows 0 (a local folder can)
+check "df shows the total size" sh -c "[ \$(df -B1 --output=size '$MNT' | tail -1 | tr -d ' ') -gt 0 ]"
+check "df shows free space"     sh -c "[ \$(df -B1 --output=avail '$MNT' | tail -1 | tr -d ' ') -gt 0 ]"
 
 echo "== Locks"
 L="$WORK/lockfile"
