@@ -277,7 +277,8 @@ public class NfsServer extends NioServer {
 					}
 				}
 			}
-			for (IOException e : openFiles.closeIdle(now, idle)) {
+			// a stream opened for an OPEN for writing stays open while the file has one (D16)
+			for (IOException e : openFiles.closeIdle(now, idle, n -> s != null && s.hasWriteOpen(n))) {
 				logError("Closing an idle file failed", e);
 			}
 		} catch (IOException | RuntimeException e) {

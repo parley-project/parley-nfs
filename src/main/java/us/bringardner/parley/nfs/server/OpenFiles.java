@@ -283,14 +283,31 @@ public class OpenFiles {
 	}
 
 	/**
+	 * Open the node's stream for writing now, while the file can still be opened for writing: an
+	 * OPEN for writing may write whatever mode the file is given after it (decision D16), as a
+	 * POSIX file descriptor can. Nothing happens if the FileSource has no random access.
+	 */
+	public void openForWrite(Node node, FileSource file) throws IOException {
+		handle(node, file, true);
+	}
+
+	/**
 	 * Close the streams not used for idleMillis.
 	 * @return the errors, if any
 	 */
 	public List<IOException> closeIdle(long now, long idleMillis) {
+		return closeIdle(now, idleMillis, n -> false);
+	}
+
+	/**
+	 * Close the streams not used for idleMillis, except those of the nodes keep accepts.
+	 * @return the errors, if any
+	 */
+	public List<IOException> closeIdle(long now, long idleMillis, java.util.function.Predicate<Node> keep) {
 		List<Handle> idle = new ArrayList<Handle>();
 		synchronized (this) {
 			for (Map.Entry<Node, Handle> e : new ArrayList<Map.Entry<Node, Handle>>(handles.entrySet())) {
-				if( now - e.getValue().lastUse > idleMillis ) {
+				if( now - e.getValue().lastUse > idleMillis && !keep.test(e.getKey()) ) {
 					handles.remove(e.getKey());
 					idle.add(e.getValue());
 				}
