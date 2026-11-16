@@ -38,8 +38,12 @@ import us.bringardner.parley.nfs.rpc.XdrDecoder;
 import us.bringardner.parley.nfs.rpc.XdrEncoder;
 import us.bringardner.parley.nfs.rpc.XdrException;
 import us.bringardner.parley.nfs.server.StateManager.ClientRecord;
+import us.bringardner.parley.nfs.server.StateManager.LockDeniedException;
+import us.bringardner.parley.nfs.server.StateManager.LockOwner;
+import us.bringardner.parley.nfs.server.StateManager.LockState;
 import us.bringardner.parley.nfs.server.StateManager.OpenOwner;
 import us.bringardner.parley.nfs.server.StateManager.OpenState;
+import us.bringardner.parley.nfs.server.StateManager.SeqOwner;
 import us.bringardner.parley.nfs.server.StateManager.StateId;
 
 /**
@@ -156,6 +160,10 @@ public class Compound {
 			status = Nfs4.NFS4_OK;
 		} catch (Replayed r) {
 			return r.status;
+		} catch (LockDeniedException e) {
+			out.truncate(statusPos+4);
+			writeDenied(e);
+			status = e.getStatus();
 		} catch (StateManager.ClientInUseException e) {
 			out.truncate(statusPos+4);
 			out.writeString(e.netid == null ? "" : e.netid);
@@ -211,11 +219,9 @@ public class Compound {
 		case Nfs4.OP_GETFH: getfh(); break;
 		case Nfs4.OP_LINK: link(); break;
 		case Nfs4.OP_LOCK: lock(); break;
-		case Nfs4.OP_LOCKT:
-		case Nfs4.OP_LOCKU:
-		case Nfs4.OP_RELEASE_LOCKOWNER:
-			// phase 2 (decision D1)
-			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
+		case Nfs4.OP_LOCKT: lockt(); break;
+		case Nfs4.OP_LOCKU: locku(); break;
+		case Nfs4.OP_RELEASE_LOCKOWNER: releaseLockOwner(); break;
 		case Nfs4.OP_LOOKUP: lookup(); break;
 		case Nfs4.OP_LOOKUPP: lookupp(); break;
 		case Nfs4.OP_NVERIFY: verify(false); break;
@@ -266,7 +272,7 @@ public class Compound {
 	 * Run a seqid-sequenced operation of an open-owner (RFC 7530 section 9.1.7): a
 	 * retransmission gets the saved result, the next seqid runs and its result is saved.
 	 */
-	private void sequenced(OpenOwner owner, int seqid, int op, Body body) throws Nfs4Exception, IOException {
+	private void sequenced(SeqOwner owner, int seqid, int op, Body body) throws Nfs4Exception, IOException {
 		synchronized (owner) {
 			if( owner.checkSeqid(seqid, op) ) {
 				byte[] saved = owner.getLastResult();
@@ -277,7 +283,9 @@ public class Compound {
 				}
 				throw new Replayed(java.nio.ByteBuffer.wrap(saved).getInt());
 			}
-			server.getStateManager().forgetClosed(owner);
+			if( owner instanceof OpenOwner ) {
+				server.getStateManager().forgetClosed((OpenOwner) owner);
+			}
 			try {
 				Node fh = body.run();
 				byte[] result = Arrays.copyOfRange(out.array(), statusPos, out.size());
@@ -286,9 +294,13 @@ public class Compound {
 				owner.done(seqid, op, result, fh);
 			} catch (Nfs4Exception e) {
 				if( advancesSeqid(e.getStatus()) ) {
-					byte[] result = new byte[4];
-					java.nio.ByteBuffer.wrap(result).putInt(e.getStatus());
-					owner.done(seqid, op, result, null);
+					XdrEncoder saved = new XdrEncoder(64);
+					saved.writeInt(e.getStatus());
+					if( e instanceof LockDeniedException ) {
+						// a retransmitted LOCK is denied with the same LOCK4denied
+						writeDenied(saved, (LockDeniedException) e);
+					}
+					owner.done(seqid, op, saved.toByteArray(), null);
 				}
 				throw e;
 			}
@@ -402,7 +414,7 @@ public class Compound {
 			state.checkAnonymous(node, access);
 			return;
 		}
-		OpenState s = state.find(id, node, true);
+		OpenState s = state.findIo(id, node);
 		if( !s.getOwner().isConfirmed() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "open not confirmed");
 		}
@@ -1166,34 +1178,139 @@ public class Compound {
 		});
 	}
 
+	private void writeDenied(LockDeniedException e) {
+		writeDenied(out, e);
+	}
+
+	/** LOCK4denied */
+	private static void writeDenied(XdrEncoder to, LockDeniedException e) {
+		to.writeLong(e.offset);
+		to.writeLong(e.length);
+		to.writeInt(e.write ? Nfs4.WRITE_LT : Nfs4.READ_LT);
+		to.writeLong(e.clientid);
+		to.writeOpaque(e.owner);
+	}
+
+	/** @return true for a write lock type; NFS4ERR_INVAL for no lock type */
+	private static boolean isWrite(int locktype) throws Nfs4Exception {
+		switch (locktype) {
+		case Nfs4.READ_LT:
+		case Nfs4.READW_LT:
+			return false;
+		case Nfs4.WRITE_LT:
+		case Nfs4.WRITEW_LT:
+			return true;
+		default:
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "lock type "+locktype);
+		}
+	}
+
 	/**
-	 * LOCK isn't supported yet (phase 2, decision D1), but a LOCK for a new lock-owner is a seqid
-	 * operation of the open-owner: NFS4ERR_NOTSUPP counts as its next seqid (RFC 7530 section
-	 * 9.1.7), as the client counts it, so the owner's next OPEN or CLOSE isn't NFS4ERR_BAD_SEQID.
+	 * LOCK (decisions D17 to D21): a new lock-owner's first LOCK is a seqid operation of the
+	 * open-owner (open_to_lock_owner4), later ones of the lock-owner. A lock is taken at once or
+	 * denied (READW_LT and WRITEW_LT too, D19).
 	 */
 	private void lock() throws Nfs4Exception, IOException {
-		in.readInt(); // locktype
-		in.readBoolean(); // reclaim
-		in.readLong(); // offset
-		in.readLong(); // length
-		if( !in.readBoolean() ) {
-			// exist_lock_owner4: there are no lock-owners yet
-			stateid();
-			in.readInt();
-			current();
-			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
-		}
-		int openSeqid = in.readInt();
-		StateId openId = stateid();
-		in.readInt(); // lock_seqid
-		in.readLong(); // lock_owner4 clientid
-		in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT); // lock_owner4 owner
+		int locktype = in.readInt();
+		boolean reclaim = in.readBoolean();
+		long offset = in.readLong();
+		long length = in.readLong();
 		Node node = current();
-		OpenState s = openOf(openId, node);
-		sequenced(s.getOwner(), openSeqid, Nfs4.OP_LOCK, () -> {
-			state.find(openId, node, true);
-			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
+		if( in.readBoolean() ) {
+			int openSeqid = in.readInt();
+			StateId openId = stateid();
+			int lockSeqid = in.readInt();
+			long clientid = in.readLong();
+			byte[] owner = in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
+			OpenState open = openOf(openId, node);
+			sequenced(open.getOwner(), openSeqid, Nfs4.OP_LOCK, () -> {
+				state.find(openId, node, true);
+				if( !open.getOwner().isConfirmed() ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "open not confirmed");
+				}
+				if( clientid != open.getOwner().getClient().getClientid() ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "lock-owner of another client");
+				}
+				LockOwner lo = state.lockOwner(open.getOwner().getClient(), owner, lockSeqid);
+				synchronized (lo) {
+					LockState l = state.lockState(lo, open);
+					try {
+						takeLock(l, locktype, reclaim, offset, length);
+					} catch (Nfs4Exception e) {
+						state.forgetIfUnused(l);
+						throw e;
+					} finally {
+						// the lock-owner's next seqid is lock_seqid+1 either way
+						lo.done(lockSeqid, Nfs4.OP_LOCK, null, null);
+					}
+				}
+				return null;
+			});
+		} else {
+			StateId lockId = stateid();
+			int lockSeqid = in.readInt();
+			LockState l = state.findLock(lockId, node, false);
+			sequenced(l.getOwner(), lockSeqid, Nfs4.OP_LOCK, () -> {
+				state.findLock(lockId, node, true);
+				takeLock(l, locktype, reclaim, offset, length);
+				return null;
+			});
+		}
+	}
+
+	private void takeLock(LockState l, int locktype, boolean reclaim, long offset, long length)
+			throws Nfs4Exception, IOException {
+		boolean write = isWrite(locktype);
+		currentRegular();
+		if( reclaim ) {
+			// no grace period (D21)
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE);
+		}
+		int need = write ? Nfs4.OPEN4_SHARE_ACCESS_WRITE : Nfs4.OPEN4_SHARE_ACCESS_READ;
+		if( (l.getOpen().getAccess() & need) == 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_OPENMODE, "lock type needs the open's "+(write ? "write" : "read")+" access");
+		}
+		state.lock(l, write, offset, StateManager.end(offset, length));
+		writeStateid(l.stateId());
+	}
+
+	private void lockt() throws Nfs4Exception, IOException {
+		int locktype = in.readInt();
+		long offset = in.readLong();
+		long length = in.readLong();
+		long clientid = in.readLong();
+		byte[] owner = in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
+		Node node = current();
+		boolean write = isWrite(locktype);
+		currentRegular();
+		ClientRecord c = state.renew(clientid);
+		LockDeniedException denied = state.test(node, c, owner, write, offset, StateManager.end(offset, length));
+		if( denied != null ) {
+			throw denied;
+		}
+	}
+
+	private void locku() throws Nfs4Exception, IOException {
+		int locktype = in.readInt();
+		int seqid = in.readInt();
+		StateId lockId = stateid();
+		long offset = in.readLong();
+		long length = in.readLong();
+		Node node = current();
+		LockState l = state.findLock(lockId, node, false);
+		sequenced(l.getOwner(), seqid, Nfs4.OP_LOCKU, () -> {
+			state.findLock(lockId, node, true);
+			isWrite(locktype);
+			state.unlock(l, offset, StateManager.end(offset, length));
+			writeStateid(l.stateId());
+			return null;
 		});
+	}
+
+	private void releaseLockOwner() throws Nfs4Exception, IOException {
+		long clientid = in.readLong();
+		byte[] owner = in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
+		state.releaseLockOwner(state.renew(clientid), owner);
 	}
 
 	private void close() throws Nfs4Exception, IOException {

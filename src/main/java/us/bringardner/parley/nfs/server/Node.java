@@ -40,6 +40,8 @@ public final class Node {
 	private volatile long changes;
 	/** The opens of this file, guarded by the StateManager. */
 	final List<StateManager.OpenState> opens = new ArrayList<StateManager.OpenState>();
+	/** The lock states of this file (decision D17), guarded by the StateManager. */
+	final List<StateManager.LockState> locks = new ArrayList<StateManager.LockState>();
 
 	Node(long fileid, String path) {
 		this.fileid = fileid;

@@ -42,8 +42,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 
 /**
- * Client and open state (RFC 7530 sections 9 and 16): client IDs and their leases, open-owners
- * and their sequence numbers, opens and their share reservations.
+ * Client, open and lock state (RFC 7530 sections 9 and 16): client IDs and their leases,
+ * open-owners and lock-owners and their sequence numbers, opens and their share reservations,
+ * and byte-range locks (decisions D17 to D22: kept here only, advisory, no waiting).
  * <p>
  * Nothing is kept on disk (decision D7): after a restart every client ID and stateid is stale,
  * clients start over with SETCLIENTID, and there is no grace period, so an open can't be
@@ -67,6 +68,7 @@ public class StateManager {
 	private final Map<Long, ClientRecord> unconfirmedById = new HashMap<Long, ClientRecord>();
 	private final Map<String, ClientRecord> unconfirmedByName = new HashMap<String, ClientRecord>();
 	private final Map<String, OpenState> states = new HashMap<String, OpenState>();
+	private final Map<String, LockState> lockStates = new HashMap<String, LockState>();
 	private final Set<Integer> expired = new LinkedHashSet<Integer>();
 
 	/**
@@ -102,6 +104,8 @@ public class StateManager {
 		volatile long lastRenew;
 		/** open-owners by owner, guarded by the StateManager */
 		Map<String, OpenOwner> owners = new HashMap<String, OpenOwner>();
+		/** lock-owners by owner, guarded by the StateManager */
+		Map<String, LockOwner> lockOwners = new HashMap<String, LockOwner>();
 
 		ClientRecord(long clientid, byte[] verifier, String name, String principal, byte[] confirmVerifier,
 				String cbNetid, String cbAddr) {
@@ -129,21 +133,20 @@ public class StateManager {
 		}
 	}
 
-	/** An open-owner: the opens it makes are sequenced by its seqid. */
-	public static final class OpenOwner {
+	/**
+	 * An owner whose operations are sequenced by its seqid (RFC 7530 section 9.1.7): an
+	 * open-owner or a lock-owner.
+	 */
+	public abstract static class SeqOwner {
 		final ClientRecord client;
 		final String key;
 		int seqid;
-		boolean confirmed;
 		/** The last seqid operation's result (status and body), for a retransmission. */
 		byte[] lastResult;
 		int lastOp;
 		Node lastFh;
-		/** An open closed by the last operation, kept so a retransmitted CLOSE finds it. */
-		OpenState lastClosed;
-		final Set<OpenState> opens = new LinkedHashSet<OpenState>();
 
-		OpenOwner(ClientRecord client, String key, int seqid) {
+		SeqOwner(ClientRecord client, String key, int seqid) {
 			this.client = client;
 			this.key = key;
 			this.seqid = seqid-1;
@@ -180,12 +183,119 @@ public class StateManager {
 			return lastFh;
 		}
 
+		public ClientRecord getClient() {
+			return client;
+		}
+
+		/** @return the owner as LOCK4denied and LOCKT name it: its bytes */
+		public byte[] getOwnerBytes() {
+			return key.getBytes(StandardCharsets.ISO_8859_1);
+		}
+	}
+
+	/** An open-owner: the opens it makes are sequenced by its seqid. */
+	public static final class OpenOwner extends SeqOwner {
+		boolean confirmed;
+		/** An open closed by the last operation, kept so a retransmitted CLOSE finds it. */
+		OpenState lastClosed;
+		final Set<OpenState> opens = new LinkedHashSet<OpenState>();
+
+		OpenOwner(ClientRecord client, String key, int seqid) {
+			super(client, key, seqid);
+		}
+
 		public boolean isConfirmed() {
 			return confirmed;
 		}
+	}
 
-		public ClientRecord getClient() {
-			return client;
+	/** A lock-owner (decision D17): its byte-range locks, one lock state per file. */
+	public static final class LockOwner extends SeqOwner {
+		final Map<Node, LockState> states = new HashMap<Node, LockState>();
+
+		LockOwner(ClientRecord client, String key, int seqid) {
+			super(client, key, seqid);
+		}
+
+		boolean holdsLocks() {
+			for (LockState s : states.values()) {
+				if( !s.ranges.isEmpty() ) {
+					return true;
+				}
+			}
+			return false;
+		}
+	}
+
+	/** A locked byte range, from start up to (not including) end; end -1 is the largest offset. */
+	static final class Range {
+		final long start;
+		final long end;
+		final boolean write;
+
+		Range(long start, long end, boolean write) {
+			this.start = start;
+			this.end = end;
+			this.write = write;
+		}
+
+		boolean overlaps(long s, long e) {
+			return Long.compareUnsigned(start, e) < 0 && Long.compareUnsigned(s, end) < 0;
+		}
+
+		/** @return the length as LOCK4denied gives it: all ones to the end of the file */
+		long length() {
+			return end == -1L ? -1L : end-start;
+		}
+	}
+
+	/** A lock-owner's locks on one file, under one open; its stateid is the lock stateid. */
+	public static final class LockState {
+		final byte[] other;
+		final LockOwner owner;
+		final OpenState open;
+		final Node node;
+		volatile int seqid;
+		boolean closed;
+		/** sorted by start, never overlapping (guarded by the StateManager) */
+		final List<Range> ranges = new ArrayList<Range>();
+
+		LockState(byte[] other, LockOwner owner, OpenState open, Node node) {
+			this.other = other;
+			this.owner = owner;
+			this.open = open;
+			this.node = node;
+		}
+
+		public LockOwner getOwner() {
+			return owner;
+		}
+
+		public OpenState getOpen() {
+			return open;
+		}
+
+		public StateId stateId() {
+			return new StateId(seqid, other);
+		}
+	}
+
+	/** NFS4ERR_DENIED, with the lock that conflicts (LOCK4denied). */
+	public static class LockDeniedException extends Nfs4Exception {
+		private static final long serialVersionUID = 1L;
+		public final long offset;
+		public final long length;
+		public final boolean write;
+		public final long clientid;
+		public final byte[] owner;
+
+		LockDeniedException(Range r, SeqOwner holder) {
+			super(Nfs4.NFS4ERR_DENIED);
+			this.offset = r.start;
+			this.length = r.length();
+			this.write = r.write;
+			this.clientid = holder.client.clientid;
+			this.owner = holder.getOwnerBytes();
 		}
 	}
 
@@ -353,7 +463,7 @@ public class StateManager {
 	}
 
 	private boolean hasState(ClientRecord c) {
-		return !c.owners.isEmpty();
+		return !c.owners.isEmpty() || !c.lockOwners.isEmpty();
 	}
 
 	/**
@@ -466,16 +576,20 @@ public class StateManager {
 				mine.seqid++;
 				return mine;
 			}
-			ByteBuffer other = ByteBuffer.allocate(Nfs4.NFS4_OTHER_SIZE);
-			other.putInt(boot);
-			other.putInt((int) owner.client.clientid);
-			other.putInt(stateSeq.incrementAndGet());
-			OpenState ret = new OpenState(other.array(), owner, node, access, deny);
+			OpenState ret = new OpenState(newOther(owner.client), owner, node, access, deny);
 			node.opens.add(ret);
 			owner.opens.add(ret);
 			states.put(stateKey(ret.other), ret);
 			return ret;
 		}
+	}
+
+	private byte[] newOther(ClientRecord client) {
+		ByteBuffer other = ByteBuffer.allocate(Nfs4.NFS4_OTHER_SIZE);
+		other.putInt(boot);
+		other.putInt((int) client.clientid);
+		other.putInt(stateSeq.incrementAndGet());
+		return other.array();
 	}
 
 	/** Confirm an owner whose first OPEN said OPEN4_RESULT_CONFIRM. */
@@ -501,8 +615,23 @@ public class StateManager {
 		}
 	}
 
-	/** CLOSE */
-	public synchronized void close(OpenState state) {
+	/**
+	 * CLOSE: the lock states under the open go with it.
+	 * @throws Nfs4Exception NFS4ERR_LOCKS_HELD if a lock-owner still holds locks under it (D20)
+	 */
+	public synchronized void close(OpenState state) throws Nfs4Exception {
+		List<LockState> under = new ArrayList<LockState>();
+		for (LockState l : state.node.locks) {
+			if( l.open == state ) {
+				if( !l.ranges.isEmpty() ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_LOCKS_HELD);
+				}
+				under.add(l);
+			}
+		}
+		for (LockState l : under) {
+			dropLockState(l);
+		}
 		state.node.opens.remove(state);
 		state.closed = true;
 		state.seqid++;
@@ -576,6 +705,243 @@ public class StateManager {
 	}
 
 	/**
+	 * The open behind a stateid of a READ, WRITE or SETATTR: an open's stateid or a lock
+	 * stateid (RFC 7530 section 9.1.4), its seqid checked.
+	 */
+	public OpenState findIo(StateId id, Node node) throws Nfs4Exception {
+		LockState l;
+		synchronized (this) {
+			l = lockStates.get(stateKey(id.other));
+		}
+		if( l == null ) {
+			return find(id, node, true);
+		}
+		return findLock(id, node, true).open;
+	}
+
+	/**
+	 * Find the lock state a lock stateid names.
+	 * @param checkSeqid false to skip the seqid check (a retransmission has an old one)
+	 * @throws Nfs4Exception NFS4ERR_STALE_STATEID, NFS4ERR_EXPIRED, NFS4ERR_BAD_STATEID or NFS4ERR_OLD_STATEID
+	 */
+	public LockState findLock(StateId id, Node node, boolean checkSeqid) throws Nfs4Exception {
+		if( id.other.length != Nfs4.NFS4_OTHER_SIZE || id.isSpecial() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
+		}
+		ByteBuffer b = ByteBuffer.wrap(id.other);
+		int sboot = b.getInt();
+		int client = b.getInt();
+		if( sboot != boot ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE_STATEID);
+		}
+		LockState l;
+		int current;
+		synchronized (this) {
+			l = lockStates.get(stateKey(id.other));
+			if( l == null || l.closed ) {
+				throw new Nfs4Exception(l == null && expired.contains(client) ? Nfs4.NFS4ERR_EXPIRED : Nfs4.NFS4ERR_BAD_STATEID);
+			}
+			l.owner.client.lastRenew = System.currentTimeMillis();
+			current = l.seqid;
+		}
+		if( node != null && l.node != node ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "stateid of another file");
+		}
+		if( checkSeqid ) {
+			if( id.seqid - current > 0 ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
+			}
+			if( id.seqid != current ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_OLD_STATEID);
+			}
+		}
+		return l;
+	}
+
+	// ================================================================== locks (D17)
+
+	/**
+	 * The lock-owner a LOCK with open_to_lock_owner4 names, made if it is new; an existing one
+	 * takes the new lock_seqid (a client starts over after a LOCK that was denied).
+	 */
+	public synchronized LockOwner lockOwner(ClientRecord client, byte[] owner, int lockSeqid) {
+		String key = ownerKey(owner);
+		LockOwner ret = client.lockOwners.get(key);
+		if( ret == null ) {
+			ret = new LockOwner(client, key, lockSeqid);
+			client.lockOwners.put(key, ret);
+		} else {
+			ret.seqid = lockSeqid-1;
+			ret.lastResult = null;
+		}
+		return ret;
+	}
+
+	/** The owner's lock state on the open's file, made if it has none. */
+	public synchronized LockState lockState(LockOwner owner, OpenState open) throws Nfs4Exception {
+		LockState ret = owner.states.get(open.node);
+		if( ret != null ) {
+			if( ret.open != open ) {
+				// one lock state per lock-owner and file
+				throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "the lock-owner locks the file under another open");
+			}
+			return ret;
+		}
+		ret = new LockState(newOther(owner.client), owner, open, open.node);
+		owner.states.put(open.node, ret);
+		open.node.locks.add(ret);
+		lockStates.put(stateKey(ret.other), ret);
+		return ret;
+	}
+
+	/** Forget a lock state that never held a lock (its LOCK was denied: no stateid was given). */
+	public synchronized void forgetIfUnused(LockState l) {
+		if( l.ranges.isEmpty() && l.seqid == 0 ) {
+			dropLockState(l);
+		}
+	}
+
+	private void dropLockState(LockState l) {
+		l.closed = true;
+		l.ranges.clear();
+		l.node.locks.remove(l);
+		l.owner.states.remove(l.node);
+		lockStates.remove(stateKey(l.other));
+	}
+
+	/**
+	 * @return end of a range (exclusive), -1 for the largest offset
+	 * @throws Nfs4Exception NFS4ERR_INVAL for a length of 0 or one past 2^64
+	 */
+	public static long end(long offset, long length) throws Nfs4Exception {
+		if( length == -1L ) {
+			return -1L;
+		}
+		long end = offset+length;
+		if( length == 0 || Long.compareUnsigned(end, offset) <= 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "lock range");
+		}
+		return end;
+	}
+
+	/** @return a lock of another owner than mine that conflicts, or null */
+	private static LockDeniedException conflict(Node node, SeqOwner mine, boolean write, long start, long end) {
+		for (LockState l : node.locks) {
+			if( l.owner == mine ) {
+				continue;
+			}
+			for (Range r : l.ranges) {
+				if( (write || r.write) && r.overlaps(start, end) ) {
+					return new LockDeniedException(r, l.owner);
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * LOCK: take, upgrade or downgrade the range (POSIX: the new type replaces the owner's own
+	 * locks there).
+	 * @throws LockDeniedException NFS4ERR_DENIED if another owner's lock conflicts
+	 */
+	public synchronized void lock(LockState l, boolean write, long start, long end) throws Nfs4Exception {
+		if( l.closed ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
+		}
+		LockDeniedException denied = conflict(l.node, l.owner, write, start, end);
+		if( denied != null ) {
+			throw denied;
+		}
+		remove(l.ranges, start, end);
+		l.ranges.add(new Range(start, end, write));
+		merge(l.ranges);
+		l.seqid++;
+	}
+
+	/** LOCKU: unlock the range (a part of a lock splits it). */
+	public synchronized void unlock(LockState l, long start, long end) throws Nfs4Exception {
+		if( l.closed ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
+		}
+		remove(l.ranges, start, end);
+		l.seqid++;
+	}
+
+	/**
+	 * LOCKT
+	 * @return the conflicting lock, or null if the lock could be taken
+	 */
+	public synchronized LockDeniedException test(Node node, ClientRecord client, byte[] owner, boolean write, long start, long end) {
+		LockOwner mine = client.lockOwners.get(ownerKey(owner));
+		return conflict(node, mine, write, start, end);
+	}
+
+	/**
+	 * RELEASE_LOCKOWNER
+	 * @throws Nfs4Exception NFS4ERR_LOCKS_HELD if the owner still holds locks (D20)
+	 */
+	public synchronized void releaseLockOwner(ClientRecord client, byte[] owner) throws Nfs4Exception {
+		LockOwner o = client.lockOwners.get(ownerKey(owner));
+		if( o == null ) {
+			return;
+		}
+		if( o.holdsLocks() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_LOCKS_HELD);
+		}
+		dropLockOwner(o);
+	}
+
+	private void dropLockOwner(LockOwner o) {
+		for (LockState l : new ArrayList<LockState>(o.states.values())) {
+			dropLockState(l);
+		}
+		o.client.lockOwners.remove(o.key);
+	}
+
+	/** Take [start, end) out of sorted, non-overlapping ranges, splitting one that spans it. */
+	private static void remove(List<Range> ranges, long start, long end) {
+		List<Range> ret = new ArrayList<Range>();
+		for (Range r : ranges) {
+			if( !r.overlaps(start, end) ) {
+				ret.add(r);
+				continue;
+			}
+			if( Long.compareUnsigned(r.start, start) < 0 ) {
+				ret.add(new Range(r.start, start, r.write));
+			}
+			if( end != -1L && Long.compareUnsigned(end, r.end) < 0 ) {
+				ret.add(new Range(end, r.end, r.write));
+			}
+		}
+		ranges.clear();
+		ranges.addAll(ret);
+	}
+
+	/** Sort, and join neighbors of the same type. */
+	private static void merge(List<Range> ranges) {
+		ranges.sort((a, b) -> Long.compareUnsigned(a.start, b.start));
+		List<Range> ret = new ArrayList<Range>();
+		for (Range r : ranges) {
+			Range last = ret.isEmpty() ? null : ret.get(ret.size()-1);
+			if( last != null && last.write == r.write && last.end != -1L && last.end == r.start ) {
+				ret.set(ret.size()-1, new Range(last.start, r.end, r.write));
+			} else {
+				ret.add(r);
+			}
+		}
+		ranges.clear();
+		ranges.addAll(ret);
+	}
+
+	public synchronized int getLockCount() {
+		int ret = 0;
+		for (LockState l : lockStates.values()) {
+			ret += l.ranges.size();
+		}
+		return ret;
+	}
+
+	/**
 	 * Check an anonymous (special stateid) READ or WRITE against the file's share reservations.
 	 * @throws Nfs4Exception NFS4ERR_LOCKED if an open denies it
 	 */
@@ -640,6 +1006,10 @@ public class StateManager {
 
 	private List<Node> dropState(ClientRecord c) {
 		List<Node> ret = new ArrayList<Node>();
+		// the client's locks go with it (D20)
+		for (LockOwner o : new ArrayList<LockOwner>(c.lockOwners.values())) {
+			dropLockOwner(o);
+		}
 		for (OpenOwner o : new ArrayList<OpenOwner>(c.owners.values())) {
 			ret.addAll(dropOwner(o));
 		}
@@ -649,6 +1019,11 @@ public class StateManager {
 	private List<Node> dropOwner(OpenOwner o) {
 		List<Node> ret = new ArrayList<Node>();
 		for (OpenState s : new ArrayList<OpenState>(o.opens)) {
+			for (LockState l : new ArrayList<LockState>(s.node.locks)) {
+				if( l.open == s ) {
+					dropLockState(l);
+				}
+			}
 			s.node.opens.remove(s);
 			s.closed = true;
 			states.remove(stateKey(s.other));

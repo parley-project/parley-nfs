@@ -5,7 +5,7 @@ An NFS version 4.0 server ([RFC 7530](https://www.rfc-editor.org/rfc/rfc7530), X
 It shares one folder of any FileSource: a local folder, a memory file system, or any other
 parley-files provider.
 
-## Status: phase 1
+## Status: phases 1 and 2
 
 Supported:
 
@@ -15,13 +15,16 @@ Supported:
    (SETCLIENTID, SETCLIENTID_CONFIRM, RENEW), opens and share reservations (OPEN, OPEN_CONFIRM,
    OPEN_DOWNGRADE, CLOSE) and owner sequence numbers with replies saved for retransmissions.
 4. READ, WRITE (unstable or stable) and COMMIT through a random access stream kept open per file.
+5. Byte-range locks (LOCK, LOCKT, LOCKU, RELEASE_LOCKOWNER): shared and exclusive, per lock-owner,
+   advisory, kept by the server for its NFS clients only. A lock that can't be had is denied at once
+   (the client tries again); a client's locks go when its lease runs out; there is no reclaim after
+   a restart. On Linux both `flock` and `fcntl` locks work on the mount.
 
 Not yet (answered with NFS4ERR_NOTSUPP):
 
-1. Byte-range locks: LOCK, LOCKT, LOCKU, RELEASE_LOCKOWNER (phase 2).
-2. Delegations, ACLs and named attributes (phase 3).
-3. RPCSEC_GSS / Kerberos V5 (its own phase).
-4. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos.
+1. Delegations, ACLs and named attributes (phase 3).
+2. RPCSEC_GSS / Kerberos V5 (its own phase).
+3. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos.
 
 There is no stable storage of client state, so a restarted server has no grace period: clients
 start over with SETCLIENTID and can't reclaim opens.
@@ -66,9 +69,8 @@ whether to trust that.
 ## Testing
 
 `mvn test` runs the protocol tests against a memory file system with a small test client. The
-server has also been tried with libnfs (`nfs-ls`, `nfs-cat`, `nfs-cp`, `nfs-stat` with `?version=4`).
+server has also been tried with a Linux kernel mount (`tools/nfs-mount-test.sh`, run in the client) and libnfs (`nfs-ls`, `nfs-cat`, `nfs-cp`, `nfs-stat` with `?version=4`).
 
 It has also been run against pynfs's NFSv4.0 server tests (`nfs4.0/testserver.py ... all`). What still
-fails there is phase 2 and 3 work (LOCK, LOCKT, LOCKU, RELEASE_LOCKOWNER), objects a FileSource can't
-make (symbolic links, devices, sockets, fifos), and checks the server leaves to the user registry:
+fails there is objects a FileSource can't make (symbolic links, devices, sockets, fifos), and checks the server leaves to the user registry:
 UNIX mode bits (OPEN20, WRT19) and changing a file's owner (SATT18).
