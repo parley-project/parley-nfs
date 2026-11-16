@@ -66,6 +66,7 @@ public class Authorizer {
 	private final String anonymous;
 	private final String serverName;
 	private final long cacheMillis;
+	private final java.util.function.Consumer<String> refusals;
 	private final Map<String, Entry> cache = new ConcurrentHashMap<String, Entry>();
 
 	private static final class Entry {
@@ -86,6 +87,16 @@ public class Authorizer {
 	 * @param cacheMillis how long an answer is kept
 	 */
 	public Authorizer(UserRegistry registry, IdMap idMap, String anonymous, String serverName, long cacheMillis) {
+		this(registry, idMap, anonymous, serverName, cacheMillis, null);
+	}
+
+	/**
+	 * @param refusals told (once for each fresh answer, not each call) when a call is refused, so an
+	 * operator can see why without turning on debug logging; null for none
+	 */
+	public Authorizer(UserRegistry registry, IdMap idMap, String anonymous, String serverName, long cacheMillis,
+			java.util.function.Consumer<String> refusals) {
+		this.refusals = refusals;
 		this.registry = registry;
 		this.idMap = idMap;
 		this.anonymous = anonymous;
@@ -112,6 +123,9 @@ public class Authorizer {
 		if( e == null || e.until < now ) {
 			AuthorizationResult r = decide(export, caller, client, localPort, permission);
 			e = new Entry(r, now+cacheMillis);
+			if( refusals != null && !r.isAllowed() ) {
+				refusals.accept("Refused "+permission+" on "+export.getName()+" to "+caller+" from "+client+": "+r.getReason());
+			}
 			if( r.getStatus() != AuthorizationResult.Status.UNAVAILABLE ) {
 				if( cache.size() > 10000 ) {
 					prune(now);

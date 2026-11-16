@@ -2,6 +2,15 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Fixed (2026-11-16: found mounting with a user registry)
+
+- **The start-up warnings about `parley.nfs.*` settings are gone.** The module now lists its setting
+  names (`META-INF/parley/settings.list`), so parley-net's start-up check knows them.
+- **The "shares export" line was logged twice**, because `startAndWait` read the settings and then
+  the `start()` it calls read them again.
+- **A refused call is logged at INFO** (once for each cached answer), with the user and the reason.
+- **README:** with a registry, `parley.nfs.anonymous` is needed for a Linux mount to work.
+
 ### Changed (2026-11-16)
 
 - **`df` shows space.** space_avail, space_free and space_total come from the export's FileSource

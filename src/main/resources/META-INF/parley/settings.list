@@ -1,0 +1,18 @@
+# The settings parley-nfs reads, for the servers' start-up check (parley-net's KnownSettings:
+# the format is described there). Add a name here when code here starts reading it.
+# The server's prefix, so the framework's names (authenticationProvider, userFile, ...) are known under it
+prefix parley.nfs
+parley.nfs.configFile
+parley.nfs.port
+parley.nfs.export
+parley.nfs.exportName
+parley.nfs.readOnly
+parley.nfs.domain
+parley.nfs.leaseTime
+parley.nfs.ioSize
+parley.nfs.workerThreads
+parley.nfs.idmap
+parley.nfs.anonymous
+parley.nfs.authCacheTime
+parley.nfs.fileIdleTime
+parley.nfs.replayCacheSize
