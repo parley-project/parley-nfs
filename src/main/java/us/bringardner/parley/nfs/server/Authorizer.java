@@ -60,6 +60,9 @@ public class Authorizer {
 	/** How the server vouches for AUTH_SYS identities. */
 	public static final String VOUCHED_BY = "nfs-auth_sys";
 	public static final String METHOD = "auth_sys";
+	/** How the server vouches for a Kerberos principal's user (decision D36). */
+	public static final String VOUCHED_BY_GSS = "nfs-rpcsec_gss";
+	public static final String METHOD_GSS = "rpcsec_gss";
 
 	private final UserRegistry registry;
 	private final IdMap idMap;
@@ -118,7 +121,7 @@ public class Authorizer {
 			return;
 		}
 		String permission = write ? StandardPermissions.WRITE : StandardPermissions.READ;
-		String key = export.getName()+"|"+caller.getFlavor()+"|"+caller.getUid()+"|"+permission+"|"+client;
+		String key = export.getName()+"|"+caller.getStateKey()+"|"+permission+"|"+client;
 		long now = System.currentTimeMillis();
 		Entry e = cache.get(key);
 		if( e == null || e.until < now ) {
@@ -155,10 +158,13 @@ public class Authorizer {
 
 	private AuthorizationResult decide(Export export, Caller caller, InetAddress client, int localPort, String permission) {
 		String name = null;
-		if( caller.getFlavor() == Rpc.AUTH_SYS ) {
+		boolean gss = caller.getFlavor() == Rpc.RPCSEC_GSS;
+		if( gss ) {
+			name = caller.getUser();
+		} else if( caller.getFlavor() == Rpc.AUTH_SYS ) {
 			name = idMap == null ? null : idMap.userName(caller.getUid());
 		}
-		if( name == null ) {
+		if( name == null && !gss ) {
 			name = anonymous;
 		}
 		if( name == null ) {
@@ -168,11 +174,11 @@ public class Authorizer {
 		AuthenticationResult login;
 		try {
 			if( registry.supports(VouchedCredential.class, null) ) {
-				login = registry.authenticate(new VouchedCredential(name, VOUCHED_BY, requester));
+				login = registry.authenticate(new VouchedCredential(name, gss ? VOUCHED_BY_GSS : VOUCHED_BY, requester));
 			} else {
 				ParleyPrincipal user = registry.findUser(name);
 				login = user == null ? AuthenticationResult.refused("no user "+name)
-						: AuthenticationResult.authenticated(user, METHOD);
+						: AuthenticationResult.authenticated(user, gss ? METHOD_GSS : METHOD);
 			}
 		} catch (UserRegistryUnavailableException ex) {
 			return AuthorizationResult.unavailable(ex.getMessage());

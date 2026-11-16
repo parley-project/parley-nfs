@@ -104,6 +104,29 @@ unless the id map says so, so it acts as the anonymous user too. The id map is r
 starts; the registry's own user file is read again when it changes. A refused call is logged once
 for each answer (a minute, `parley.nfs.authCacheTime`) at INFO with the user and the reason.
 
+## Kerberos (RPCSEC_GSS)
+
+`parley.nfs.sec` lists the security flavors the server takes: `sys` (the default), `krb5`
+(authentication), `krb5i` (and a checksum of every call and reply) and `krb5p` (and encryption),
+for example `krb5p` alone, or `sys,krb5,krb5i,krb5p`. Any `krb5` flavor needs the server's own
+principal and its keys:
+
+| Setting | Meaning |
+|---|---|
+| `parley.nfs.sec` | default `sys`; a comma separated list of `sys`, `krb5`, `krb5i`, `krb5p` |
+| `parley.nfs.krb5.principal` | the server's principal, `nfs/<host name>@<REALM>` |
+| `parley.nfs.krb5.keytab` | the file with that principal's keys |
+
+The realm and the KDC come from the JVM's Kerberos configuration (`/etc/krb5.conf`, or
+`-Djava.security.krb5.conf=`). It is Java's own JGSS underneath; nothing else is needed.
+
+A client's Kerberos principal `alice@EXAMPLE.COM` is the user `alice` when the realm is the
+server's own (a principal of another realm keeps its whole name); that user is then looked up in
+the registry and its `read` and `write` permissions are checked on each export, as for AUTH_SYS,
+but with nothing to map: the id map isn't used, and the anonymous user never stands in for a
+Kerberos principal. SECINFO lists the flavors taken, strongest first. A context lasts as long as
+its ticket, or until the client destroys it.
+
 ## Testing
 
 `mvn test` runs the protocol tests against a memory file system with a small test client. The

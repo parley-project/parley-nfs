@@ -2,6 +2,16 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-16: Kerberos)
+
+- **RPCSEC_GSS with Kerberos V5 (RFC 2203), all three levels: `krb5`, `krb5i`, `krb5p`.** Set
+  `parley.nfs.sec`, `parley.nfs.krb5.principal` and `parley.nfs.krb5.keytab`; `sys` stays the default.
+  Built on Java's JGSS: INIT and CONTINUE_INIT, DATA with a sequence window of 128, DESTROY, context
+  expiry with the ticket, checksummed verifiers, integrity and privacy bodies. A principal of the
+  server's own realm is the registry user without the realm. SECINFO lists the flavors taken,
+  strongest first. A sent-again COMPOUND is answered from the replay cache with a new sequence number.
+  Tested with an Apache Kerby KDC (a test dependency) and a JGSS client.
+
 ### Added (2026-11-16: more than one export)
 
 - **Several exports in a read-only folder of exports (RFC 7530 section 7).** `parley.nfs.exports`

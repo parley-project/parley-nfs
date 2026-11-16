@@ -60,6 +60,9 @@ public final class Rpc {
 	public static final int AUTH_BADVERF = 3;
 	public static final int AUTH_REJECTEDVERF = 4;
 	public static final int AUTH_TOOWEAK = 5;
+	// RPCSEC_GSS (RFC 2203 section 5.1)
+	public static final int RPCSEC_GSS_CREDPROBLEM = 13;
+	public static final int RPCSEC_GSS_CTXPROBLEM = 14;
 
 	// auth_flavor
 	public static final int AUTH_NONE = 0;
@@ -97,6 +100,16 @@ public final class Rpc {
 	}
 
 	/** PROG_MISMATCH with the versions supported. */
+	/** An accepted reply whose verifier is not AUTH_NONE (RPCSEC_GSS: a checksum of the sequence number). */
+	public static XdrEncoder startAccepted(int xid, int verifierFlavor, byte[] verifier, int acceptStat, int initialSize) {
+		XdrEncoder ret = startReply(xid, initialSize);
+		ret.writeInt(MSG_ACCEPTED);
+		ret.writeInt(verifierFlavor);
+		ret.writeOpaque(verifier);
+		ret.writeInt(acceptStat);
+		return ret;
+	}
+
 	public static XdrEncoder progMismatch(int xid, int low, int high) {
 		XdrEncoder ret = startAccepted(xid, PROG_MISMATCH, 64);
 		ret.writeInt(low);

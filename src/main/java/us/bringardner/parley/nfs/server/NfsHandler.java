@@ -28,11 +28,15 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
+
+import org.ietf.jgss.GSSException;
 
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.rpc.AuthSys;
 import us.bringardner.parley.nfs.rpc.Rpc;
 import us.bringardner.parley.nfs.rpc.RpcCall;
+import us.bringardner.parley.nfs.rpc.XdrDecoder;
 import us.bringardner.parley.nfs.rpc.XdrEncoder;
 import us.bringardner.parley.nfs.rpc.XdrException;
 import us.bringardner.parley.net.nio.INioConnection;
@@ -85,6 +89,7 @@ public class NfsHandler implements INioHandler {
 			return Rpc.rpcMismatch(xid);
 		}
 		Caller caller;
+		GssCall gc = null;
 		switch (call.getCredentialFlavor()) {
 		case Rpc.AUTH_NONE:
 			if( !server.isAuthNoneAllowed() ) {
@@ -93,21 +98,44 @@ public class NfsHandler implements INioHandler {
 			caller = Caller.none();
 			break;
 		case Rpc.AUTH_SYS:
+			if( !server.allowsSec(NfsServer.SEC_SYS) ) {
+				return Rpc.authError(xid, Rpc.AUTH_TOOWEAK);
+			}
 			try {
 				caller = new Caller(Rpc.AUTH_SYS, AuthSys.decode(call.getCredentialBody()));
 			} catch (XdrException e) {
 				return Rpc.authError(xid, Rpc.AUTH_BADCRED);
 			}
 			break;
+		case Rpc.RPCSEC_GSS:
+			gc = new GssCall();
+			XdrEncoder early = gssAuthenticate(call, whole, gc);
+			if( early != null || gc.dropped ) {
+				return early;
+			}
+			if( gc.ctx == null ) {
+				// the credential was the whole of the call (DESTROY): it was answered
+				return gc.answer;
+			}
+			caller = Caller.gss(gc.ctx.getPrincipal(), gc.ctx.getUser());
+			break;
 		default:
-			// RPCSEC_GSS is a later phase (decision D2)
 			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
 		}
 		if( call.getProgram() != Nfs4.PROGRAM ) {
-			return Rpc.startAccepted(xid, Rpc.PROG_UNAVAIL, 64);
+			return accepted(xid, gc, Rpc.PROG_UNAVAIL, 64);
 		}
 		if( call.getVersion() != Nfs4.VERSION ) {
+			if( gc != null ) {
+				XdrEncoder r = accepted(xid, gc, Rpc.PROG_MISMATCH, 64);
+				r.writeInt(Nfs4.VERSION);
+				r.writeInt(Nfs4.VERSION);
+				return r;
+			}
 			return Rpc.progMismatch(xid, Nfs4.VERSION, Nfs4.VERSION);
+		}
+		if( gc != null ) {
+			return gssProcedure(connection, call, caller, gc);
 		}
 		switch (call.getProcedure()) {
 		case Nfs4.PROC_NULL:
@@ -141,6 +169,263 @@ public class NfsHandler implements INioHandler {
 		default:
 			return Rpc.startAccepted(xid, Rpc.PROC_UNAVAIL, 64);
 		}
+	}
+
+
+	// ================================================================ RPCSEC_GSS (RFC 2203)
+
+	/** What a RPCSEC_GSS call is: its context and how its arguments and results are protected. */
+	private static final class GssCall {
+		GssServer.Context ctx;
+		long seq;
+		int service;
+		byte[] verifier = new byte[0];
+		XdrDecoder args;
+		/** the call is to get no answer */
+		boolean dropped;
+		/** the answer to a call that needs no procedure (DESTROY) */
+		XdrEncoder answer;
+	}
+
+	private static byte[] seqBytes(long seq) {
+		return new byte[] { (byte) (seq >> 24), (byte) (seq >> 16), (byte) (seq >> 8), (byte) seq };
+	}
+
+	/** An accepted reply: a RPCSEC_GSS call's has the checksum of its sequence number as the verifier. */
+	private static XdrEncoder accepted(int xid, GssCall gc, int stat, int size) {
+		if( gc == null ) {
+			return Rpc.startAccepted(xid, stat, size);
+		}
+		return Rpc.startAccepted(xid, Rpc.RPCSEC_GSS, gc.verifier, stat, size);
+	}
+
+	/**
+	 * Check a RPCSEC_GSS call's credential and verifier, and take it through INIT and DESTROY.
+	 *
+	 * @return a reply to send now (INIT, a refusal), else null: the call carries on with {@code gc}
+	 * set, or is dropped when {@code gc.dropped}
+	 */
+	private XdrEncoder gssAuthenticate(RpcCall call, ByteBuffer whole, GssCall gc) {
+		int xid = call.getXid();
+		GssServer gs = server.getGss();
+		if( gs == null ) {
+			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+		}
+		long version;
+		int proc;
+		int service;
+		byte[] handle;
+		try {
+			XdrDecoder cd = new XdrDecoder(call.getCredentialBody());
+			version = cd.readUnsignedInt();
+			proc = cd.readInt();
+			gc.seq = cd.readUnsignedInt();
+			service = cd.readInt();
+			handle = cd.readOpaque(Rpc.MAX_AUTH_BYTES);
+		} catch (XdrException e) {
+			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+		}
+		if( version != 1 ) {
+			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+		}
+		if( proc == GssServer.PROC_INIT || proc == GssServer.PROC_CONTINUE_INIT ) {
+			return gssInit(call, proc == GssServer.PROC_INIT ? new byte[0] : handle, gs);
+		}
+		if( proc != GssServer.PROC_DATA && proc != GssServer.PROC_DESTROY ) {
+			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+		}
+		GssServer.Context ctx = gs.find(handle);
+		if( ctx == null ) {
+			return Rpc.authError(xid, Rpc.RPCSEC_GSS_CREDPROBLEM);
+		}
+		if( call.getVerifierFlavor() != Rpc.RPCSEC_GSS
+				|| !ctx.verifyMic(call.getHeaderThroughCredential(), call.getVerifierBody()) ) {
+			return Rpc.authError(xid, Rpc.AUTH_BADVERF);
+		}
+		if( gc.seq >= GssServer.MAXSEQ ) {
+			gs.destroy(ctx);
+			return Rpc.authError(xid, Rpc.RPCSEC_GSS_CTXPROBLEM);
+		}
+		if( !ctx.acceptSeq(gc.seq) ) {
+			// a repeat of a call, or one too old: it is not answered (RFC 2203 section 5.3.3.1)
+			server.logDebug(() -> "RPCSEC_GSS call "+Integer.toUnsignedString(xid)+" from "+ctx.getPrincipal()
+				+": sequence number "+gc.seq+" is not new, dropped");
+			gc.dropped = true;
+			return null;
+		}
+		try {
+			gc.verifier = ctx.mic(seqBytes(gc.seq));
+		} catch (GSSException e) {
+			server.logDebug(() -> "RPCSEC_GSS checksum failed: "+e.getMessage());
+			gc.dropped = true;
+			return null;
+		}
+		if( proc == GssServer.PROC_DESTROY ) {
+			gs.destroy(ctx);
+			gc.answer = accepted(xid, gc, Rpc.SUCCESS, 64);
+			return null;
+		}
+		if( service != GssServer.SVC_NONE && service != GssServer.SVC_INTEGRITY && service != GssServer.SVC_PRIVACY ) {
+			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+		}
+		String flavor = service == GssServer.SVC_PRIVACY ? NfsServer.SEC_KRB5P
+				: service == GssServer.SVC_INTEGRITY ? NfsServer.SEC_KRB5I : NfsServer.SEC_KRB5;
+		if( !server.allowsSec(flavor) ) {
+			return Rpc.authError(xid, Rpc.AUTH_TOOWEAK);
+		}
+		gc.ctx = ctx;
+		gc.service = service;
+		gc.args = call.getArguments();
+		return null;
+	}
+
+	/** INIT and CONTINUE_INIT: the client's token goes to the Kerberos exchange, its answer back. */
+	private XdrEncoder gssInit(RpcCall call, byte[] handle, GssServer gs) {
+		int xid = call.getXid();
+		byte[] token;
+		try {
+			token = call.getArguments().readOpaque(call.getArguments().remaining());
+		} catch (XdrException e) {
+			return Rpc.startAccepted(xid, Rpc.GARBAGE_ARGS, 64);
+		}
+		gs.sweep(System.currentTimeMillis());
+		GssServer.InitResult r = gs.init(handle, token);
+		byte[] verifier = new byte[0];
+		int flavor = Rpc.AUTH_NONE;
+		if( r.major == GssServer.GSS_S_COMPLETE && r.context != null ) {
+			try {
+				verifier = r.context.mic(seqBytes(GssServer.SEQ_WINDOW));
+				flavor = Rpc.RPCSEC_GSS;
+			} catch (GSSException e) {
+				return Rpc.startAccepted(xid, Rpc.SYSTEM_ERR, 64);
+			}
+			server.logInfo("Kerberos context for "+r.context.getPrincipal()+" (user "+r.context.getUser()+")");
+		} else if( r.major != GssServer.GSS_S_CONTINUE_NEEDED ) {
+			server.logInfo("Kerberos context refused: major "+Integer.toHexString(r.major)+" minor "+r.minor);
+		}
+		XdrEncoder out = Rpc.startAccepted(xid, flavor, verifier, Rpc.SUCCESS, 256+r.token.length);
+		out.writeOpaque(r.handle);
+		out.writeUnsignedInt(r.major & 0xFFFFFFFFL);
+		out.writeUnsignedInt(r.minor & 0xFFFFFFFFL);
+		out.writeInt(GssServer.SEQ_WINDOW);
+		out.writeOpaque(r.token);
+		return out;
+	}
+
+	/** Run a RPCSEC_GSS DATA call: unwrap its arguments, run it, wrap the results as the context's service asks. */
+	private XdrEncoder gssProcedure(INioConnection connection, RpcCall call, Caller caller, GssCall gc) {
+		int xid = call.getXid();
+		byte[] plain;
+		try {
+			plain = gssArguments(gc);
+		} catch (XdrException | GSSException e) {
+			server.logDebug(() -> "RPCSEC_GSS arguments of "+Integer.toUnsignedString(xid)+" don't check: "+e.getMessage());
+			return accepted(xid, gc, Rpc.GARBAGE_ARGS, 64);
+		}
+		byte[] results;
+		switch (call.getProcedure()) {
+		case Nfs4.PROC_NULL:
+			results = new byte[0];
+			break;
+		case Nfs4.PROC_COMPOUND:
+			InetAddress from = address(connection.getRemoteAddress());
+			ReplayCache cache = server.getReplayCache();
+			// a sent-again call has a new sequence number, so the saved results are the plain ones
+			ByteBuffer key = null;
+			byte[] saved = null;
+			if( cache != null ) {
+				byte[] h = gc.ctx.getHandle();
+				byte[] k = Arrays.copyOf(h, h.length+plain.length);
+				System.arraycopy(plain, 0, k, h.length, plain.length);
+				key = ByteBuffer.wrap(k);
+				saved = cache.find(from, xid, key);
+			}
+			if( saved != null ) {
+				server.logDebug(() -> "Connection "+connection.getId()+": xid "+Integer.toUnsignedString(xid)
+					+" sent again, its saved reply is sent");
+				results = saved;
+			} else {
+				XdrEncoder body = new XdrEncoder(1024);
+				Compound compound = new Compound(server, caller, from, port(connection.getLocalAddress()));
+				try {
+					compound.run(new XdrDecoder(plain), body);
+				} catch (XdrException e) {
+					return accepted(xid, gc, Rpc.GARBAGE_ARGS, 64);
+				}
+				results = body.toByteArray();
+				if( cache != null && compound.isNonIdempotent() ) {
+					cache.save(from, xid, key, results);
+				}
+			}
+			break;
+		default:
+			return accepted(xid, gc, Rpc.PROC_UNAVAIL, 64);
+		}
+		try {
+			byte[] seq = seqBytes(gc.seq);
+			XdrEncoder reply;
+			switch (gc.service) {
+			case GssServer.SVC_INTEGRITY: {
+				byte[] data = new byte[4+results.length];
+				System.arraycopy(seq, 0, data, 0, 4);
+				System.arraycopy(results, 0, data, 4, results.length);
+				byte[] mic = gc.ctx.mic(data);
+				reply = accepted(xid, gc, Rpc.SUCCESS, data.length+mic.length+64);
+				reply.writeOpaque(data);
+				reply.writeOpaque(mic);
+				break;
+			}
+			case GssServer.SVC_PRIVACY: {
+				byte[] data = new byte[4+results.length];
+				System.arraycopy(seq, 0, data, 0, 4);
+				System.arraycopy(results, 0, data, 4, results.length);
+				byte[] token = gc.ctx.wrap(data);
+				reply = accepted(xid, gc, Rpc.SUCCESS, token.length+64);
+				reply.writeOpaque(token);
+				break;
+			}
+			default:
+				reply = accepted(xid, gc, Rpc.SUCCESS, results.length+64);
+				reply.writeRaw(results, 0, results.length);
+			}
+			return reply;
+		} catch (GSSException e) {
+			server.logDebug(() -> "RPCSEC_GSS protecting the results of "+Integer.toUnsignedString(xid)+" failed: "+e.getMessage());
+			return null;
+		}
+	}
+
+	/** @return a call's arguments with the context's protection taken off (RFC 2203 section 5.3.2) */
+	private byte[] gssArguments(GssCall gc) throws XdrException, GSSException {
+		XdrDecoder in = gc.args;
+		int max = in.remaining();
+		byte[] data;
+		switch (gc.service) {
+		case GssServer.SVC_INTEGRITY:
+			data = in.readOpaque(max);
+			byte[] mic = in.readOpaque(max);
+			if( !gc.ctx.verifyMic(data, mic) ) {
+				throw new GSSException(GSSException.BAD_MIC);
+			}
+			break;
+		case GssServer.SVC_PRIVACY:
+			data = gc.ctx.unwrap(in.readOpaque(max));
+			break;
+		default:
+			return rest(in);
+		}
+		if( data.length < 4 ) {
+			throw new XdrException("protected arguments too short");
+		}
+		long seq = ((data[0] & 0xFFL) << 24) | ((data[1] & 0xFFL) << 16) | ((data[2] & 0xFFL) << 8) | (data[3] & 0xFFL);
+		if( seq != gc.seq ) {
+			throw new XdrException("protected arguments have sequence number "+seq+", the credential "+gc.seq);
+		}
+		return Arrays.copyOfRange(data, 4, data.length);
+	}
+
+	private static byte[] rest(XdrDecoder in) throws XdrException {
+		return in.readFixedOpaque(in.remaining());
 	}
 
 	private static InetAddress address(SocketAddress a) {
