@@ -3,7 +3,11 @@
 # Exercise a parley-nfs mount from a Linux client (e.g. a Multipass VM).
 #
 #   ./nfs-mount-test.sh [mount point]        default /mnt/parley
+#   READ_UID=1001 DENIED_UID=1002 ./nfs-mount-test.sh
 #
+# With a user registry (docs: "Who may do what"), READ_UID is a uid the registry lets read the
+# export but not write it, and DENIED_UID one it refuses; each adds checks run with
+# sudo -n -u '#uid' (so the VM needs passwordless sudo, and no local user for the uid).
 # Run it as a normal user (not with sudo). Everything happens in a new folder under the
 # mount, which is removed at the end. Each check prints PASS or FAIL; checks of things the
 # server doesn't support (links, chown, fifos) pass when they fail with the message Linux
@@ -120,6 +124,32 @@ echo "== Space (df)"
 # the space is the export's FileSource's own; one that can't tell shows 0 (a local folder can)
 check "df shows the total size" sh -c "[ \$(df -B1 --output=size '$MNT' | tail -1 | tr -d ' ') -gt 0 ]"
 check "df shows free space"     sh -c "[ \$(df -B1 --output=avail '$MNT' | tail -1 | tr -d ' ') -gt 0 ]"
+
+echo "== Other users (a user registry)"
+if [ -z "${READ_UID:-}${DENIED_UID:-}" ]; then
+	echo "  (skipped: set READ_UID and/or DENIED_UID)"
+elif ! sudo -n true 2>/dev/null; then
+	echo "  (skipped: needs passwordless sudo)"
+else
+	# open the folder to everyone, so a refusal below is the registry's, not the file mode's
+	check "set up: a shared folder and file" sh -c "echo shared > '$WORK/shared.txt' && chmod 777 '$WORK' && chmod 666 '$WORK/shared.txt'"
+	if [ -n "${READ_UID:-}" ]; then
+		as_reader() { sudo -n -u "#$READ_UID" "$@"; }
+		check "uid $READ_UID can list the folder"  as_reader ls "$WORK"
+		check "uid $READ_UID can read a file"      sh -c "[ \"\$(sudo -n -u '#$READ_UID' cat '$WORK/shared.txt')\" = shared ]"
+		refused_with "uid $READ_UID can't write a file" "Permission denied" as_reader sh -c "echo x > '$WORK/by-reader.txt'"
+		refused_with "uid $READ_UID can't change a file" "Permission denied" as_reader sh -c "echo x >> '$WORK/shared.txt'"
+		refused_with "uid $READ_UID can't make a folder" "Permission denied" as_reader mkdir "$WORK/by-reader"
+		refused_with "uid $READ_UID can't remove a file" "Permission denied" as_reader rm "$WORK/shared.txt"
+		check "the file is as it was"             sh -c "[ \"\$(cat '$WORK/shared.txt')\" = shared ]"
+	fi
+	if [ -n "${DENIED_UID:-}" ]; then
+		as_denied() { sudo -n -u "#$DENIED_UID" "$@"; }
+		refused_with "uid $DENIED_UID can't list the folder" "Permission denied" as_denied ls "$WORK"
+		refused_with "uid $DENIED_UID can't read a file"     "Permission denied" as_denied cat "$WORK/shared.txt"
+		refused_with "uid $DENIED_UID can't write a file"    "Permission denied" as_denied sh -c "echo x > '$WORK/by-denied.txt'"
+	fi
+fi
 
 echo "== Locks"
 L="$WORK/lockfile"
