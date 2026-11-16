@@ -1056,7 +1056,12 @@ public class Compound {
 				if( !exists ) {
 					create(f, path);
 					dir.changed();
-					attrset = applyCreated(settings, export.getNodes().get(path), f);
+					Node made = export.getNodes().get(path);
+					if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
+						// before a mode without write is set (D16)
+						openForWrite(made, f);
+					}
+					attrset = applyCreated(settings, made, f);
 				} else if( settings != null && settings.size != null && settings.size == 0 ) {
 					// an existing file: only a size of 0 (truncate) counts, the other attributes
 					// are ignored (RFC 7530 section 16.16.5)
@@ -1072,6 +1077,10 @@ public class Compound {
 		}
 		Node node = export.getNodes().get(path);
 		OpenState s = state.open(owner, node, access, deny);
+		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
+			// a SETATTR of a mode without write after this OPEN doesn't stop its WRITEs (D16)
+			openForWrite(node, f);
+		}
 		if( truncate ) {
 			try {
 				files.setLength(node, f, 0);
@@ -1089,6 +1098,15 @@ public class Compound {
 		out.writeInt(Nfs4.OPEN_DELEGATE_NONE);
 		current = node;
 		return node;
+	}
+
+	private void openForWrite(Node node, FileSource f) {
+		try {
+			files.openForWrite(node, f);
+		} catch (IOException e) {
+			// WRITE opens it again and reports the error
+			server.logDebug(() -> f.getAbsolutePath()+" not opened for writing: "+e.getMessage());
+		}
 	}
 
 	private static void create(FileSource f, String path) throws IOException, Nfs4Exception {

@@ -787,6 +787,64 @@ public class NfsServerTest {
 		assertEquals(Nfs4.NFS4ERR_PERM, setOwner(c, fh, "1000"));
 	}
 
+	private static int setMode(TestClient c, byte[] fh, int mode) throws IOException {
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_SETATTR);
+		ops.args().writeInt(0).writeFixedOpaque(new byte[12])
+			.writeIntArray(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_MODE))
+			.writeOpaque(new XdrEncoder().writeInt(mode).toByteArray());
+		return c.compound(ops).status;
+	}
+
+	/**
+	 * Decision D16: an OPEN for writing may write whatever mode the file gets after it, as git
+	 * does (O_CREAT|O_EXCL with mode 0444, then write). Local files, where a mode without write
+	 * stops a new write stream (unless the test runs as root).
+	 */
+	@Test
+	public void openForWritingWritesAReadOnlyFile(@TempDir Path tmp) throws Exception {
+		root = new us.bringardner.parley.files.fileproxy.FileProxyFactory().createFileSource(tmp.toString());
+		server = new NfsServer("test.nfs.ro-mode", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+		long id = clientid(c, "client-ro-mode");
+
+		// the Linux client's way: OPEN (EXCLUSIVE4), SETATTR mode 0444, then WRITE
+		Opened o = open(c, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, id, "git", true, "obj1");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		confirm(c, o, 2);
+		assertEquals(Nfs4.NFS4_OK, setMode(c, o.fh, 0444));
+		assertEquals(Nfs4.NFS4_OK, write(c, o.fh, o, 0, bytes("object one"), Nfs4.UNSTABLE4));
+		assertEquals(Nfs4.NFS4_OK, close(c, o.fh, o, 3));
+		assertArrayEquals(bytes("object one"), Files.readAllBytes(tmp.resolve("obj1")));
+
+		// the mode given with OPEN (UNCHECKED4)
+		XdrEncoder args = new XdrEncoder();
+		args.writeInt(4).writeInt(Nfs4.OPEN4_SHARE_ACCESS_WRITE).writeInt(Nfs4.OPEN4_SHARE_DENY_NONE).writeLong(id)
+			.writeOpaque(bytes("git")).writeInt(Nfs4.OPEN4_CREATE).writeInt(Nfs4.UNCHECKED4)
+			.writeIntArray(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_MODE))
+			.writeOpaque(new XdrEncoder().writeInt(0444).toByteArray()).writeInt(Nfs4.CLAIM_NULL).writeString("obj2");
+		Ops ops = new Ops().putroot().op(Nfs4.OP_OPEN);
+		ops.args().write(args);
+		ops.getfh();
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_OPEN);
+		Opened o2 = new Opened();
+		o2.seqid = r.in.readInt();
+		o2.other = r.in.readFixedOpaque(12);
+		r.in.readBoolean();
+		r.in.readLong();
+		r.in.readLong();
+		r.in.readInt();
+		r.in.readIntArray(8);
+		r.in.readInt();
+		r.ok(Nfs4.OP_GETFH);
+		o2.fh = r.in.readOpaque(128);
+		assertEquals(Nfs4.NFS4_OK, write(c, o2.fh, o2, 0, bytes("object two"), Nfs4.FILE_SYNC4));
+		assertEquals(Nfs4.NFS4_OK, close(c, o2.fh, o2, 5));
+		assertArrayEquals(bytes("object two"), Files.readAllBytes(tmp.resolve("obj2")));
+	}
+
 	@Test
 	public void leaseExpires() throws Exception {
 		property("test.nfs.lease.leaseTime", "1s");

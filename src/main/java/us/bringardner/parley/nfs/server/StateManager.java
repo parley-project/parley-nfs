@@ -592,6 +592,16 @@ public class StateManager {
 		return !node.opens.isEmpty();
 	}
 
+	/** @return true if an open of the node has write access (its write stream stays open, D16) */
+	public synchronized boolean hasWriteOpen(Node node) {
+		for (OpenState s : node.opens) {
+			if( (s.access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	// ================================================================== leases
 
 	/**

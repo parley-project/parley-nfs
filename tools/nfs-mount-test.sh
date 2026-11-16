@@ -102,7 +102,8 @@ echo "        owner as the VM sees it: $(stat -c '%U:%G (%u:%g)' "$WORK/a.txt")"
 echo "== Not supported (should fail)"
 refused "symbolic link"         ln -s a.txt "$WORK/sym"
 refused "hard link"             ln "$WORK/a.txt" "$WORK/hard"
-refused "chown"                 chown "$(id -u)" "$WORK/a.txt"
+# root on the client may ask; the server keeps the owner (NFS4ERR_PERM)
+refused "chown (as root)"       sudo -n chown 0 "$WORK/a.txt"
 refused "fifo"                  mkfifo "$WORK/fifo"
 refused "lock (until phase 2)"  flock -n "$WORK/a.txt" true
 # the failed lock must not break the file's open state (BAD_SEQID before the pynfs fixes)

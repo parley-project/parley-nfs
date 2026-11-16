@@ -16,6 +16,12 @@
   (the lowest when the user has several), so a Linux client shows the owner it mapped instead of
   `nobody`; other owners are still sent as `name@domain`.
 
+### Fixed (found with a Linux client)
+
+- An OPEN for writing opens the file's write stream at once and keeps it while the file has an open
+  for writing, so it can write after the file gets a mode without write (git makes its objects with
+  mode 0444 and then writes them; the WRITEs failed with NFS4ERR_NOENT).
+
 ### Fixed (found by pynfs, the Linux NFS server tests)
 
 - OPEN creating a file with a size attribute makes the file that size; OPEN UNCHECKED4 of an existing
