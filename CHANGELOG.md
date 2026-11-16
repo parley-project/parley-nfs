@@ -9,6 +9,7 @@
 - **The "shares export" line was logged twice**, because `startAndWait` read the settings and then
   the `start()` it calls read them again.
 - **A refused call is logged at INFO** (once for each cached answer), with the user and the reason.
+- **`tools/nfs-mount-test.sh` checks other users:** with `READ_UID` (a uid the registry lets read but not write) and `DENIED_UID` (one it refuses) set, it runs checks as those uids with `sudo -n -u '#uid'`.
 - **README:** with a registry, `parley.nfs.anonymous` is needed for a Linux mount to work.
 
 ### Changed (2026-11-16)
