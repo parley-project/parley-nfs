@@ -6,7 +6,7 @@
 #
 # Run it as a normal user (not with sudo). Everything happens in a new folder under the
 # mount, which is removed at the end. Each check prints PASS or FAIL; checks of things the
-# server doesn't support yet (links, chown, locks) pass when they fail the expected way.
+# server doesn't support (links, chown, fifos) pass when they fail the expected way.
 # The exit status is the number of failures.
 #
 set -u
@@ -105,9 +105,58 @@ refused "hard link"             ln "$WORK/a.txt" "$WORK/hard"
 # root on the client may ask; the server keeps the owner (NFS4ERR_PERM)
 refused "chown (as root)"       sudo -n chown 0 "$WORK/a.txt"
 refused "fifo"                  mkfifo "$WORK/fifo"
-refused "lock (until phase 2)"  flock -n "$WORK/a.txt" true
-# the failed lock must not break the file's open state (BAD_SEQID before the pynfs fixes)
-check "open after a failed lock" sh -c "echo after >> '$WORK/a.txt' && tail -1 '$WORK/a.txt' | grep -q after"
+
+echo "== Locks"
+L="$WORK/lockfile"
+: > "$L"
+check "flock a file"            flock -n "$L" true
+flock "$L" sleep 3 &
+HOLDER=$!
+sleep 1
+check "a held lock blocks others" sh -c "! flock -n '$L' true"
+wait $HOLDER
+check "free once its holder ends" flock -n "$L" true
+# -o: only flock holds the lock (not the sleep it runs), so killing flock is killing the holder
+flock -o "$L" sleep 60 &
+HOLDER=$!
+sleep 1
+CHILD=$(pgrep -P $HOLDER)
+kill -9 $HOLDER
+wait $HOLDER 2>/dev/null
+[ -n "$CHILD" ] && kill $CHILD 2>/dev/null
+check "free once its holder is killed" flock -n "$L" true
+if command -v python3 > /dev/null; then
+	# byte ranges with fcntl: one process holds bytes 0-9, another can take 20-29 but not 5
+	python3 - "$L" > /dev/null 2>&1 <<'PY' &
+import fcntl, sys, time
+f = open(sys.argv[1], "r+")
+fcntl.lockf(f, fcntl.LOCK_EX, 10, 0)
+time.sleep(3)
+PY
+	HOLDER=$!
+	sleep 1
+	check "fcntl: an overlapping range is refused" python3 -c "
+import fcntl, sys
+f = open('$L', 'r+')
+try:
+    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, 5)
+except OSError:
+    sys.exit(0)
+sys.exit(1)"
+	check "fcntl: another range is free" python3 -c "
+import fcntl
+f = open('$L', 'r+')
+fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB, 10, 20)"
+	wait $HOLDER
+	check "sqlite database"     python3 -c "
+import sqlite3
+db = sqlite3.connect('$WORK/test.db')
+db.execute('create table t (n integer)')
+db.executemany('insert into t values (?)', [(i,) for i in range(1000)])
+db.commit()
+assert db.execute('select count(*), sum(n) from t').fetchone() == (1000, 499500)
+db.close()"
+fi
 
 echo "== Real-world use"
 if command -v git > /dev/null; then

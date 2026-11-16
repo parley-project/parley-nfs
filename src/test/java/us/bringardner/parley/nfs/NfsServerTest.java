@@ -641,13 +641,13 @@ public class NfsServerTest {
 		ops.args().writeInt(4).writeInt(Nfs4.OPEN4_SHARE_ACCESS_READ).writeInt(Nfs4.OPEN4_SHARE_DENY_READ);
 		assertEquals(Nfs4.NFS4ERR_INVAL, c.compound(ops).status);
 
-		// LOCK isn't supported, but counts as the open-owner's seqid 5 (LOCK16, OPDG11)
+		// a LOCK for a new lock-owner that fails counts as the open-owner's seqid 5 (LOCK16, OPDG11)
 		ops = new Ops().putfh(d.fh).op(Nfs4.OP_LOCK);
-		ops.args().writeInt(1 /* READ_LT */).writeBoolean(false).writeLong(0).writeLong(10).writeBoolean(true).writeInt(5);
+		ops.args().writeInt(Nfs4.READ_LT).writeBoolean(false).writeLong(0).writeLong(0 /* INVAL */).writeBoolean(true).writeInt(5);
 		d.write(ops.args());
 		ops.args().writeInt(0).writeLong(id).writeOpaque(bytes("lock-owner"));
 		r = c.compound(ops);
-		assertEquals(Nfs4.NFS4ERR_NOTSUPP, r.status);
+		assertEquals(Nfs4.NFS4ERR_INVAL, r.status);
 		assertEquals(Nfs4.NFS4_OK, close(c, d.fh, d, 6));
 
 		// ACCESS of a file: LOOKUP and DELETE mean nothing (ACC2r)
@@ -878,6 +878,224 @@ public class NfsServerTest {
 		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
 		assertEquals(Nfs4.NFS4_OK, close(c, o3.fh, o3, 7));
 		assertArrayEquals(bytes("object three"), Files.readAllBytes(tmp.resolve("obj3")));
+	}
+
+	/** A LOCK or LOCKT result: the lock stateid, or the lock that denied it. */
+	private static final class Locked {
+		int status;
+		Opened lock;
+		long offset;
+		long length;
+		int type;
+		long clientid;
+		String owner;
+	}
+
+	private static Locked lockResult(Result r, int op) throws IOException {
+		Locked ret = new Locked();
+		ret.status = r.next(op);
+		if( ret.status == Nfs4.NFS4_OK && op == Nfs4.OP_LOCK ) {
+			ret.lock = new Opened();
+			ret.lock.seqid = r.in.readInt();
+			ret.lock.other = r.in.readFixedOpaque(12);
+		} else if( ret.status == Nfs4.NFS4ERR_DENIED ) {
+			ret.offset = r.in.readLong();
+			ret.length = r.in.readLong();
+			ret.type = r.in.readInt();
+			ret.clientid = r.in.readLong();
+			ret.owner = new String(r.in.readOpaque(1024), StandardCharsets.UTF_8);
+		}
+		return ret;
+	}
+
+	/** LOCK for a new lock-owner (open_to_lock_owner4) */
+	private static Locked lockNew(TestClient c, byte[] fh, Opened open, int openSeqid, long clientid, String owner,
+			int type, long offset, long length) throws IOException {
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_LOCK);
+		ops.args().writeInt(type).writeBoolean(false).writeLong(offset).writeLong(length).writeBoolean(true).writeInt(openSeqid);
+		open.write(ops.args());
+		ops.args().writeInt(0).writeLong(clientid).writeOpaque(bytes(owner));
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTFH);
+		return lockResult(r, Nfs4.OP_LOCK);
+	}
+
+	/** LOCK of a lock-owner that has a lock stateid (exist_lock_owner4) */
+	private static Ops lockMoreOps(byte[] fh, Opened lock, int lockSeqid, int type, long offset, long length) {
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_LOCK);
+		ops.args().writeInt(type).writeBoolean(false).writeLong(offset).writeLong(length).writeBoolean(false);
+		lock.write(ops.args());
+		ops.args().writeInt(lockSeqid);
+		return ops;
+	}
+
+	private static Locked lockMore(TestClient c, byte[] fh, Opened lock, int lockSeqid, int type, long offset, long length)
+			throws IOException {
+		Result r = c.compound(lockMoreOps(fh, lock, lockSeqid, type, offset, length));
+		r.ok(Nfs4.OP_PUTFH);
+		Locked ret = lockResult(r, Nfs4.OP_LOCK);
+		if( ret.lock != null ) {
+			lock.seqid = ret.lock.seqid;
+		}
+		return ret;
+	}
+
+	private static int locku(TestClient c, byte[] fh, Opened lock, int lockSeqid, long offset, long length) throws IOException {
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_LOCKU);
+		ops.args().writeInt(Nfs4.WRITE_LT).writeInt(lockSeqid);
+		lock.write(ops.args());
+		ops.args().writeLong(offset).writeLong(length);
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTFH);
+		int status = r.next(Nfs4.OP_LOCKU);
+		if( status == Nfs4.NFS4_OK ) {
+			lock.seqid = r.in.readInt();
+			r.in.readFixedOpaque(12);
+		}
+		return status;
+	}
+
+	private static Locked lockt(TestClient c, byte[] fh, long clientid, String owner, int type, long offset, long length)
+			throws IOException {
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_LOCKT);
+		ops.args().writeInt(type).writeLong(offset).writeLong(length).writeLong(clientid).writeOpaque(bytes(owner));
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTFH);
+		return lockResult(r, Nfs4.OP_LOCKT);
+	}
+
+	private static int releaseLockOwner(TestClient c, long clientid, String owner) throws IOException {
+		Ops ops = new Ops().op(Nfs4.OP_RELEASE_LOCKOWNER);
+		ops.args().writeLong(clientid).writeOpaque(bytes(owner));
+		return c.compound(ops).status;
+	}
+
+	/** Decisions D17 to D21: byte-range locks between two clients. */
+	@Test
+	public void byteRangeLocks() throws Exception {
+		TestClient a = start("test.nfs.locks", false);
+		TestClient b = client();
+		long ida = clientid(a, "client-a");
+		long idb = clientid(b, "client-b");
+		Opened oa = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, oa, 2);
+		Opened ob = open(b, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, idb, "b", false, "f");
+		confirm(b, ob, 2);
+		byte[] fh = oa.fh;
+
+		// A write-locks [0, 100); the lock-owner's seqids start at 0 (lock_seqid), the stateid's at 1
+		Locked la = lockNew(a, fh, oa, 3, ida, "a-lock", Nfs4.WRITE_LT, 0, 100);
+		assertEquals(Nfs4.NFS4_OK, la.status);
+		assertEquals(1, la.lock.seqid);
+		Opened lockA = la.lock;
+
+		// B can't read-lock inside it: denied with A's lock
+		Locked lb = lockNew(b, fh, ob, 3, idb, "b-lock", Nfs4.READ_LT, 50, 10);
+		assertEquals(Nfs4.NFS4ERR_DENIED, lb.status);
+		assertEquals(0, lb.offset);
+		assertEquals(100, lb.length);
+		assertEquals(Nfs4.WRITE_LT, lb.type);
+		assertEquals(ida, lb.clientid);
+		assertEquals("a-lock", lb.owner);
+
+		// LOCKT
+		assertEquals(Nfs4.NFS4_OK, lockt(b, fh, idb, "b-lock", Nfs4.WRITE_LT, 100, 100).status);
+		assertEquals(Nfs4.NFS4ERR_DENIED, lockt(b, fh, idb, "b-lock", Nfs4.READ_LT, 99, 1).status);
+		// the owner's own locks don't conflict
+		assertEquals(Nfs4.NFS4_OK, lockt(a, fh, ida, "a-lock", Nfs4.WRITE_LT, 0, 100).status);
+
+		// unlocking the middle splits the lock: [0, 40) and [60, 100)
+		assertEquals(Nfs4.NFS4_OK, locku(a, fh, lockA, 1, 40, 20));
+		assertEquals(Nfs4.NFS4_OK, lockt(b, fh, idb, "b-lock", Nfs4.WRITE_LT, 45, 10).status);
+		Locked t = lockt(b, fh, idb, "b-lock", Nfs4.READ_LT, 30, 5);
+		assertEquals(Nfs4.NFS4ERR_DENIED, t.status);
+		assertEquals(0, t.offset);
+		assertEquals(40, t.length);
+		t = lockt(b, fh, idb, "b-lock", Nfs4.READ_LT, 70, 5);
+		assertEquals(60, t.offset);
+		assertEquals(40, t.length);
+
+		// downgrade [0, 40) to a read lock: B may read-lock there, not write-lock
+		assertEquals(Nfs4.NFS4_OK, lockMore(a, fh, lockA, 2, Nfs4.READ_LT, 0, 40).status);
+		lb = lockNew(b, fh, ob, 4, idb, "b-lock", Nfs4.READ_LT, 10, 10);
+		assertEquals(Nfs4.NFS4_OK, lb.status);
+		Opened lockB = lb.lock;
+		Locked denied = lockMore(b, fh, lockB, 1, Nfs4.WRITE_LT, 10, 10);
+		assertEquals(Nfs4.NFS4ERR_DENIED, denied.status);
+		assertEquals(Nfs4.READ_LT, denied.type);
+		// a retransmission of the denied LOCK is denied the same way
+		Result again = b.compoundAgain(lockMoreOps(fh, lockB, 1, Nfs4.WRITE_LT, 10, 10));
+		again.ok(Nfs4.OP_PUTFH);
+		Locked replayed = lockResult(again, Nfs4.OP_LOCK);
+		assertEquals(Nfs4.NFS4ERR_DENIED, replayed.status);
+		assertEquals(denied.offset, replayed.offset);
+		assertEquals("a-lock", replayed.owner);
+
+		// a lock to the end of the file (length all ones)
+		assertEquals(Nfs4.NFS4_OK, lockMore(a, fh, lockA, 3, Nfs4.WRITE_LT, 1000, -1L).status);
+		t = lockt(b, fh, idb, "b-lock", Nfs4.READ_LT, 1L << 40, 1);
+		assertEquals(Nfs4.NFS4ERR_DENIED, t.status);
+		assertEquals(1000, t.offset);
+		assertEquals(-1L, t.length);
+
+		// WRITE with the lock stateid
+		assertEquals(Nfs4.NFS4_OK, write(a, fh, lockA, 0, bytes("locked"), Nfs4.FILE_SYNC4));
+
+		// bad ranges and types
+		assertEquals(Nfs4.NFS4ERR_INVAL, lockMore(a, fh, lockA, 4, Nfs4.READ_LT, 0, 0).status);
+		assertEquals(Nfs4.NFS4ERR_INVAL, lockMore(a, fh, lockA, 5, Nfs4.READ_LT, -2L, 5).status);
+		assertEquals(Nfs4.NFS4ERR_INVAL, lockMore(a, fh, lockA, 6, 9, 0, 5).status);
+
+		// locks held: CLOSE and RELEASE_LOCKOWNER are refused (D20)
+		assertEquals(Nfs4.NFS4ERR_LOCKS_HELD, close(a, fh, oa, 4));
+		assertEquals(Nfs4.NFS4ERR_LOCKS_HELD, releaseLockOwner(a, ida, "a-lock"));
+		// unlock everything: both work
+		assertEquals(Nfs4.NFS4_OK, locku(a, fh, lockA, 7, 0, -1L));
+		assertEquals(Nfs4.NFS4_OK, lockt(b, fh, idb, "b-lock", Nfs4.WRITE_LT, 0, -1L).status);
+		assertEquals(Nfs4.NFS4_OK, releaseLockOwner(a, ida, "a-lock"));
+		assertEquals(Nfs4.NFS4_OK, close(a, fh, oa, 5));
+		// the released lock stateid is gone
+		assertEquals(Nfs4.NFS4ERR_BAD_STATEID, lockMore(a, fh, lockA, 8, Nfs4.READ_LT, 0, 1).status);
+	}
+
+	@Test
+	public void lockErrors() throws Exception {
+		TestClient a = start("test.nfs.lockerr", false);
+		long ida = clientid(a, "client-err");
+		Opened ro = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_READ, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, ro, 2);
+		// a write lock needs write access
+		assertEquals(Nfs4.NFS4ERR_OPENMODE, lockNew(a, ro.fh, ro, 3, ida, "l", Nfs4.WRITE_LT, 0, 10).status);
+		// no grace period (D21)
+		Ops ops = new Ops().putfh(ro.fh).op(Nfs4.OP_LOCK);
+		ops.args().writeInt(Nfs4.READ_LT).writeBoolean(true).writeLong(0).writeLong(10).writeBoolean(true).writeInt(4);
+		ro.write(ops.args());
+		ops.args().writeInt(0).writeLong(ida).writeOpaque(bytes("l"));
+		assertEquals(Nfs4.NFS4ERR_NO_GRACE, a.compound(ops).status);
+		// both failures counted as the open-owner's seqids: this is 5
+		Locked l = lockNew(a, ro.fh, ro, 5, ida, "l", Nfs4.READW_LT, 0, 10);
+		assertEquals(Nfs4.NFS4_OK, l.status);
+		assertEquals(1, server.getStateManager().getLockCount());
+	}
+
+	/** D20: a client's locks go when its lease runs out. */
+	@Test
+	public void locksExpireWithTheLease() throws Exception {
+		property("test.nfs.lockexp.leaseTime", "1s");
+		TestClient a = start("test.nfs.lockexp", false);
+		long ida = clientid(a, "client-gone");
+		Opened oa = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, oa, 2);
+		assertEquals(Nfs4.NFS4_OK, lockNew(a, oa.fh, oa, 3, ida, "l", Nfs4.WRITE_LT, 0, -1L).status);
+		assertEquals(1, server.getStateManager().getLockCount());
+		long end = System.currentTimeMillis()+10000;
+		while( server.getStateManager().getLockCount() > 0 && System.currentTimeMillis() < end ) {
+			Thread.sleep(100);
+		}
+		assertEquals(0, server.getStateManager().getLockCount());
+		TestClient b = client();
+		long idb = clientid(b, "client-next");
+		assertEquals(Nfs4.NFS4_OK, lockt(b, oa.fh, idb, "x", Nfs4.WRITE_LT, 0, -1L).status);
 	}
 
 	@Test

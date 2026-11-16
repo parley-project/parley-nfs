@@ -331,4 +331,12 @@ public final class Nfs4 {
 		default: return "ILLEGAL("+op+")";
 		}
 	}
+
+	// nfs_lock_type4
+	public static final int READ_LT = 1;
+	public static final int WRITE_LT = 2;
+	/** blocking read lock: answered at once like READ_LT (decision D19) */
+	public static final int READW_LT = 3;
+	/** blocking write lock: answered at once like WRITE_LT (decision D19) */
+	public static final int WRITEW_LT = 4;
 }
