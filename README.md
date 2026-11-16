@@ -78,5 +78,5 @@ whether to trust that.
 server has also been tried with a Linux kernel mount (`tools/nfs-mount-test.sh`, run in the client) and libnfs (`nfs-ls`, `nfs-cat`, `nfs-cp`, `nfs-stat` with `?version=4`).
 
 It has also been run against pynfs's NFSv4.0 server tests (`nfs4.0/testserver.py ... all`). What still
-fails there is objects a FileSource can't make (symbolic links, devices, sockets, fifos), and checks the server leaves to the user registry:
+fails there is objects the server doesn't serve (hard links, symbolic links, devices, sockets, fifos), and checks the server leaves to the user registry:
 UNIX mode bits (OPEN20, WRT19) and changing a file's owner (SATT18).

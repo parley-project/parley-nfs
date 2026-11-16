@@ -691,7 +691,7 @@ public class Compound {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BADTYPE);
 		}
 		if( type != Nfs4.NF4DIR ) {
-			// symbolic links, devices, sockets and fifos aren't FileSource things (decisions D9, D24):
+			// symbolic links, devices, sockets and fifos aren't served (decisions D24, D26):
 			// PERM, which a Linux client shows as "Operation not permitted" (NOTSUPP and BADTYPE are
 			// not Linux error numbers a program can name: "Unknown error 524")
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "can't create type "+type);
@@ -861,7 +861,7 @@ public class Compound {
 
 	private void link() throws Nfs4Exception, XdrException {
 		component();
-		// FileSource has no hard links (link_support is false; decisions D9, D24): XDEV, which a Linux
+		// hard links aren't served: a FileSource has no file identity or link count (decisions D24, D25): XDEV, which a Linux
 		// client shows as "Invalid cross-device link" (NOTSUPP is "Unknown error 524")
 		throw new Nfs4Exception(Nfs4.NFS4ERR_XDEV, "no hard links in this export");
 	}
