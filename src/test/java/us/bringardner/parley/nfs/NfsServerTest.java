@@ -843,6 +843,41 @@ public class NfsServerTest {
 		assertEquals(Nfs4.NFS4_OK, write(c, o2.fh, o2, 0, bytes("object two"), Nfs4.FILE_SYNC4));
 		assertEquals(Nfs4.NFS4_OK, close(c, o2.fh, o2, 5));
 		assertArrayEquals(bytes("object two"), Files.readAllBytes(tmp.resolve("obj2")));
+
+		// git on a Linux client exactly: O_CREAT|O_EXCL is OPEN EXCLUSIVE4, then SETATTR with the
+		// open's stateid sets the mode and the times (the verifier took them), then WRITE, COMMIT
+		args = new XdrEncoder();
+		args.writeInt(6).writeInt(Nfs4.OPEN4_SHARE_ACCESS_BOTH).writeInt(Nfs4.OPEN4_SHARE_DENY_NONE).writeLong(id)
+			.writeOpaque(bytes("git")).writeInt(Nfs4.OPEN4_CREATE).writeInt(Nfs4.EXCLUSIVE4)
+			.writeFixedOpaque(bytes("verifier")).writeInt(Nfs4.CLAIM_NULL).writeString("obj3");
+		ops = new Ops().putroot().op(Nfs4.OP_OPEN);
+		ops.args().write(args);
+		ops.getfh();
+		r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_OPEN);
+		Opened o3 = new Opened();
+		o3.seqid = r.in.readInt();
+		o3.other = r.in.readFixedOpaque(12);
+		r.in.readBoolean();
+		r.in.readLong();
+		r.in.readLong();
+		r.in.readInt();
+		r.in.readIntArray(8);
+		r.in.readInt();
+		r.ok(Nfs4.OP_GETFH);
+		o3.fh = r.in.readOpaque(128);
+		ops = new Ops().putfh(o3.fh).op(Nfs4.OP_SETATTR);
+		o3.write(ops.args());
+		ops.args().writeIntArray(us.bringardner.parley.nfs.server.Attributes.bitmap(Nfs4.FATTR4_MODE,
+				Nfs4.FATTR4_TIME_ACCESS_SET, Nfs4.FATTR4_TIME_MODIFY_SET))
+			.writeOpaque(new XdrEncoder().writeInt(0444).writeInt(0).writeInt(0).toByteArray());
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertEquals(Nfs4.NFS4_OK, write(c, o3.fh, o3, 0, bytes("object three"), Nfs4.UNSTABLE4));
+		ops = new Ops().putfh(o3.fh).op(Nfs4.OP_COMMIT);
+		ops.args().writeLong(0).writeInt(0);
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertEquals(Nfs4.NFS4_OK, close(c, o3.fh, o3, 7));
+		assertArrayEquals(bytes("object three"), Files.readAllBytes(tmp.resolve("obj3")));
 	}
 
 	@Test
