@@ -109,6 +109,8 @@ public class NfsServer extends NioServer {
 	private final OpenFiles openFiles = new OpenFiles();
 	private volatile Attributes attributes;
 	private volatile Authorizer authorizer;
+	/** startAndWait has read the settings, so the start() it calls doesn't */
+	private boolean prepared;
 	private volatile ReplayCache replayCache;
 	private volatile int ioSize = DEFAULT_IO_SIZE;
 	private volatile boolean authNoneAllowed = true;
@@ -163,17 +165,23 @@ public class NfsServer extends NioServer {
 	@Override
 	public void startAndWait(long timeoutMillis) throws IOException {
 		prepare();
+		// the start() that startAndWait calls must not read the settings and start the executors again
+		prepared = true;
 		super.startAndWait(timeoutMillis);
 	}
 
 	/** Read the settings, then start; a problem with them is logged and the server doesn't start. */
 	@Override
 	public synchronized void start() {
-		try {
-			prepare();
-		} catch (IOException e) {
-			logError("Server "+getName()+" not started: "+e.getMessage(), e);
-			return;
+		if( prepared ) {
+			prepared = false;
+		} else {
+			try {
+				prepare();
+			} catch (IOException e) {
+				logError("Server "+getName()+" not started: "+e.getMessage(), e);
+				return;
+			}
 		}
 		super.start();
 	}
@@ -218,7 +226,8 @@ public class NfsServer extends NioServer {
 			anonymous = null;
 		}
 		authorizer = new Authorizer(getUserRegistry(), idMap, anonymous == null ? null : anonymous.trim(),
-				getName(), getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME));
+				getName(), getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME),
+				message -> logInfo(message));
 		authNoneAllowed = !authorizer.isChecking() || anonymous != null;
 		if( !authorizer.isChecking() ) {
 			logWarn("Server "+getName()+": no user registry, so every client that can connect may use "+export);

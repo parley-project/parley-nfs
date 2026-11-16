@@ -59,7 +59,10 @@ import us.bringardner.parley.nfs.rpc.Rpc;
 import us.bringardner.parley.nfs.rpc.XdrDecoder;
 import us.bringardner.parley.nfs.rpc.XdrEncoder;
 import us.bringardner.parley.nfs.server.Export;
+import us.bringardner.parley.nfs.server.Authorizer;
+import us.bringardner.parley.nfs.server.Caller;
 import us.bringardner.parley.nfs.server.NfsServer;
+import us.bringardner.parley.net.server.KnownSettings;
 
 /**
  * The server over TCP with {@link TestClient}, sharing a memory file system.
@@ -794,6 +797,51 @@ public class NfsServerTest {
 		TestClient t = client();
 		t.uid = 1000;
 		assertEquals(Nfs4.NFS4_OK, t.compound(mk).status);
+	}
+
+	/** Every setting the server reads is in this module's list, so the start-up check doesn't warn about them. */
+	@Test
+	public void everySettingTheServerReadsIsListed() throws Exception {
+		String prefix = "test.nfs.known";
+		KnownSettings known = KnownSettings.load().addPrefix(prefix);
+		KnownSettings.RecordingProperties recording = new KnownSettings.RecordingProperties();
+		mem = new MemoryFileSourceFactory();
+		mem.connect(new Properties());
+		root = mem.createFileSource("/export");
+		assertTrue(root.mkdirs());
+		server = new NfsServer(prefix, 0);
+		server.setConfiguration(recording);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		List<String> asked = new ArrayList<String>(recording.asked());
+		assertTrue(asked.contains(prefix+".leaseTime"), asked.toString());
+		assertEquals(List.of(), known.undeclared(asked));
+		assertEquals(List.of(), known.undeclared(KnownSettings.settingConstants(NfsServer.class)));
+		// the names a deployment sets
+		assertEquals(List.of(), KnownSettings.load().addPrefix("parley.nfs").undeclared(List.of("parley.nfs.configFile",
+				"parley.nfs.export", "parley.nfs.idmap", "parley.nfs.anonymous", "parley.nfs.authenticationProvider", "parley.nfs.userFile")));
+	}
+
+	/** A refusal is reported once for each fresh answer, not for each call. */
+	@Test
+	public void refusalsAreReportedOncePerAnswer() throws Exception {
+		mem = new MemoryFileSourceFactory();
+		mem.connect(new Properties());
+		root = mem.createFileSource("/export");
+		assertTrue(root.mkdirs());
+		List<String> told = new ArrayList<String>();
+		Authorizer a = new Authorizer(new BasicUserRegistry(1000), null, null, "test", 60000, told::add);
+		Export export = new Export("test", root, false);
+		for (int i = 0; i < 3; i++) {
+			try {
+				a.check(export, Caller.none(), java.net.InetAddress.getLoopbackAddress(), 2049, false);
+				org.junit.jupiter.api.Assertions.fail("allowed");
+			} catch (us.bringardner.parley.nfs.server.Nfs4Exception e) {
+				assertEquals(Nfs4.NFS4ERR_ACCESS, e.getStatus());
+			}
+		}
+		assertEquals(1, told.size(), told.toString());
+		assertTrue(told.get(0).startsWith("Refused read on test to AUTH_NONE"), told.get(0));
 	}
 
 	private static String owner(TestClient c, byte[] fh) throws IOException {

@@ -72,6 +72,13 @@ asked for the `read` or `write` permission on the export (a resource of type `nf
 proves nothing; the server vouches for it, and a registry that handles `VouchedCredential` decides
 whether to trust that.
 
+With a registry, set `parley.nfs.anonymous` to a user who can read the export, even if every client
+you expect has a mapped uid: a Linux mount first calls the server without a credential (AUTH_NONE),
+and without an anonymous user that is refused ("access denied by server"). Root is not mapped
+unless the id map says so, so it acts as the anonymous user too. The id map is read when the server
+starts; the registry's own user file is read again when it changes. A refused call is logged once
+for each answer (a minute, `parley.nfs.authCacheTime`) at INFO with the user and the reason.
+
 ## Testing
 
 `mvn test` runs the protocol tests against a memory file system with a small test client. The
