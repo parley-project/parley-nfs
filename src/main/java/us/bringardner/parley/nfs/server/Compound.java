@@ -1225,6 +1225,7 @@ public class Compound {
 		StateId id = stateid();
 		Node node = current();
 		state.returnDelegation(id, node);
+		server.logInfo("Client got back its delegation of "+node);
 	}
 
 	/**
@@ -1243,6 +1244,9 @@ public class Compound {
 		}
 		byte[] fh = node.getExport().toHandle(node);
 		for (StateManager.DelegationState s : list) {
+			if( !s.isRecallSent() ) {
+				server.logInfo("Recalling the delegation of "+node+" from client "+s.getClient()+": another access needs the file");
+			}
 			d.recall(s, fh);
 		}
 		throw new Nfs4Exception(Nfs4.NFS4ERR_DELAY, "a delegation of "+node+" is being recalled");
@@ -1423,6 +1427,10 @@ public class Compound {
 		if( server.getDelegations() != null && !byDelegation && opentype == Nfs4.OPEN4_NOCREATE && owner.isConfirmed()
 				&& access == Nfs4.OPEN4_SHARE_ACCESS_READ && deny == Nfs4.OPEN4_SHARE_DENY_NONE ) {
 			granted = state.grantRead(owner.getClient(), node);
+			if( granted != null ) {
+				final Node gn = node;
+				server.logInfo("Gave a read delegation of "+gn+" to client "+owner.getClient());
+			}
 		}
 		if( granted == null ) {
 			out.writeInt(Nfs4.OPEN_DELEGATE_NONE);

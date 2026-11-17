@@ -1015,6 +1015,10 @@ public class StateManager {
 		public Node getNode() {
 			return node;
 		}
+
+		public boolean isRecallSent() {
+			return recallSent.get();
+		}
 	}
 
 	/**
