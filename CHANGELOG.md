@@ -2,6 +2,15 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-17: read delegations)
+
+- **`parley.nfs.delegations` (default false): read delegations (RFC 7530 section 10.4).** A client that opens a
+  file for reading, with a callback address that answers a CB_NULL, can be given a read delegation. Another
+  client's open for write, WRITE, size change, REMOVE or RENAME of the file sends it a CB_RECALL and gets
+  NFS4ERR_DELAY until DELEGRETURN; a delegation not returned within the lease is revoked. The callbacks go
+  over parley-net's NioClient and only to the host the client's SETCLIENTID came from. Write delegations,
+  CLAIM_DELEGATE_PREV and DELEGPURGE are not built. A delegation protects against other NFS clients only.
+
 ### Added (2026-11-17: access control lists, RFC 7530 section 6)
 
 - **The `acl` and `aclsupport` attributes (ALLOW and DENY entries)**, kept in the state folder

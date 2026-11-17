@@ -114,6 +114,16 @@ attribute (ALLOW and DENY entries, ordered, with the inheritance flags) and `acl
 applies first; a file with a list must also allow the operation. A file with no list behaves as before, and
 GETATTR shows a list made from its mode. Without a state folder the server says `aclsupport` is 0.
 
+## Delegations
+
+`parley.nfs.delegations=true` lets the server give a client a read delegation when it opens a file for reading, so
+the client can serve reads from its cache until another client wants to write. It needs a callback address that
+works: the client's SETCLIENTID names it, the server calls it (CB_NULL) when the client confirms, and a client that
+doesn't answer gets none. Only the host the client connects from is called. When another client opens the file for
+writing, changes its size, removes or renames it, the server recalls the delegation and answers NFS4ERR_DELAY until
+the client returns it (or the lease runs out and it is revoked). Programs on the server's machine that write the
+same files are not seen. Read delegations only; off by default.
+
 ## File handles
 
 A file handle holds the file's id and, when it fits in 128 bytes, its path. The id is a hash of the
