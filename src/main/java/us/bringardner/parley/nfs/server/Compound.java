@@ -1405,6 +1405,11 @@ public class Compound {
 		Node node = export.getNodes().get(path);
 		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 || deny != Nfs4.OPEN4_SHARE_DENY_NONE || truncate ) {
 			// an open that can change the file or shut others out waits for the delegations of it
+			if( server.getDelegations() != null ) {
+				final Node wn = node;
+				final ClientRecord wc = owner.getClient();
+				server.logDebug(() -> "Open of "+wn+" for change by client "+wc+": delegations held: "+state.describeDelegations(wn));
+			}
 			recallDelegations(node, byDelegation ? owner.getClient() : null);
 		}
 		OpenState s = state.open(owner, node, access, deny);
@@ -1433,6 +1438,8 @@ public class Compound {
 			if( granted != null ) {
 				final Node gn = node;
 				server.logInfo("Gave a read delegation of "+gn+" to client "+owner.getClient());
+			} else {
+				server.logInfo("No read delegation of "+node+" to client "+owner.getClient()+": "+state.whyNoReadDelegation(owner.getClient(), node));
 			}
 		}
 		if( granted == null ) {

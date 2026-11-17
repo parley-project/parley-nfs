@@ -1048,6 +1048,45 @@ public class StateManager {
 		return d;
 	}
 
+	/** @return why a read delegation of the file isn't given to the client now, for the log */
+	public synchronized String whyNoReadDelegation(ClientRecord c, Node node) {
+		if( !c.confirmed || confirmedById.get(c.clientid) != c ) {
+			return "the client's id isn't confirmed";
+		}
+		if( !c.cbUp ) {
+			return "the client's callback path isn't up (it is tried when the client registers, and again after a failed recall only when it registers again)";
+		}
+		for (DelegationState d : node.delegations) {
+			if( d.client == c ) {
+				return "the client already holds one";
+			}
+			if( d.recalledAt != 0 ) {
+				return "a delegation of the file is being recalled";
+			}
+		}
+		for (OpenState s : node.opens) {
+			if( (s.access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
+				return "the file is open for writing";
+			}
+		}
+		return "no reason found";
+	}
+
+	/** @return how many delegations of the file are held, and by whom, for the log */
+	public synchronized String describeDelegations(Node node) {
+		if( node == null || node.delegations.isEmpty() ) {
+			return "none";
+		}
+		StringBuilder b = new StringBuilder();
+		for (DelegationState d : node.delegations) {
+			if( b.length() > 0 ) {
+				b.append(", ");
+			}
+			b.append("client ").append(d.client).append(d.recalledAt != 0 ? " (being recalled)" : "");
+		}
+		return b.toString();
+	}
+
 	/**
 	 * The delegations of a file that a conflicting access has to wait for. The recall of each begins (the
 	 * caller sends the CB_RECALL); a delegation whose recall ran past the lease is revoked and left out.
