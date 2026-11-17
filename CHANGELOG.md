@@ -2,6 +2,11 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-17: a folder for each user)
+
+- **The `nfs.root` principal attribute confines a user to a folder of the export (D49).** It is the root the user
+  sees; LOOKUPP stops there and handles outside it are stale.
+
 ### Added (2026-11-17: numbers from the registry)
 
 - **uid and gid come from the registry's principals (D48).** An AUTH_SYS uid is the user whose `uid` attribute it is

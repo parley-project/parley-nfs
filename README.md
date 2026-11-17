@@ -114,6 +114,15 @@ sent as its user's `uid`, and its group as its group's `gid`, so a Linux client 
 `parley.nfs.idmap` (`uid.1000=tony`) is the fallback for a user without the attribute. If two users have one
 `uid`, the registry can't tell who a call is and the id map decides.
 
+## A folder for each user
+
+A user whose registry principal has the attribute `nfs.root` (a path inside the export, like an FTP root:
+`nfs.root=/home/tony`) sees that folder as the root of the export: PUTROOTFH gives it, LOOKUPP stops there, and a
+file handle outside it is NFS4ERR_STALE. A user without the attribute sees the whole export. With several
+exports the same path is looked for inside each, and an export without it can't be entered (NFS4ERR_NOENT). A
+value with `..` leaves the user nothing (NFS4ERR_ACCESS). Symbolic links the FileSource follows can still lead
+out of the folder, and the registry's read and write permission still applies to the whole export.
+
 ## Access control lists
 
 With `parley.nfs.stateDir` set, files and folders can carry an NFSv4 ACL (RFC 7530 section 6): the `acl`

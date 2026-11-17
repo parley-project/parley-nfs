@@ -63,6 +63,10 @@ public class Authorizer {
 	/** How the server vouches for a Kerberos principal's user (decision D36). */
 	public static final String VOUCHED_BY_GSS = "nfs-rpcsec_gss";
 	public static final String METHOD_GSS = "rpcsec_gss";
+	/** The principal attribute that names a user's root folder (decision D49). */
+	public static final String ROOT_ATTRIBUTE = "nfs.root";
+	/** A root attribute that isn't a path inside the export. */
+	public static final String INVALID_ROOT = "//invalid";
 
 	private final UserRegistry registry;
 	private final IdNumbers numbers;
@@ -177,8 +181,10 @@ public class Authorizer {
 		private final long uid;
 		private final java.util.Set<Long> gids;
 		private final java.util.Set<String> groups;
+		private final String root;
 
-		Identity(String name, long uid, java.util.Set<Long> gids, java.util.Set<String> groups) {
+		Identity(String name, long uid, java.util.Set<Long> gids, java.util.Set<String> groups, String root) {
+			this.root = root;
 			this.name = name;
 			this.uid = uid;
 			this.gids = gids;
@@ -198,6 +204,15 @@ public class Authorizer {
 		/** @return the AUTH_SYS gid and gids */
 		public java.util.Set<Long> getGids() {
 			return gids;
+		}
+
+		/**
+		 * @return the folder the user is confined to, as a path inside an export without a leading or trailing
+		 * slash (decision D49); null for the whole export; {@link Authorizer#INVALID_ROOT} when the attribute
+		 * can't be a folder inside the export, which leaves the user nothing
+		 */
+		public String getRoot() {
+			return root;
 		}
 
 		/** @return the names of the groups the user is in, as the registry names them */
@@ -245,11 +260,13 @@ public class Authorizer {
 			}
 		}
 		java.util.Set<String> groups = new java.util.HashSet<String>();
+		String root = null;
 		if( registry != null && name != null ) {
 			try {
 				ParleyPrincipal user = registry.findUser(name);
 				if( user != null ) {
 					name = user.getName();
+					root = normalizeRoot(user.getAttribute(ROOT_ATTRIBUTE));
 					for (ParleyPrincipal g : registry.findGroups(user)) {
 						groups.add(g.getName());
 					}
@@ -258,12 +275,37 @@ public class Authorizer {
 				throw new Nfs4Exception(us.bringardner.parley.nfs.protocol.Nfs4.NFS4ERR_DELAY, ex.getMessage());
 			}
 		}
-		Identity id = new Identity(name, caller.getUid(), gids, groups);
+		Identity id = new Identity(name, caller.getUid(), gids, groups, root);
 		if( identities.size() > 10000 ) {
 			identities.values().removeIf(x -> x.until < now);
 		}
 		identities.put(key, new IdEntry(id, now+cacheMillis));
 		return id;
+	}
+
+	/**
+	 * @return the path inside the export a root attribute names, without leading or trailing slashes; null when
+	 * there is none or it is the whole export; {@link #INVALID_ROOT} when it has a . or .. part
+	 */
+	static String normalizeRoot(Object attribute) {
+		if( attribute == null ) {
+			return null;
+		}
+		String text = attribute.toString().trim();
+		StringBuilder out = new StringBuilder();
+		for (String part : text.split("/")) {
+			if( part.isEmpty() ) {
+				continue;
+			}
+			if( part.equals(".") || part.equals("..") || part.indexOf('\0') >= 0 ) {
+				return INVALID_ROOT;
+			}
+			if( out.length() > 0 ) {
+				out.append('/');
+			}
+			out.append(part);
+		}
+		return out.length() == 0 ? null : out.toString();
 	}
 
 	private AuthorizationResult decide(Export export, Caller caller, InetAddress client, int localPort, String permission) {

@@ -231,7 +231,7 @@ public class Compound {
 		case Nfs4.OP_OPEN_DOWNGRADE: openDowngrade(); break;
 		case Nfs4.OP_PUTFH: putfh(); break;
 		case Nfs4.OP_PUTPUBFH:
-		case Nfs4.OP_PUTROOTFH: current = server.getRootExport().getRootNode(); break;
+		case Nfs4.OP_PUTROOTFH: current = entry(server.getRootExport()); break;
 		case Nfs4.OP_READ: read(); break;
 		case Nfs4.OP_READDIR: readdir(); break;
 		case Nfs4.OP_READLINK: readlink(); break;
@@ -492,7 +492,7 @@ public class Compound {
 
 	private void putfh() throws Nfs4Exception, XdrException {
 		byte[] fh = in.readOpaque(Nfs4.NFS4_FHSIZE);
-		current = server.fromHandle(fh);
+		current = confine(server.fromHandle(fh));
 	}
 
 	private void getfh() throws Nfs4Exception {
@@ -522,7 +522,7 @@ public class Compound {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 			}
 			server.getAuthorizer().check(target, caller, client, localPort, false);
-			current = target.getRootNode();
+			current = entry(target);
 			return;
 		}
 		allowRead();
@@ -534,12 +534,54 @@ public class Compound {
 		current = export.getNodes().get(path);
 	}
 
+	// ================================================================ a user's root folder (D49)
+
+	/** @return the root folder of the user in an export, null for the export's own root */
+	private String userRoot(Export export) throws Nfs4Exception {
+		if( export.isPseudo() ) {
+			return null;
+		}
+		String root = server.getAuthorizer().identity(caller, client).getRoot();
+		if( Authorizer.INVALID_ROOT.equals(root) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_ACCESS, "the "+Authorizer.ROOT_ATTRIBUTE+" attribute of the user isn't a folder");
+		}
+		return root;
+	}
+
+	/** @return the root the caller sees in an export: its own folder, or the export's root */
+	private Node entry(Export export) throws Nfs4Exception, IOException {
+		String root = userRoot(export);
+		if( root == null ) {
+			return export.getRootNode();
+		}
+		FileSource f = export.resolve(root);
+		if( !f.exists() || !f.isDirectory() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT, "the root folder "+root+" of the user doesn't exist");
+		}
+		return export.getNodes().get(root);
+	}
+
+	/** @return true if the node is the root the caller sees in its export */
+	private boolean isEntry(Node node) throws Nfs4Exception {
+		String root = userRoot(node.getExport());
+		return root == null ? node.isRoot() : node.getPath().equals(root);
+	}
+
+	/** @return the node, if the caller may reach it: a handle to a file outside the user's folder is stale */
+	private Node confine(Node node) throws Nfs4Exception {
+		String root = userRoot(node.getExport());
+		if( root != null && !node.getPath().equals(root) && !node.getPath().startsWith(root+"/") ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE, node+" is outside the root folder of the user");
+		}
+		return node;
+	}
+
 	private void lookupp() throws Nfs4Exception, IOException {
 		Node node = current();
 		currentDir();
 		allowRead();
-		if( node.isRoot() ) {
-			// the root of an export is in the folder of exports, if there is one (decision D27)
+		if( isEntry(node) ) {
+			// the root of an export (the user's own, D49) is in the folder of exports, if there is one (decision D27)
 			Export pseudo = server.getPseudoRoot();
 			if( pseudo == null || node.getExport().isPseudo() ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
