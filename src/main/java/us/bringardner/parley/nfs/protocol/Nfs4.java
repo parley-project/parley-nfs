@@ -240,6 +240,45 @@ public final class Nfs4 {
 	public static final int ACCESS4_DELETE = 0x10;
 	public static final int ACCESS4_EXECUTE = 0x20;
 
+	// ---------------------------------------------------------------- ACL (RFC 7530 section 6)
+	public static final int ACE4_ACCESS_ALLOWED_ACE_TYPE = 0;
+	public static final int ACE4_ACCESS_DENIED_ACE_TYPE = 1;
+	public static final int ACE4_SYSTEM_AUDIT_ACE_TYPE = 2;
+	public static final int ACE4_SYSTEM_ALARM_ACE_TYPE = 3;
+
+	public static final int ACE4_FILE_INHERIT_ACE = 0x01;
+	public static final int ACE4_DIRECTORY_INHERIT_ACE = 0x02;
+	public static final int ACE4_NO_PROPAGATE_INHERIT_ACE = 0x04;
+	public static final int ACE4_INHERIT_ONLY_ACE = 0x08;
+	public static final int ACE4_SUCCESSFUL_ACCESS_ACE_FLAG = 0x10;
+	public static final int ACE4_FAILED_ACCESS_ACE_FLAG = 0x20;
+	public static final int ACE4_IDENTIFIER_GROUP = 0x40;
+
+	public static final int ACE4_READ_DATA = 0x00000001;
+	public static final int ACE4_LIST_DIRECTORY = 0x00000001;
+	public static final int ACE4_WRITE_DATA = 0x00000002;
+	public static final int ACE4_ADD_FILE = 0x00000002;
+	public static final int ACE4_APPEND_DATA = 0x00000004;
+	public static final int ACE4_ADD_SUBDIRECTORY = 0x00000004;
+	public static final int ACE4_READ_NAMED_ATTRS = 0x00000008;
+	public static final int ACE4_WRITE_NAMED_ATTRS = 0x00000010;
+	public static final int ACE4_EXECUTE = 0x00000020;
+	public static final int ACE4_DELETE_CHILD = 0x00000040;
+	public static final int ACE4_READ_ATTRIBUTES = 0x00000080;
+	public static final int ACE4_WRITE_ATTRIBUTES = 0x00000100;
+	public static final int ACE4_DELETE = 0x00010000;
+	public static final int ACE4_READ_ACL = 0x00020000;
+	public static final int ACE4_WRITE_ACL = 0x00040000;
+	public static final int ACE4_WRITE_OWNER = 0x00080000;
+	public static final int ACE4_SYNCHRONIZE = 0x00100000;
+	/** every mask bit RFC 7530 defines */
+	public static final int ACE4_ALL_MASK = 0x001f01ff;
+
+	public static final int ACL4_SUPPORT_ALLOW_ACL = 0x01;
+	public static final int ACL4_SUPPORT_DENY_ACL = 0x02;
+	public static final int ACL4_SUPPORT_AUDIT_ACL = 0x04;
+	public static final int ACL4_SUPPORT_ALARM_ACL = 0x08;
+
 	// ---------------------------------------------------------------- OPEN
 	public static final int OPEN4_SHARE_ACCESS_READ = 0x01;
 	public static final int OPEN4_SHARE_ACCESS_WRITE = 0x02;

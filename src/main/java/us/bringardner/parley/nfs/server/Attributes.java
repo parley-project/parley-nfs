@@ -25,6 +25,8 @@
 package us.bringardner.parley.nfs.server;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.nio.file.attribute.GroupPrincipal;
 import java.nio.file.attribute.UserPrincipal;
 
@@ -52,7 +54,7 @@ public class Attributes {
 			Nfs4.FATTR4_SUPPORTED_ATTRS, Nfs4.FATTR4_TYPE, Nfs4.FATTR4_FH_EXPIRE_TYPE, Nfs4.FATTR4_CHANGE,
 			Nfs4.FATTR4_SIZE, Nfs4.FATTR4_LINK_SUPPORT, Nfs4.FATTR4_SYMLINK_SUPPORT, Nfs4.FATTR4_NAMED_ATTR,
 			Nfs4.FATTR4_FSID, Nfs4.FATTR4_UNIQUE_HANDLES, Nfs4.FATTR4_LEASE_TIME, Nfs4.FATTR4_RDATTR_ERROR,
-			Nfs4.FATTR4_ACLSUPPORT, Nfs4.FATTR4_CANSETTIME, Nfs4.FATTR4_CASE_INSENSITIVE,
+			Nfs4.FATTR4_ACL, Nfs4.FATTR4_ACLSUPPORT, Nfs4.FATTR4_CANSETTIME, Nfs4.FATTR4_CASE_INSENSITIVE,
 			Nfs4.FATTR4_CASE_PRESERVING, Nfs4.FATTR4_CHOWN_RESTRICTED, Nfs4.FATTR4_FILEHANDLE,
 			Nfs4.FATTR4_FILEID, Nfs4.FATTR4_HIDDEN, Nfs4.FATTR4_HOMOGENEOUS, Nfs4.FATTR4_MAXFILESIZE,
 			Nfs4.FATTR4_MAXLINK, Nfs4.FATTR4_MAXNAME, Nfs4.FATTR4_MAXREAD, Nfs4.FATTR4_MAXWRITE,
@@ -63,7 +65,7 @@ public class Attributes {
 			Nfs4.FATTR4_SPACE_AVAIL, Nfs4.FATTR4_SPACE_FREE, Nfs4.FATTR4_SPACE_TOTAL);
 
 	/** The attributes a client can set. */
-	public static final int[] WRITABLE = bitmap(Nfs4.FATTR4_SIZE, Nfs4.FATTR4_MODE, Nfs4.FATTR4_OWNER,
+	public static final int[] WRITABLE = bitmap(Nfs4.FATTR4_SIZE, Nfs4.FATTR4_ACL, Nfs4.FATTR4_MODE, Nfs4.FATTR4_OWNER,
 			Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_TIME_ACCESS_SET, Nfs4.FATTR4_TIME_MODIFY_SET);
 
 	/** Attributes that are only set, never returned by GETATTR. */
@@ -125,6 +127,13 @@ public class Attributes {
 			ret[b/32] |= 1 << (b%32);
 		}
 		return ret;
+	}
+
+	/** Turn an attribute's bit off in a bitmap. */
+	static void clearBit(int[] bitmap, int bit) {
+		if( bit/32 < bitmap.length ) {
+			bitmap[bit/32] &= ~(1 << (bit%32));
+		}
 	}
 
 	public static boolean isSet(int[] bitmap, int bit) {
@@ -217,6 +226,10 @@ public class Attributes {
 	 */
 	public void encode(Source src, int[] requested, XdrEncoder out) throws IOException {
 		int[] bits = and(requested, SUPPORTED);
+		if( src.export.getAcls() == null ) {
+			// ACLs are off without a state folder (decision D51)
+			clearBit(bits, Nfs4.FATTR4_ACL);
+		}
 		for (int i = 0; i < bits.length && i < WRITE_ONLY.length; i++) {
 			bits[i] &= ~WRITE_ONLY[i];
 		}
@@ -258,7 +271,14 @@ public class Attributes {
 
 	private void value(int attr, Source src, XdrEncoder out) throws IOException {
 		switch (attr) {
-		case Nfs4.FATTR4_SUPPORTED_ATTRS: out.writeIntArray(SUPPORTED); break;
+		case Nfs4.FATTR4_SUPPORTED_ATTRS: {
+			int[] sup = SUPPORTED.clone();
+			if( src.export.getAcls() == null ) {
+				clearBit(sup, Nfs4.FATTR4_ACL);
+			}
+			out.writeIntArray(sup);
+			break;
+		}
 		case Nfs4.FATTR4_TYPE: out.writeInt(src.isDirectory() ? Nfs4.NF4DIR : Nfs4.NF4REG); break;
 		case Nfs4.FATTR4_FH_EXPIRE_TYPE: out.writeInt(Nfs4.FH4_PERSISTENT); break;
 		case Nfs4.FATTR4_CHANGE: out.writeLong(change(src)); break;
@@ -273,7 +293,23 @@ public class Attributes {
 		case Nfs4.FATTR4_UNIQUE_HANDLES: out.writeBoolean(true); break;
 		case Nfs4.FATTR4_LEASE_TIME: out.writeInt((int) leaseSeconds); break;
 		case Nfs4.FATTR4_RDATTR_ERROR: out.writeInt(Nfs4.NFS4_OK); break;
-		case Nfs4.FATTR4_ACLSUPPORT: out.writeInt(0); break;
+		case Nfs4.FATTR4_ACL: {
+			List<Ace> acl = src.export.getAcls() == null ? null : src.export.getAcls().get(src.node.getFileid());
+			if( acl == null ) {
+				acl = Acls.fromMode(mode(src), src.isDirectory());
+			}
+			out.writeInt(acl.size());
+			for (Ace a : acl) {
+				out.writeInt(a.getType());
+				out.writeInt(a.getFlags());
+				out.writeInt(a.getMask());
+				out.writeString(qualify(a.getWho()));
+			}
+			break;
+		}
+		case Nfs4.FATTR4_ACLSUPPORT:
+			out.writeInt(src.export.getAcls() == null ? 0 : Nfs4.ACL4_SUPPORT_ALLOW_ACL | Nfs4.ACL4_SUPPORT_DENY_ACL);
+			break;
 		case Nfs4.FATTR4_CANSETTIME: out.writeBoolean(true); break;
 		case Nfs4.FATTR4_CASE_INSENSITIVE: out.writeBoolean(false); break;
 		case Nfs4.FATTR4_CASE_PRESERVING: out.writeBoolean(true); break;
@@ -422,6 +458,8 @@ public class Attributes {
 		/** what was asked for (the attrsset of a successful reply) */
 		public int[] bits = new int[0];
 		public Long size;
+		/** the access control list asked for, null when not set */
+		public List<Ace> acl;
 		public Integer mode;
 		public String owner;
 		public String group;
@@ -462,6 +500,20 @@ public class Attributes {
 				if( ret.size < 0 ) {
 					throw new Nfs4Exception(Nfs4.NFS4ERR_FBIG);
 				}
+			}
+			if( isSet(bits, Nfs4.FATTR4_ACL) ) {
+				int n = v.readInt();
+				if( n < 0 || n > Acls.MAX_ACES ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, n+" access control entries");
+				}
+				List<Ace> acl = new ArrayList<Ace>(n);
+				for (int i = 0; i < n; i++) {
+					int type = v.readInt();
+					int flags = v.readInt();
+					int mask = v.readInt();
+					acl.add(new Ace(type, flags, mask, v.readString(Nfs4.NFS4_OPAQUE_LIMIT)));
+				}
+				ret.acl = Acls.validate(acl);
 			}
 			if( isSet(bits, Nfs4.FATTR4_MODE) ) {
 				int m = v.readInt();

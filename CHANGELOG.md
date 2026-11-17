@@ -2,6 +2,19 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-17: access control lists, RFC 7530 section 6)
+
+- **The `acl` and `aclsupport` attributes (ALLOW and DENY entries)**, kept in the state folder
+  (`<export>.acls`, needs `parley.nfs.stateDir`; without it `aclsupport` is 0 and SETATTR of `acl` is
+  NFS4ERR_ATTRNOTSUPP). OWNER@, GROUP@, EVERYONE@, user and group names, and numbers (AUTH_SYS uid/gid or
+  the registry's `uid`/`gid` attributes) are understood. File, directory, no-propagate and inherit-only
+  flags are honored when a file or folder is created. AUDIT and ALARM entries are refused.
+- **Enforced on** LOOKUP, READDIR, OPEN, READ, WRITE, CREATE, REMOVE, RENAME, SETATTR and ACCESS. The
+  registry's read/write check stays the outer gate; a file with a list must also allow. A file with no list
+  behaves as before. A list and the mode are independent; the list wins when present. A file's owner always
+  keeps READ_ACL and WRITE_ACL.
+- Needs `UserRegistry.findByAttribute` (parley-iam branch principal-ids).
+
 ### Added (2026-11-16: file handles that survive a restart)
 
 - **`parley.nfs.stateDir`: a node file per export** keeps the ids that can't be worked out from a

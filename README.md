@@ -106,6 +106,14 @@ unless the id map says so, so it acts as the anonymous user too. The id map is r
 starts; the registry's own user file is read again when it changes. A refused call is logged once
 for each answer (a minute, `parley.nfs.authCacheTime`) at INFO with the user and the reason.
 
+## Access control lists
+
+With `parley.nfs.stateDir` set, files and folders can carry an NFSv4 ACL (RFC 7530 section 6): the `acl`
+attribute (ALLOW and DENY entries, ordered, with the inheritance flags) and `aclsupport`. Lists are kept in
+`<export>.acls` in the state folder and follow a file through a rename. The registry's read/write check still
+applies first; a file with a list must also allow the operation. A file with no list behaves as before, and
+GETATTR shows a list made from its mode. Without a state folder the server says `aclsupport` is 0.
+
 ## File handles
 
 A file handle holds the file's id and, when it fits in 128 bytes, its path. The id is a hash of the
