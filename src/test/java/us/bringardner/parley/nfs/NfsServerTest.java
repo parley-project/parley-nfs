@@ -756,6 +756,21 @@ public class NfsServerTest {
 	}
 
 	@Test
+	public void theStateFolderGetsANodeFile(@TempDir Path tmp) throws Exception {
+		property("test.nfs.state.stateDir", tmp.toString());
+		property("test.nfs.state.maxNodes", "50");
+		TestClient c = start("test.nfs.state", false);
+		assertEquals(Nfs4.NFS4_OK, c.compound(new Ops().putroot().getattr(Nfs4.FATTR4_TYPE)).status);
+		try (java.util.stream.Stream<Path> files = Files.list(tmp)) {
+			List<String> names = new ArrayList<String>();
+			files.forEach(f -> names.add(f.getFileName().toString()));
+			assertEquals(1, names.size(), names.toString());
+			assertTrue(names.get(0).startsWith("test.") && names.get(0).endsWith(".nodes"), names.get(0));
+		}
+		assertEquals(50, server.getExports().get(0).getNodes().getMaxNodes());
+	}
+
+	@Test
 	public void registryChecksUsers(@TempDir Path tmp) throws Exception {
 		Path idmap = tmp.resolve("idmap.properties");
 		Files.write(idmap, "uid.1000=tony\nuid.1001=pat\n".getBytes(StandardCharsets.UTF_8));
