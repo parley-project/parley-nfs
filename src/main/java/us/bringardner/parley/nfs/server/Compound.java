@@ -379,6 +379,54 @@ public class Compound {
 		server.getAuthorizer().check(export, caller, client, localPort, true);
 	}
 
+	/** The file's access control list, if it has one, must give the caller these permissions (decision D52). */
+	private void aclCheck(Node node, FileSource f, int mask) throws Nfs4Exception {
+		server.getAclPolicy().check(node.getExport(), node, f, caller, client, mask);
+	}
+
+	/** RFC 7530 section 6.2.1: removing a file needs DELETE_CHILD on its folder or DELETE on the file. */
+	private void aclCheckDelete(Node parent, FileSource pf, Node child, FileSource cf) throws Nfs4Exception {
+		AclPolicy policy = server.getAclPolicy();
+		Export export = parent.getExport();
+		List<Ace> pa = policy.aclOf(export, parent);
+		List<Ace> ca = policy.aclOf(export, child);
+		if( pa == null && ca == null ) {
+			return;
+		}
+		if( pa != null && policy.permits(pa, pf, caller, client, Nfs4.ACE4_DELETE_CHILD) ) {
+			return;
+		}
+		if( ca != null && policy.permits(ca, cf, caller, client, Nfs4.ACE4_DELETE) ) {
+			return;
+		}
+		throw new Nfs4Exception(Nfs4.NFS4ERR_ACCESS, "the access control list refuses "+caller+" removing "+child);
+	}
+
+	/** A new file or folder gets the list the client sent, else what its folder passes down (D53). */
+	private void newAcl(Export export, Node dir, Node made, Attributes.Settings settings, boolean isDir) {
+		AclStore store = export.getAcls();
+		if( store == null ) {
+			return;
+		}
+		if( settings != null && settings.acl != null ) {
+			store.set(made.getFileid(), made.getPath(), settings.acl);
+			return;
+		}
+		List<Ace> parent = store.get(dir.getFileid());
+		if( parent != null ) {
+			List<Ace> inherited = Acls.inherit(parent, isDir);
+			if( !inherited.isEmpty() ) {
+				store.set(made.getFileid(), made.getPath(), inherited);
+			}
+		}
+	}
+
+	private static void aclsOn(Export export, Attributes.Settings s) throws Nfs4Exception {
+		if( s != null && s.acl != null && export.getAcls() == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_ATTRNOTSUPP, "access control lists need parley.nfs.stateDir");
+		}
+	}
+
 	private String component() throws XdrException, Nfs4Exception {
 		String name = in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
 		Export.checkName(name);
@@ -454,7 +502,7 @@ public class Compound {
 	private void lookup() throws Nfs4Exception, IOException {
 		String name = component();
 		Node dir = current();
-		currentDir();
+		FileSource lookupDir = currentDir();
 		Export export = dir.getExport();
 		if( export.isPseudo() ) {
 			// into an export (decision D27); one the caller may not read is NFS4ERR_ACCESS
@@ -467,6 +515,7 @@ public class Compound {
 			return;
 		}
 		allowRead();
+		aclCheck(dir, lookupDir, Nfs4.ACE4_EXECUTE);
 		String path = Export.childPath(dir, name);
 		if( !export.resolve(path).exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
@@ -579,6 +628,23 @@ public class Compound {
 		Node node = current();
 		FileSource f = currentFile();
 		allowWrite();
+		aclsOn(node.getExport(), s);
+		int needed = 0;
+		if( s.acl != null ) {
+			needed |= Nfs4.ACE4_WRITE_ACL;
+		}
+		if( s.mode != null || s.atime != null || s.mtime != null ) {
+			needed |= Nfs4.ACE4_WRITE_ATTRIBUTES;
+		}
+		if( s.owner != null || s.group != null ) {
+			needed |= Nfs4.ACE4_WRITE_OWNER;
+		}
+		if( s.size != null ) {
+			needed |= Nfs4.ACE4_WRITE_DATA;
+		}
+		if( needed != 0 ) {
+			aclCheck(node, f, needed);
+		}
 		if( s.size != null ) {
 			if( f.isDirectory() ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_ISDIR);
@@ -588,6 +654,9 @@ public class Compound {
 		attributes.apply(s, f);
 		if( s.size != null ) {
 			files.setLength(node, f, s.size);
+		}
+		if( s.acl != null ) {
+			node.getExport().getAcls().set(node.getFileid(), node.getPath(), s.acl);
 		}
 		node.changed();
 		out.writeIntArray(s.bits);
@@ -612,6 +681,23 @@ public class Compound {
 		}
 		if( permitted(true) && (dir || f.canWrite()) ) {
 			allowed |= Nfs4.ACCESS4_MODIFY | Nfs4.ACCESS4_EXTEND | Nfs4.ACCESS4_DELETE;
+		}
+		Node node = current();
+		List<Ace> acl = server.getAclPolicy().aclOf(node.getExport(), node);
+		if( acl != null ) {
+			// a file with a list: what the list gives (decision D52)
+			int[][] map = {
+				{Nfs4.ACCESS4_READ, dir ? Nfs4.ACE4_LIST_DIRECTORY : Nfs4.ACE4_READ_DATA},
+				{Nfs4.ACCESS4_LOOKUP, Nfs4.ACE4_EXECUTE},
+				{Nfs4.ACCESS4_MODIFY, dir ? Nfs4.ACE4_ADD_FILE : Nfs4.ACE4_WRITE_DATA},
+				{Nfs4.ACCESS4_EXTEND, dir ? Nfs4.ACE4_ADD_SUBDIRECTORY : Nfs4.ACE4_APPEND_DATA},
+				{Nfs4.ACCESS4_DELETE, Nfs4.ACE4_DELETE_CHILD},
+				{Nfs4.ACCESS4_EXECUTE, Nfs4.ACE4_EXECUTE}};
+			for (int[] m : map) {
+				if( (allowed & m[0]) != 0 && !server.getAclPolicy().permits(acl, f, caller, client, m[1]) ) {
+					allowed &= ~m[0];
+				}
+			}
 		}
 		out.writeInt(supported);
 		out.writeInt(supported & allowed);
@@ -659,6 +745,7 @@ public class Compound {
 		Export export = dir.getExport();
 		FileSource d = currentDir();
 		allowRead();
+		aclCheck(dir, d, Nfs4.ACE4_LIST_DIRECTORY);
 		if( cookie == 1 || cookie == 2 ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_COOKIE);
 		}
@@ -772,6 +859,8 @@ public class Compound {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "can't create type "+type);
 		}
 		allowWrite();
+		aclsOn(export, settings);
+		aclCheck(dir, d, Nfs4.ACE4_ADD_SUBDIRECTORY);
 		String path = Export.childPath(dir, name);
 		FileSource f = export.resolve(path);
 		long before = change(dir, d);
@@ -786,6 +875,7 @@ public class Compound {
 		}
 		dir.changed();
 		Node node = export.getNodes().get(path);
+		newAcl(export, dir, node, settings, true);
 		int[] set = applyCreated(settings, null, f);
 		changeInfo(before, change(dir, d));
 		out.writeIntArray(set);
@@ -849,6 +939,9 @@ public class Compound {
 		if( !f.exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
+		if( export.getAcls() != null ) {
+			aclCheckDelete(dir, d, export.getNodes().get(path), f);
+		}
 		if( f.isDirectory() ) {
 			String[] list = f.list();
 			if( list != null && list.length > 0 ) {
@@ -862,6 +955,9 @@ public class Compound {
 		}
 		if( !f.delete() ) {
 			throw new Nfs4Exception(f.exists() ? Nfs4.NFS4ERR_IO : Nfs4.NFS4ERR_NOENT, "delete "+path+" failed");
+		}
+		if( export.getAcls() != null && node != null ) {
+			export.getAcls().clear(node.getFileid());
 		}
 		export.getNodes().removed(path);
 		dir.changed();
@@ -906,6 +1002,16 @@ public class Compound {
 		long fromBefore = change(fromDir, fd);
 		long toBefore = change(toDir, td);
 		boolean fromIsDir = from.isDirectory();
+		Long overwrittenId = null;
+		if( export.getAcls() != null ) {
+			aclCheckDelete(fromDir, fd, export.getNodes().get(fromPath), from);
+			aclCheck(toDir, td, fromIsDir ? Nfs4.ACE4_ADD_SUBDIRECTORY : Nfs4.ACE4_ADD_FILE);
+			if( to.exists() ) {
+				Node overwritten = export.getNodes().get(toPath);
+				aclCheckDelete(toDir, td, overwritten, to);
+				overwrittenId = overwritten.getFileid();
+			}
+		}
 		if( to.exists() ) {
 			boolean toIsDir = to.isDirectory();
 			if( fromIsDir != toIsDir ) {
@@ -933,6 +1039,12 @@ public class Compound {
 		if( !ok ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_IO, "rename "+fromPath+" to "+toPath+" failed");
 		}
+		if( export.getAcls() != null ) {
+			if( overwrittenId != null ) {
+				export.getAcls().clear(overwrittenId);
+			}
+			export.getAcls().renamed(fromPath, toPath);
+		}
 		export.getNodes().renamed(fromPath, toPath);
 		fromDir.changed();
 		toDir.changed();
@@ -956,6 +1068,7 @@ public class Compound {
 		Node node = current();
 		FileSource f = currentRegular();
 		allowRead();
+		aclCheck(node, f, Nfs4.ACE4_READ_DATA);
 		checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_READ);
 		if( offset < 0 ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
@@ -986,6 +1099,7 @@ public class Compound {
 		Node node = current();
 		FileSource f = currentRegular();
 		allowWrite();
+		aclCheck(node, f, Nfs4.ACE4_WRITE_DATA);
 		checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_WRITE);
 		if( offset < 0 || offset+len < 0 ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_FBIG);
@@ -1131,6 +1245,19 @@ public class Compound {
 		}
 		String path = Export.childPath(dir, name);
 		FileSource f = export.resolve(path);
+		aclsOn(export, settings);
+		aclCheck(dir, d, Nfs4.ACE4_EXECUTE);
+		if( f.exists() ) {
+			Node present = export.getNodes().get(path);
+			if( (access & Nfs4.OPEN4_SHARE_ACCESS_READ) != 0 && !f.isDirectory() ) {
+				aclCheck(present, f, Nfs4.ACE4_READ_DATA);
+			}
+			if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 && !f.isDirectory() ) {
+				aclCheck(present, f, Nfs4.ACE4_WRITE_DATA);
+			}
+		} else if( opentype == Nfs4.OPEN4_CREATE ) {
+			aclCheck(dir, d, Nfs4.ACE4_ADD_FILE);
+		}
 		long before = change(dir, d);
 		int[] attrset = new int[0];
 		boolean truncate = false;
@@ -1145,6 +1272,7 @@ public class Compound {
 					create(f, path);
 					server.setExclusiveCreate(path, exclusive);
 					dir.changed();
+					newAcl(export, dir, export.getNodes().get(path), null, false);
 				}
 			} else {
 				if( exists && how == Nfs4.GUARDED4 ) {
@@ -1154,6 +1282,7 @@ public class Compound {
 					create(f, path);
 					dir.changed();
 					Node made = export.getNodes().get(path);
+					newAcl(export, dir, made, settings, false);
 					if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
 						// before a mode without write is set (D16)
 						openForWrite(made, f);

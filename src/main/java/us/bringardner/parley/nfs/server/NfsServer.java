@@ -140,6 +140,7 @@ public class NfsServer extends NioServer {
 	private final OpenFiles openFiles = new OpenFiles();
 	private volatile Attributes attributes;
 	private volatile Authorizer authorizer;
+	private volatile AclPolicy aclPolicy;
 	/** startAndWait has read the settings, so the start() it calls doesn't */
 	private boolean prepared;
 	private volatile ReplayCache replayCache;
@@ -272,6 +273,8 @@ public class NfsServer extends NioServer {
 		authorizer = new Authorizer(getUserRegistry(), idMap, anonymous == null ? null : anonymous.trim(),
 				getName(), getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME),
 				message -> logInfo(message));
+		aclPolicy = new AclPolicy(authorizer, attributes, getUserRegistry(),
+				getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME));
 		authNoneAllowed = !authorizer.isChecking() || anonymous != null;
 		prepareSecurity();
 		if( !authorizer.isChecking() ) {
@@ -296,7 +299,16 @@ public class NfsServer extends NioServer {
 		t.scheduleWithFixedDelay(() -> housekeeping(idle), period, period, TimeUnit.MILLISECONDS);
 		timer = t;
 		for (Export e : getExports()) {
-			t.execute(() -> e.getNodes().pruneMissing());
+			t.execute(() -> {
+				e.getNodes().pruneMissing();
+				AclStore acls = e.getAcls();
+				if( acls != null ) {
+					int dropped = acls.pruneMissing(e);
+					if( dropped > 0 ) {
+						logInfo("Server "+getName()+": export "+e.getName()+" dropped "+dropped+" access control lists of files that are gone");
+					}
+				}
+			});
 		}
 		logInfo("Server "+getName()+" shares "+describeExports()+", lease "+lease/1000+"s, domain "+domain
 				+(authorizer.isChecking() ? ", users checked by the registry" : ""));
@@ -317,9 +329,26 @@ public class NfsServer extends NioServer {
 			if( state == null ) {
 				e.getNodes().close();
 				e.getNodes().setMaxNodes(max);
+				closeAcls(e);
 			} else {
 				e.getNodes().open(new NodeStore(state.getChild(e.stateFileName())), max);
 				logInfo("Server "+getName()+": export "+e.getName()+" keeps "+e.getNodes().storedSize()+" file identities in "+state);
+				AclStore acls = new AclStore(state.getChild(e.aclFileName()));
+				acls.open();
+				e.setAcls(acls);
+				logInfo("Server "+getName()+": export "+e.getName()+" keeps "+acls.size()+" access control lists in "+state);
+			}
+		}
+	}
+
+	private static void closeAcls(Export e) {
+		AclStore acls = e.getAcls();
+		e.setAcls(null);
+		if( acls != null ) {
+			try {
+				acls.close();
+			} catch (IOException ex) {
+				// closing; nothing more to do
 			}
 		}
 	}
@@ -364,6 +393,9 @@ public class NfsServer extends NioServer {
 			for (Export e : getExports()) {
 				e.getNodes().trim(false);
 				e.getNodes().flush();
+				if( e.getAcls() != null ) {
+					e.getAcls().flush();
+				}
 			}
 		} catch (IOException | RuntimeException e) {
 			logError("NFS housekeeping failed", e);
@@ -394,6 +426,7 @@ public class NfsServer extends NioServer {
 				} catch (IOException ex) {
 					logError("Closing the node file of "+e.getName()+" failed", ex);
 				}
+				closeAcls(e);
 			}
 			GssServer g = gss;
 			gss = null;
@@ -614,6 +647,10 @@ public class NfsServer extends NioServer {
 	/** @return the duplicate request cache, or null when {@value #PROPERTY_REPLAY_CACHE_SIZE} is 0 */
 	public ReplayCache getReplayCache() {
 		return replayCache;
+	}
+
+	public AclPolicy getAclPolicy() {
+		return aclPolicy;
 	}
 
 	public Authorizer getAuthorizer() {

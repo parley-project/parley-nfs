@@ -193,6 +193,23 @@ public class Export implements ProtectedResource {
 	}
 
 	/** @return the name of this export's node file in the state folder (decision D41) */
+	/** The file this export's access control lists are kept in, in the state folder (decision D51). */
+	String aclFileName() {
+		String n = stateFileName();
+		return n.substring(0, n.length()-".nodes".length())+".acls";
+	}
+
+	private volatile AclStore acls;
+
+	/** @return the access control lists, null when there is no state folder (ACLs are off, decision D51) */
+	public AclStore getAcls() {
+		return acls;
+	}
+
+	void setAcls(AclStore acls) {
+		this.acls = acls;
+	}
+
 	String stateFileName() {
 		StringBuilder b = new StringBuilder();
 		for (char c : name.toCharArray()) {

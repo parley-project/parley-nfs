@@ -156,9 +156,10 @@ public class Authorizer {
 		}
 	}
 
-	private AuthorizationResult decide(Export export, Caller caller, InetAddress client, int localPort, String permission) {
-		String name = null;
+	/** The registry user a caller is: the Kerberos user, the id map's user for the uid, else the anonymous user; null for none. */
+	private String userName(Caller caller) {
 		boolean gss = caller.getFlavor() == Rpc.RPCSEC_GSS;
+		String name = null;
 		if( gss ) {
 			name = caller.getUser();
 		} else if( caller.getFlavor() == Rpc.AUTH_SYS ) {
@@ -167,6 +168,102 @@ public class Authorizer {
 		if( name == null && !gss ) {
 			name = anonymous;
 		}
+		return name;
+	}
+
+	/** Who a caller is for an access control list (decision D52): the user and the groups it is in. */
+	public static final class Identity {
+		private final String name;
+		private final long uid;
+		private final java.util.Set<Long> gids;
+		private final java.util.Set<String> groups;
+
+		Identity(String name, long uid, java.util.Set<Long> gids, java.util.Set<String> groups) {
+			this.name = name;
+			this.uid = uid;
+			this.gids = gids;
+			this.groups = groups;
+		}
+
+		/** @return the registry user's name, null when the caller isn't a user */
+		public String getName() {
+			return name;
+		}
+
+		/** @return the AUTH_SYS uid, -1 when there is none */
+		public long getUid() {
+			return uid;
+		}
+
+		/** @return the AUTH_SYS gid and gids */
+		public java.util.Set<Long> getGids() {
+			return gids;
+		}
+
+		/** @return the names of the groups the user is in, as the registry names them */
+		public java.util.Set<String> getGroups() {
+			return groups;
+		}
+	}
+
+	private static final class IdEntry {
+		final Identity identity;
+		final long until;
+
+		IdEntry(Identity identity, long until) {
+			this.identity = identity;
+			this.until = until;
+		}
+	}
+
+	private final Map<String, IdEntry> identities = new ConcurrentHashMap<String, IdEntry>();
+
+	/**
+	 * Who the caller is, for checking an access control list. Without a registry the user is the
+	 * id map's, and there are no groups.
+	 *
+	 * @throws Nfs4Exception NFS4ERR_DELAY if the registry is unavailable
+	 */
+	public Identity identity(Caller caller, InetAddress client) throws Nfs4Exception {
+		String key = caller.getStateKey()+"|"+client;
+		long now = System.currentTimeMillis();
+		IdEntry e = identities.get(key);
+		if( e != null && e.until >= now ) {
+			return e.identity;
+		}
+		String name = userName(caller);
+		java.util.Set<Long> gids = new java.util.HashSet<Long>();
+		if( caller.getAuthSys() != null ) {
+			gids.add(caller.getAuthSys().getGid());
+			for (long g : caller.getAuthSys().getGids()) {
+				gids.add(g);
+			}
+		}
+		java.util.Set<String> groups = new java.util.HashSet<String>();
+		if( registry != null && name != null ) {
+			try {
+				ParleyPrincipal user = registry.findUser(name);
+				if( user != null ) {
+					name = user.getName();
+					for (ParleyPrincipal g : registry.findGroups(user)) {
+						groups.add(g.getName());
+					}
+				}
+			} catch (UserRegistryUnavailableException ex) {
+				throw new Nfs4Exception(us.bringardner.parley.nfs.protocol.Nfs4.NFS4ERR_DELAY, ex.getMessage());
+			}
+		}
+		Identity id = new Identity(name, caller.getUid(), gids, groups);
+		if( identities.size() > 10000 ) {
+			identities.values().removeIf(x -> x.until < now);
+		}
+		identities.put(key, new IdEntry(id, now+cacheMillis));
+		return id;
+	}
+
+	private AuthorizationResult decide(Export export, Caller caller, InetAddress client, int localPort, String permission) {
+		boolean gss = caller.getFlavor() == Rpc.RPCSEC_GSS;
+		String name = userName(caller);
 		if( name == null ) {
 			return AuthorizationResult.denied(caller+" isn't mapped to a user and there is no anonymous user");
 		}
@@ -196,5 +293,6 @@ public class Authorizer {
 	/** Forget the answers kept (e.g. after the registry or id map changed). */
 	public void clear() {
 		cache.clear();
+		identities.clear();
 	}
 }

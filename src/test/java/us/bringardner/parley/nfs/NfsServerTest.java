@@ -764,8 +764,10 @@ public class NfsServerTest {
 		try (java.util.stream.Stream<Path> files = Files.list(tmp)) {
 			List<String> names = new ArrayList<String>();
 			files.forEach(f -> names.add(f.getFileName().toString()));
-			assertEquals(1, names.size(), names.toString());
-			assertTrue(names.get(0).startsWith("test.") && names.get(0).endsWith(".nodes"), names.get(0));
+			assertEquals(2, names.size(), names.toString());
+			java.util.Collections.sort(names);
+			assertTrue(names.get(0).startsWith("test.") && names.get(0).endsWith(".acls"), names.get(0));
+			assertTrue(names.get(1).startsWith("test.") && names.get(1).endsWith(".nodes"), names.get(1));
 		}
 		assertEquals(50, server.getExports().get(0).getNodes().getMaxNodes());
 	}
