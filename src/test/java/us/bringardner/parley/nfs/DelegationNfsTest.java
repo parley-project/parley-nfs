@@ -121,11 +121,19 @@ public class DelegationNfsTest {
 					d.readUnsignedInt();
 					d.readInt();
 					int proc = d.readInt();
-					d.readInt();
+					int flavor = d.readInt();
 					d.readOpaque(400);
 					d.readInt();
 					d.readOpaque(400);
 					XdrEncoder r = new XdrEncoder();
+					if( proc != 0 && flavor == 0 ) {
+						// like a Linux client: a callback with no credential is denied (AUTH_TOOWEAK)
+						r.writeInt(0).writeInt(xid).writeInt(1).writeInt(1).writeInt(1).writeInt(5);
+						r.setInt(0, 0x80000000 | (r.size()-4));
+						out.write(r.array(), 0, r.size());
+						out.flush();
+						continue;
+					}
 					r.writeInt(0).writeInt(xid).writeInt(1).writeInt(0).writeInt(0).writeOpaque(new byte[0]).writeInt(0);
 					if( proc == 0 ) {
 						nulls++;
