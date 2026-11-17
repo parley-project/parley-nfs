@@ -199,6 +199,18 @@ public class NfsHandler implements INioHandler {
 		return Rpc.startAccepted(xid, Rpc.RPCSEC_GSS, gc.verifier, stat, size);
 	}
 
+	/** A RPCSEC_GSS call refused: said at INFO, because the client only sees a failed mount. */
+	private XdrEncoder gssDeny(int xid, int stat) {
+		String why = stat == Rpc.AUTH_BADCRED ? "AUTH_BADCRED (credential isn't understood, or the flavor isn't set up)"
+				: stat == Rpc.AUTH_BADVERF ? "AUTH_BADVERF (the checksum of the call doesn't check)"
+				: stat == Rpc.AUTH_TOOWEAK ? "AUTH_TOOWEAK (that service isn't in parley.nfs.sec)"
+				: stat == Rpc.RPCSEC_GSS_CREDPROBLEM ? "RPCSEC_GSS_CREDPROBLEM (no such context)"
+				: stat == Rpc.RPCSEC_GSS_CTXPROBLEM ? "RPCSEC_GSS_CTXPROBLEM (the context is used up)"
+				: "auth_stat "+stat;
+		server.logInfo("RPCSEC_GSS call "+Integer.toUnsignedString(xid)+" refused: "+why);
+		return Rpc.authError(xid, stat);
+	}
+
 	/**
 	 * Check a RPCSEC_GSS call's credential and verifier, and take it through INIT and DESTROY.
 	 *
@@ -209,7 +221,7 @@ public class NfsHandler implements INioHandler {
 		int xid = call.getXid();
 		GssServer gs = server.getGss();
 		if( gs == null ) {
-			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+			return gssDeny(xid, Rpc.AUTH_BADCRED);
 		}
 		long version;
 		int proc;
@@ -223,28 +235,28 @@ public class NfsHandler implements INioHandler {
 			service = cd.readInt();
 			handle = cd.readOpaque(Rpc.MAX_AUTH_BYTES);
 		} catch (XdrException e) {
-			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+			return gssDeny(xid, Rpc.AUTH_BADCRED);
 		}
 		if( version != 1 ) {
-			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+			return gssDeny(xid, Rpc.AUTH_BADCRED);
 		}
 		if( proc == GssServer.PROC_INIT || proc == GssServer.PROC_CONTINUE_INIT ) {
 			return gssInit(call, proc == GssServer.PROC_INIT ? new byte[0] : handle, gs);
 		}
 		if( proc != GssServer.PROC_DATA && proc != GssServer.PROC_DESTROY ) {
-			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+			return gssDeny(xid, Rpc.AUTH_BADCRED);
 		}
 		GssServer.Context ctx = gs.find(handle);
 		if( ctx == null ) {
-			return Rpc.authError(xid, Rpc.RPCSEC_GSS_CREDPROBLEM);
+			return gssDeny(xid, Rpc.RPCSEC_GSS_CREDPROBLEM);
 		}
 		if( call.getVerifierFlavor() != Rpc.RPCSEC_GSS
 				|| !ctx.verifyMic(call.getHeaderThroughCredential(), call.getVerifierBody()) ) {
-			return Rpc.authError(xid, Rpc.AUTH_BADVERF);
+			return gssDeny(xid, Rpc.AUTH_BADVERF);
 		}
 		if( gc.seq >= GssServer.MAXSEQ ) {
 			gs.destroy(ctx);
-			return Rpc.authError(xid, Rpc.RPCSEC_GSS_CTXPROBLEM);
+			return gssDeny(xid, Rpc.RPCSEC_GSS_CTXPROBLEM);
 		}
 		if( !ctx.acceptSeq(gc.seq) ) {
 			// a repeat of a call, or one too old: it is not answered (RFC 2203 section 5.3.3.1)
@@ -266,13 +278,15 @@ public class NfsHandler implements INioHandler {
 			return null;
 		}
 		if( service != GssServer.SVC_NONE && service != GssServer.SVC_INTEGRITY && service != GssServer.SVC_PRIVACY ) {
-			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
+			return gssDeny(xid, Rpc.AUTH_BADCRED);
 		}
 		String flavor = service == GssServer.SVC_PRIVACY ? NfsServer.SEC_KRB5P
 				: service == GssServer.SVC_INTEGRITY ? NfsServer.SEC_KRB5I : NfsServer.SEC_KRB5;
 		if( !server.allowsSec(flavor) ) {
-			return Rpc.authError(xid, Rpc.AUTH_TOOWEAK);
+			return gssDeny(xid, Rpc.AUTH_TOOWEAK);
 		}
+		server.logDebug(() -> "RPCSEC_GSS call "+Integer.toUnsignedString(xid)+" from "+ctx.getPrincipal()
+			+": procedure "+call.getProcedure()+", service "+service+", sequence number "+gc.seq);
 		gc.ctx = ctx;
 		gc.service = service;
 		gc.args = call.getArguments();
