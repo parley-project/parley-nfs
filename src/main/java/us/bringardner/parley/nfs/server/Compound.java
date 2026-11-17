@@ -173,6 +173,9 @@ public class Compound {
 			out.truncate(statusPos+4);
 			status = e.getStatus();
 			final int st = status;
+			if( st == Nfs4.NFS4ERR_ACCESS || st == Nfs4.NFS4ERR_PERM ) {
+				server.logInfo(Nfs4.opName(op)+" refused with "+st+" to "+caller+" from "+client+(e.getMessage() == null ? "" : ": "+e.getMessage()));
+			}
 			server.logDebug(() -> Nfs4.opName(op)+" "+st+(e.getMessage() == null ? "" : " "+e.getMessage()));
 		} catch (XdrDecoder.InvalidUtf8Exception e) {
 			out.truncate(statusPos+4);
