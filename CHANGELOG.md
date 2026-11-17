@@ -2,6 +2,12 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-17: numbers from the registry)
+
+- **uid and gid come from the registry's principals (D48).** An AUTH_SYS uid is the user whose `uid` attribute it is
+  (`UserRegistry.findByAttribute`); a file's owner is sent as its user's `uid` and its group as its group's `gid`.
+  The id map stays the fallback. Needs parley-iam's `principal-ids` branch.
+
 ### Added (2026-11-17: read delegations)
 
 - **`parley.nfs.delegations` (default false): read delegations (RFC 7530 section 10.4).** A client that opens a

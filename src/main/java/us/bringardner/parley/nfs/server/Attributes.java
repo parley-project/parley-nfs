@@ -25,6 +25,7 @@
 package us.bringardner.parley.nfs.server;
 
 import java.io.IOException;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.nio.file.attribute.GroupPrincipal;
@@ -81,7 +82,7 @@ public class Attributes {
 
 	private final String domain;
 	/** owners in it are sent as their uid numbers (decision D15); may be null */
-	private final IdMap idMap;
+	private final IdNumbers numbers;
 	private final long leaseSeconds;
 	private final long maxRead;
 	private final long maxWrite;
@@ -103,9 +104,9 @@ public class Attributes {
 	 * @param maxRead the most a READ returns
 	 * @param maxWrite the most a WRITE takes
 	 */
-	public Attributes(String domain, IdMap idMap, long leaseSeconds, long maxRead, long maxWrite) {
+	public Attributes(String domain, IdNumbers numbers, long leaseSeconds, long maxRead, long maxWrite) {
 		this.domain = domain;
-		this.idMap = idMap;
+		this.numbers = numbers;
 		this.leaseSeconds = leaseSeconds;
 		this.maxRead = maxRead;
 		this.maxWrite = maxWrite;
@@ -395,7 +396,7 @@ public class Attributes {
 			if( p == null ) {
 				return qualify(NOBODY);
 			}
-			Long uid = idMap == null ? null : idMap.uid(p.getName());
+			Long uid = numbers == null ? null : numbers.uid(p.getName());
 			return uid != null ? Long.toString(uid) : qualify(p.getName());
 		} catch (IOException | RuntimeException e) {
 			return qualify(NOBODY);
@@ -419,8 +420,8 @@ public class Attributes {
 			if( name.equals(p.getName()) ) {
 				return true;
 			}
-			if( idMap != null && !name.isEmpty() && name.chars().allMatch(Character::isDigit) ) {
-				return p.getName().equals(idMap.userName(Long.parseLong(name)));
+			if( numbers != null && !name.isEmpty() && name.chars().allMatch(Character::isDigit) ) {
+				return p.getName().equals(numbers.user(Long.parseLong(name)));
 			}
 		} catch (IOException | RuntimeException e) {
 			return false;
@@ -431,7 +432,11 @@ public class Attributes {
 	String group(FileSource f) {
 		try {
 			GroupPrincipal p = f.getGroup();
-			return p == null ? qualify(NOBODY) : qualify(p.getName());
+			if( p == null ) {
+				return qualify(NOBODY);
+			}
+			Long gid = numbers == null ? null : numbers.gid(p.getName());
+			return gid != null ? Long.toString(gid) : qualify(p.getName());
 		} catch (IOException | RuntimeException e) {
 			return qualify(NOBODY);
 		}

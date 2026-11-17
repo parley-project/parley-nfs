@@ -265,7 +265,9 @@ public class NfsServer extends NioServer {
 		if( idmap != null && !idmap.trim().isEmpty() ) {
 			idMap = IdMap.load(FileSourceFactory.getDefaultFactory().resolve(idmap.trim()));
 		}
-		attributes = new Attributes(domain.trim(), idMap, lease/1000, ioSize, ioSize);
+		long numberCache = getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME);
+		IdNumbers numbers = new IdNumbers(getUserRegistry(), idMap, numberCache);
+		attributes = new Attributes(domain.trim(), numbers, lease/1000, ioSize, ioSize);
 		stateManager = new StateManager((int) (System.currentTimeMillis()/1000), lease);
 		delegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false) ? new Delegations(this) : null;
 		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
@@ -274,7 +276,7 @@ public class NfsServer extends NioServer {
 		if( anonymous != null && anonymous.trim().isEmpty() ) {
 			anonymous = null;
 		}
-		authorizer = new Authorizer(getUserRegistry(), idMap, anonymous == null ? null : anonymous.trim(),
+		authorizer = new Authorizer(getUserRegistry(), numbers, anonymous == null ? null : anonymous.trim(),
 				getName(), getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME),
 				message -> logInfo(message));
 		aclPolicy = new AclPolicy(authorizer, attributes, getUserRegistry(),
