@@ -39,6 +39,7 @@ import us.bringardner.parley.net.nio.INioHandler;
 import us.bringardner.parley.net.nio.NioClient;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.rpc.RecordMarkingDecoder;
+import us.bringardner.parley.nfs.rpc.AuthSys;
 import us.bringardner.parley.nfs.rpc.Rpc;
 import us.bringardner.parley.nfs.rpc.XdrDecoder;
 import us.bringardner.parley.nfs.rpc.XdrEncoder;
@@ -155,7 +156,8 @@ public class Delegations implements Closeable {
 		e.writeInt(0); // the record header, set below
 		e.writeInt(xid).writeInt(Rpc.CALL).writeInt(Rpc.RPC_VERSION).writeUnsignedInt(c.cbProgram)
 			.writeInt(Nfs4.NFS4_CALLBACK_VERSION).writeInt(proc);
-		e.writeInt(Rpc.AUTH_NONE).writeOpaque(new byte[0]);
+		// AUTH_SYS, not AUTH_NONE: a Linux client refuses a callback but CB_NULL that has no credential (the call is denied)
+		e.writeInt(Rpc.AUTH_SYS).writeOpaque(new AuthSys((int) System.currentTimeMillis(), "parley-nfs", 0, 0, new long[0]).encode());
 		e.writeInt(Rpc.AUTH_NONE).writeOpaque(new byte[0]);
 		e.write(args);
 		Rpc.finishRecord(e);
