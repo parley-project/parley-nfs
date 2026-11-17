@@ -2,6 +2,15 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-16: file handles that survive a restart)
+
+- **`parley.nfs.stateDir`: a node file per export** keeps the ids that can't be worked out from a
+  path again (renamed files, clashes, paths too long for a handle), so a handle still finds its
+  file after a restart, even when the file was renamed and another took its old name.
+- **`parley.nfs.maxNodes` (100000): the node table no longer grows for ever.** Nodes not asked for
+  in two minutes (and with no open or lock) are dropped from memory and come back with the same id.
+  Without a state folder only nodes whose id is their path's hash are dropped.
+
 ### Added (2026-11-16: Kerberos)
 
 - **RPCSEC_GSS with Kerberos V5 (RFC 2203), all three levels: `krb5`, `krb5i`, `krb5p`.** Set

@@ -187,6 +187,20 @@ public class Export implements ProtectedResource {
 		return nodes;
 	}
 
+	/** @return true if a path fits in this export's file handle (a longer one has a handle of the fileid only) */
+	public boolean pathFits(String path) {
+		return header()+path.getBytes(StandardCharsets.UTF_8).length <= Nfs4.NFS4_FHSIZE;
+	}
+
+	/** @return the name of this export's node file in the state folder (decision D41) */
+	String stateFileName() {
+		StringBuilder b = new StringBuilder();
+		for (char c : name.toCharArray()) {
+			b.append(Character.isLetterOrDigit(c) || c == '.' || c == '-' || c == '_' ? c : '_');
+		}
+		return b.append('.').append(Integer.toHexString(name.hashCode())).append(".nodes").toString();
+	}
+
 	public Node getRootNode() {
 		return nodes.get("");
 	}
@@ -275,6 +289,21 @@ public class Export implements ProtectedResource {
 		}
 		long fileid = b.getLong();
 		Node ret = nodes.find(fileid);
+		if( ret == null ) {
+			// an identity kept in the node file: a renamed file's fileid, or a long path's (decision D41)
+			String kept = nodes.storedPath(fileid);
+			if( kept != null ) {
+				try {
+					if( !resolve(kept).exists() ) {
+						nodes.forgetStored(fileid);
+						throw new Nfs4Exception(Nfs4.NFS4ERR_STALE);
+					}
+				} catch (IOException e) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_STALE, e.getMessage());
+				}
+				return nodes.get(kept, fileid);
+			}
+		}
 		if( ret == null && withPath ) {
 			String path = new String(handle, header, handle.length-header, StandardCharsets.UTF_8);
 			if( !validPath(path) ) {

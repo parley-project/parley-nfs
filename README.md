@@ -5,12 +5,13 @@ An NFS version 4.0 server ([RFC 7530](https://www.rfc-editor.org/rfc/rfc7530), X
 It shares one folder of any FileSource: a local folder, a memory file system, or any other
 parley-files provider.
 
-## Status: phases 1 and 2
+## Status: phases 1, 2, 4 and 5
 
 Supported:
 
 1. ONC RPC over TCP (RFC 5531 record marking), the NULL and COMPOUND procedures.
-2. AUTH_NONE and AUTH_SYS credentials.
+2. AUTH_NONE and AUTH_SYS credentials, and RPCSEC_GSS with Kerberos V5 (see "Kerberos").
+   More than one export is shared through a read-only folder of exports (see "More than one export").
 3. Every NFSv4.0 operation except those listed under "Not yet", with client IDs and leases
    (SETCLIENTID, SETCLIENTID_CONFIRM, RENEW), opens and share reservations (OPEN, OPEN_CONFIRM,
    OPEN_DOWNGRADE, CLOSE) and owner sequence numbers with replies saved for retransmissions.
@@ -23,8 +24,7 @@ Supported:
 Not yet (answered with NFS4ERR_NOTSUPP):
 
 1. Delegations, ACLs and named attributes (phase 3).
-2. RPCSEC_GSS / Kerberos V5 (its own phase).
-3. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos. A FileSource
+2. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos. A FileSource
    can't make them, so a client gets errors it can name: `ln` says "Invalid cross-device link"
    (NFS4ERR_XDEV) and `ln -s`, `mkfifo` and `mknod` say "Operation not permitted" (NFS4ERR_PERM).
    NFS4ERR_NOTSUPP and NFS4ERR_BADTYPE have no Linux error text ("Unknown error 524").
@@ -33,7 +33,7 @@ Not yet (answered with NFS4ERR_NOTSUPP):
 that can't tell shows 0. File counts (`df -i`) aren't reported.
 
 There is no stable storage of client state, so a restarted server has no grace period: clients
-start over with SETCLIENTID and can't reclaim opens.
+start over with SETCLIENTID and can't reclaim opens. File handles are kept (see "File handles").
 
 ## Running
 
@@ -63,6 +63,8 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.anonymous` | none | The user unmapped uids and AUTH_NONE stand for; none refuses them |
 | `parley.nfs.authCacheTime` | 60s | How long a permission answer is kept |
 | `parley.nfs.fileIdleTime` | 30s | How long an unused file stays open |
+| `parley.nfs.stateDir` | none | A folder (a path or `filesource:` URL) that keeps one node file per export, so handles survive a restart (see "File handles") |
+| `parley.nfs.maxNodes` | 100000 | The most files per export kept in memory; those nobody has asked for lately go first |
 | `parley.nfs.replayCacheSize` | 1024 | How many replies of COMPOUNDs that changed something are kept for a client that sends the call again; 0 for none |
 
 ## More than one export
@@ -103,6 +105,30 @@ and without an anonymous user that is refused ("access denied by server"). Root 
 unless the id map says so, so it acts as the anonymous user too. The id map is read when the server
 starts; the registry's own user file is read again when it changes. A refused call is logged once
 for each answer (a minute, `parley.nfs.authCacheTime`) at INFO with the user and the reason.
+
+## File handles
+
+A file handle holds the file's id and, when it fits in 128 bytes, its path. The id is a hash of the
+path the file had when the server first saw it, and a rename keeps it while the server runs. That
+leaves three weak spots after a restart: a renamed file's old handle names a path that is gone (or
+now holds another file), a file whose path is too long for a handle has no path to find it by, and
+the server's table of files grows with every file a client has listed.
+
+Set `parley.nfs.stateDir` to a folder (on any FileSource, not inside an export) and the server keeps
+a small node file there for each export: just the ids that can't be worked out from a path again
+(renamed files, files whose id was taken by another, and long paths). It is a journal that is
+appended to and written out about every five seconds, so a crash can lose the last few seconds
+of renames; it is rewritten tidily at each start, and ids of files that no longer exist are
+forgotten in the background after a start. A handle whose file is gone answers NFS4ERR_STALE.
+
+`parley.nfs.maxNodes` limits the files held in memory: when there are more, those not asked for in
+the last two minutes (and with no open or lock) are dropped, and made again with the same id when
+asked for. Without a state folder only files whose id is their path's hash can be dropped, since
+that is the only id that comes back.
+
+Not covered: a file renamed by another program on the server's machine. It looks like a new file
+at its new path, and its old handles go stale. Telling the two apart needs a file identity on
+FileSource (parley-files).
 
 ## Kerberos (RPCSEC_GSS)
 

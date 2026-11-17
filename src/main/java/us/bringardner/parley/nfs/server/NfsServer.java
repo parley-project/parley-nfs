@@ -100,6 +100,10 @@ public class NfsServer extends NioServer {
 	public static final String PROPERTY_FILE_IDLE_TIME = "fileIdleTime";
 	public static final String PROPERTY_REPLAY_CACHE_SIZE = "replayCacheSize";
 	/** The security flavors taken, comma separated: sys, krb5, krb5i, krb5p (decision D34). */
+	/** The folder that keeps each export's node file, so handles survive a restart (decision D41). */
+	public static final String PROPERTY_STATE_DIR = "stateDir";
+	/** The most nodes kept in memory per export (decision D42). */
+	public static final String PROPERTY_MAX_NODES = "maxNodes";
 	public static final String PROPERTY_SEC = "sec";
 	public static final String PROPERTY_KRB5_PRINCIPAL = "krb5.principal";
 	public static final String PROPERTY_KRB5_KEYTAB = "krb5.keytab";
@@ -286,12 +290,38 @@ public class NfsServer extends NioServer {
 		workers = w;
 		setHandlerExecutor(w);
 		long idle = getDuration(propertyName(PROPERTY_FILE_IDLE_TIME), DEFAULT_FILE_IDLE_TIME);
+		prepareNodes();
 		ScheduledExecutorService t = Executors.newSingleThreadScheduledExecutor(threads(getName()+"-timer"));
 		long period = Math.max(500, Math.min(lease/4, 5000));
 		t.scheduleWithFixedDelay(() -> housekeeping(idle), period, period, TimeUnit.MILLISECONDS);
 		timer = t;
+		for (Export e : getExports()) {
+			t.execute(() -> e.getNodes().pruneMissing());
+		}
 		logInfo("Server "+getName()+" shares "+describeExports()+", lease "+lease/1000+"s, domain "+domain
 				+(authorizer.isChecking() ? ", users checked by the registry" : ""));
+	}
+
+	/** Open each export's node file (when there is a state folder) and set the node limit. */
+	private void prepareNodes() throws IOException {
+		int max = getIntProperty(propertyName(PROPERTY_MAX_NODES), NodeTable.DEFAULT_MAX_NODES);
+		String dir = getProperty(propertyName(PROPERTY_STATE_DIR));
+		FileSource state = null;
+		if( dir != null && !dir.trim().isEmpty() ) {
+			state = FileSourceFactory.getDefaultFactory().resolve(dir.trim());
+			if( !state.exists() && !state.mkdirs() ) {
+				throw new IOException("Can't make "+propertyName(PROPERTY_STATE_DIR)+" "+dir);
+			}
+		}
+		for (Export e : getExports()) {
+			if( state == null ) {
+				e.getNodes().close();
+				e.getNodes().setMaxNodes(max);
+			} else {
+				e.getNodes().open(new NodeStore(state.getChild(e.stateFileName())), max);
+				logInfo("Server "+getName()+": export "+e.getName()+" keeps "+e.getNodes().storedSize()+" file identities in "+state);
+			}
+		}
 	}
 
 	private static ThreadFactory threads(String name) {
@@ -331,6 +361,10 @@ public class NfsServer extends NioServer {
 			for (IOException e : openFiles.closeIdle(now, idle, n -> s != null && s.hasWriteOpen(n))) {
 				logError("Closing an idle file failed", e);
 			}
+			for (Export e : getExports()) {
+				e.getNodes().trim(false);
+				e.getNodes().flush();
+			}
 		} catch (IOException | RuntimeException e) {
 			logError("NFS housekeeping failed", e);
 		}
@@ -354,6 +388,13 @@ public class NfsServer extends NioServer {
 				Thread.currentThread().interrupt();
 			}
 			shutdownExecutors();
+			for (Export e : getExports()) {
+				try {
+					e.getNodes().close();
+				} catch (IOException ex) {
+					logError("Closing the node file of "+e.getName()+" failed", ex);
+				}
+			}
 			GssServer g = gss;
 			gss = null;
 			if( g != null ) {

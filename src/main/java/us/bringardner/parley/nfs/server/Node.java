@@ -39,6 +39,8 @@ public final class Node {
 	private final Export export;
 	private volatile String path;
 	private volatile long changes;
+	/** when a call last asked for this node (the table drops idle ones, decision D42) */
+	private volatile long lastUsed = System.currentTimeMillis();
 	/** The opens of this file, guarded by the StateManager. */
 	final List<StateManager.OpenState> opens = new ArrayList<StateManager.OpenState>();
 	/** The lock states of this file (decision D17), guarded by the StateManager. */
@@ -86,6 +88,14 @@ public final class Node {
 		}
 		int i = path.lastIndexOf('/');
 		return i < 0 ? "" : path.substring(0, i);
+	}
+
+	void touch() {
+		lastUsed = System.currentTimeMillis();
+	}
+
+	long getLastUsed() {
+		return lastUsed;
 	}
 
 	/** Count a change made through this server (part of the change attribute). */
