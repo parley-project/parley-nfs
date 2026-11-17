@@ -69,6 +69,7 @@ import us.bringardner.parley.net.server.ServerMain;
  * <li>{@code domain}: the domain of owner names (user@domain), which must match the clients'
  * NFSv4 domain; default the DNS domain of this host's name, else {@value #DEFAULT_DOMAIN}</li>
  * <li>{@code leaseTime}: default 90s</li>
+ * <li>{@code delegations}: true to give clients read delegations (needs a callback address that works), default false</li>
  * <li>{@code ioSize}: the most bytes one READ returns or one WRITE takes, default 1 MiB</li>
  * <li>{@code workerThreads}: threads that run requests (file access blocks), default {@value #DEFAULT_WORKER_THREADS}</li>
  * <li>{@code idmap}: properties file mapping AUTH_SYS uids to user names ({@link IdMap})</li>
@@ -102,6 +103,7 @@ public class NfsServer extends NioServer {
 	/** The security flavors taken, comma separated: sys, krb5, krb5i, krb5p (decision D34). */
 	/** The folder that keeps each export's node file, so handles survive a restart (decision D41). */
 	public static final String PROPERTY_STATE_DIR = "stateDir";
+	public static final String PROPERTY_DELEGATIONS = "delegations";
 	/** The most nodes kept in memory per export (decision D42). */
 	public static final String PROPERTY_MAX_NODES = "maxNodes";
 	public static final String PROPERTY_SEC = "sec";
@@ -137,6 +139,7 @@ public class NfsServer extends NioServer {
 	private volatile Export pseudo;
 	private volatile boolean hideUnreadable = true;
 	private volatile StateManager stateManager;
+	private volatile Delegations delegations;
 	private final OpenFiles openFiles = new OpenFiles();
 	private volatile Attributes attributes;
 	private volatile Authorizer authorizer;
@@ -264,6 +267,7 @@ public class NfsServer extends NioServer {
 		}
 		attributes = new Attributes(domain.trim(), idMap, lease/1000, ioSize, ioSize);
 		stateManager = new StateManager((int) (System.currentTimeMillis()/1000), lease);
+		delegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false) ? new Delegations(this) : null;
 		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
 		replayCache = replays > 0 ? new ReplayCache(replays) : null;
 		String anonymous = getProperty(propertyName(PROPERTY_ANONYMOUS));
@@ -380,6 +384,7 @@ public class NfsServer extends NioServer {
 			long now = System.currentTimeMillis();
 			StateManager s = stateManager;
 			if( s != null ) {
+				s.revokeOverdue(now);
 				for (Node n : s.expire(now)) {
 					if( !s.hasOpens(n) ) {
 						openFiles.release(n);
@@ -427,6 +432,10 @@ public class NfsServer extends NioServer {
 					logError("Closing the node file of "+e.getName()+" failed", ex);
 				}
 				closeAcls(e);
+			}
+			Delegations d = delegations;
+			if( d != null ) {
+				d.close();
 			}
 			GssServer g = gss;
 			gss = null;
@@ -630,6 +639,11 @@ public class NfsServer extends NioServer {
 			e.tagged((int) (NodeTable.hash(e.getName()) & 0x7fffffff));
 		}
 		pseudo = p;
+	}
+
+	/** @return the calls to clients, null unless {@code parley.nfs.delegations} is on (D47) */
+	public Delegations getDelegations() {
+		return delegations;
 	}
 
 	public StateManager getStateManager() {

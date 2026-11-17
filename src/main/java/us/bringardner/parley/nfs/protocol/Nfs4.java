@@ -151,6 +151,7 @@ public final class Nfs4 {
 	public static final int NFS4ERR_FILE_OPEN = 10046;
 	public static final int NFS4ERR_ADMIN_REVOKED = 10047;
 	public static final int NFS4ERR_CB_PATH_DOWN = 10048;
+	public static final int NFS4ERR_DELEG_REVOKED = 10087;
 
 	// ---------------------------------------------------------------- nfs_ftype4
 	public static final int NF4REG = 1;
@@ -301,6 +302,12 @@ public final class Nfs4 {
 	public static final int CLAIM_DELEGATE_CUR = 2;
 	public static final int CLAIM_DELEGATE_PREV = 3;
 	// open_delegation_type4
+	/** The callback side (RFC 7530 section 20): the client's program is version 1, proc 0 is CB_NULL, 1 is CB_COMPOUND */
+	public static final int NFS4_CALLBACK_VERSION = 1;
+	public static final int CB_NULL = 0;
+	public static final int CB_COMPOUND = 1;
+	public static final int OP_CB_RECALL = 4;
+
 	public static final int OPEN_DELEGATE_NONE = 0;
 	public static final int OPEN_DELEGATE_READ = 1;
 	public static final int OPEN_DELEGATE_WRITE = 2;

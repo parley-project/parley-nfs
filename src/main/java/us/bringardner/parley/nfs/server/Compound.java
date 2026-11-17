@@ -466,6 +466,17 @@ public class Compound {
 		}
 		if( id.isSpecial() ) {
 			state.checkAnonymous(node, access);
+			if( access == Nfs4.OPEN4_SHARE_ACCESS_WRITE ) {
+				recallDelegations(node, null);
+			}
+			return;
+		}
+		StateManager.DelegationState d = state.findDelegation(id, node);
+		if( d != null ) {
+			// a read delegation's stateid reads, and doesn't write
+			if( access == Nfs4.OPEN4_SHARE_ACCESS_WRITE ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_OPENMODE);
+			}
 			return;
 		}
 		OpenState s = state.findIo(id, node);
@@ -939,6 +950,7 @@ public class Compound {
 		if( !f.exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
+		recallDelegations(export.getNodes().findPath(path), null);
 		if( export.getAcls() != null ) {
 			aclCheckDelete(dir, d, export.getNodes().get(path), f);
 		}
@@ -999,6 +1011,8 @@ public class Compound {
 			}
 			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "can't move a folder into itself");
 		}
+		recallDelegations(export.getNodes().findPath(fromPath), null);
+		recallDelegations(export.getNodes().findPath(toPath), null);
 		long fromBefore = change(fromDir, fd);
 		long toBefore = change(toDir, td);
 		boolean fromIsDir = from.isDirectory();
@@ -1140,11 +1154,11 @@ public class Compound {
 	private void setclientid() throws Nfs4Exception, XdrException {
 		byte[] verifier = in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
 		byte[] id = in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
-		in.readUnsignedInt(); // cb_program: no callbacks (no delegations)
+		long cbProgram = in.readUnsignedInt();
 		String netid = in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
 		String addr = in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
-		in.readUnsignedInt(); // callback_ident
-		ClientRecord r = state.setClientId(verifier, id, caller.getStateKey(), netid, addr);
+		int cbIdent = (int) in.readUnsignedInt();
+		ClientRecord r = state.setClientId(verifier, id, caller.getStateKey(), netid, addr, cbProgram, cbIdent, client);
 		out.writeLong(r.getClientid());
 		out.writeFixedOpaque(r.getConfirmVerifier());
 	}
@@ -1153,6 +1167,11 @@ public class Compound {
 		long clientid = in.readLong();
 		byte[] verifier = in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
 		state.confirm(clientid, verifier, caller.getStateKey());
+		Delegations d = server.getDelegations();
+		if( d != null ) {
+			// whether the client's callback address works decides if it gets delegations (D47)
+			d.probe(state.renew(clientid));
+		}
 	}
 
 	private void renew() throws Nfs4Exception, XdrException {
@@ -1161,10 +1180,30 @@ public class Compound {
 	}
 
 	private void delegreturn() throws Nfs4Exception, XdrException {
-		stateid();
-		current();
-		// no delegations are handed out
-		throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
+		StateId id = stateid();
+		Node node = current();
+		state.returnDelegation(id, node);
+	}
+
+	/**
+	 * Make a conflicting access wait for the delegations of a file to come back: the recall of each is sent,
+	 * and the access gets NFS4ERR_DELAY, which a client answers by trying again (RFC 7530 section 10.4.1).
+	 * @param own a client whose own delegation isn't a conflict, may be null
+	 */
+	private void recallDelegations(Node node, ClientRecord own) throws Nfs4Exception {
+		Delegations d = server.getDelegations();
+		if( d == null || node == null ) {
+			return;
+		}
+		List<StateManager.DelegationState> list = state.recallFor(node, own, System.currentTimeMillis());
+		if( list.isEmpty() ) {
+			return;
+		}
+		byte[] fh = node.getExport().toHandle(node);
+		for (StateManager.DelegationState s : list) {
+			d.recall(s, fh);
+		}
+		throw new Nfs4Exception(Nfs4.NFS4ERR_DELAY, "a delegation of "+node+" is being recalled");
 	}
 
 	// ================================================================ opens
@@ -1193,6 +1232,7 @@ public class Compound {
 		}
 		int claim = in.readInt();
 		String name = null;
+		StateId delegation = null;
 		switch (claim) {
 		case Nfs4.CLAIM_NULL:
 			name = in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
@@ -1201,8 +1241,8 @@ public class Compound {
 			in.readInt();
 			break;
 		case Nfs4.CLAIM_DELEGATE_CUR:
-			stateid();
-			in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+			delegation = stateid();
+			name = in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
 			break;
 		case Nfs4.CLAIM_DELEGATE_PREV:
 			in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
@@ -1218,6 +1258,7 @@ public class Compound {
 		ClientRecord c = state.renew(clientid);
 		OpenOwner owner = state.openOwner(c, ownerBytes, seqid);
 		final String fname = name;
+		final StateId fdelegation = delegation;
 		final int fhow = how;
 		final Attributes.Settings fsettings = settings;
 		final byte[] fexclusive = exclusive;
@@ -1225,16 +1266,27 @@ public class Compound {
 			if( claim == Nfs4.CLAIM_PREVIOUS ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE);
 			}
-			if( claim != Nfs4.CLAIM_NULL ) {
-				throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP, "no delegations");
+			if( claim != Nfs4.CLAIM_NULL && claim != Nfs4.CLAIM_DELEGATE_CUR ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP, "no delegations across a restart");
 			}
 			Export.checkName(fname);
-			return openNull(owner, dir, fname, access, deny, opentype, fhow, fsettings, fexclusive);
+			if( claim == Nfs4.CLAIM_DELEGATE_CUR ) {
+				StateManager.DelegationState d = state.findDelegation(fdelegation, dir == null ? null : delegatedNode(dir, fname));
+				if( d == null || d.getClient() != c ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "not a delegation of this client");
+				}
+			}
+			return openNull(owner, dir, fname, access, deny, opentype, fhow, fsettings, fexclusive, claim == Nfs4.CLAIM_DELEGATE_CUR);
 		});
 	}
 
+	/** @return the node of a file in a folder, as the delegation of that file names it */
+	private Node delegatedNode(Node dir, String name) throws Nfs4Exception {
+		return dir.getExport().getNodes().get(Export.childPath(dir, name));
+	}
+
 	private Node openNull(OpenOwner owner, Node dir, String name, int access, int deny, int opentype, int how,
-			Attributes.Settings settings, byte[] exclusive) throws Nfs4Exception, IOException {
+			Attributes.Settings settings, byte[] exclusive, boolean byDelegation) throws Nfs4Exception, IOException {
 		FileSource d = currentDir();
 		Export export = dir.getExport();
 		if( (access & Nfs4.OPEN4_SHARE_ACCESS_READ) != 0 ) {
@@ -1302,6 +1354,10 @@ public class Compound {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_ISDIR);
 		}
 		Node node = export.getNodes().get(path);
+		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 || deny != Nfs4.OPEN4_SHARE_DENY_NONE || truncate ) {
+			// an open that can change the file or shut others out waits for the delegations of it
+			recallDelegations(node, byDelegation ? owner.getClient() : null);
+		}
 		OpenState s = state.open(owner, node, access, deny);
 		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
 			// a SETATTR of a mode without write after this OPEN doesn't stop its WRITEs (D16)
@@ -1321,7 +1377,21 @@ public class Compound {
 		int rflags = Nfs4.OPEN4_RESULT_LOCKTYPE_POSIX | (owner.isConfirmed() ? 0 : Nfs4.OPEN4_RESULT_CONFIRM);
 		out.writeInt(rflags);
 		out.writeIntArray(attrset);
-		out.writeInt(Nfs4.OPEN_DELEGATE_NONE);
+		StateManager.DelegationState granted = null;
+		if( server.getDelegations() != null && !byDelegation && opentype == Nfs4.OPEN4_NOCREATE && owner.isConfirmed()
+				&& access == Nfs4.OPEN4_SHARE_ACCESS_READ && deny == Nfs4.OPEN4_SHARE_DENY_NONE ) {
+			granted = state.grantRead(owner.getClient(), node);
+		}
+		if( granted == null ) {
+			out.writeInt(Nfs4.OPEN_DELEGATE_NONE);
+		} else {
+			// open_read_delegation4: the stateid, whether it is already being recalled, and the permissions
+			// the client may take for granted: none, so it asks the server (ACCESS) about each user
+			out.writeInt(Nfs4.OPEN_DELEGATE_READ);
+			writeStateid(granted.stateId());
+			out.writeBoolean(false);
+			out.writeInt(Nfs4.ACE4_ACCESS_ALLOWED_ACE_TYPE).writeInt(0).writeInt(0).writeString(Ace.EVERYONE);
+		}
 		current = node;
 		return node;
 	}

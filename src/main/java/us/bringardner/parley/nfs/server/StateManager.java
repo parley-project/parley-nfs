@@ -69,6 +69,9 @@ public class StateManager {
 	private final Map<String, ClientRecord> unconfirmedByName = new HashMap<String, ClientRecord>();
 	private final Map<String, OpenState> states = new HashMap<String, OpenState>();
 	private final Map<String, LockState> lockStates = new HashMap<String, LockState>();
+	private final Map<String, DelegationState> delegationStates = new HashMap<String, DelegationState>();
+	/** Delegations taken back after the lease ran out, so their stateids get NFS4ERR_DELEG_REVOKED */
+	private final Set<String> revokedDelegations = new LinkedHashSet<String>();
 	private final Set<Integer> expired = new LinkedHashSet<Integer>();
 
 	/**
@@ -100,12 +103,20 @@ public class StateManager {
 		volatile byte[] confirmVerifier;
 		volatile String cbNetid;
 		volatile String cbAddr;
+		volatile long cbProgram;
+		volatile int cbIdent;
+		/** where SETCLIENTID came from: the only host a callback address may name (D56) */
+		volatile java.net.InetAddress cbFrom;
+		/** true once a CB_NULL to the callback address was answered */
+		volatile boolean cbUp;
 		volatile boolean confirmed;
 		volatile long lastRenew;
 		/** open-owners by owner, guarded by the StateManager */
 		Map<String, OpenOwner> owners = new HashMap<String, OpenOwner>();
 		/** lock-owners by owner, guarded by the StateManager */
 		Map<String, LockOwner> lockOwners = new HashMap<String, LockOwner>();
+		/** the delegations of this client, guarded by the StateManager */
+		final Set<DelegationState> delegations = new LinkedHashSet<DelegationState>();
 
 		ClientRecord(long clientid, byte[] verifier, String name, String principal, byte[] confirmVerifier,
 				String cbNetid, String cbAddr) {
@@ -438,8 +449,8 @@ public class StateManager {
 	 * SETCLIENTID (RFC 7530 section 16.33.5).
 	 * @return the unconfirmed record: its client ID and the verifier SETCLIENTID_CONFIRM must give
 	 */
-	public synchronized ClientRecord setClientId(byte[] verifier, byte[] id, String principal, String cbNetid, String cbAddr)
-			throws Nfs4Exception {
+	public synchronized ClientRecord setClientId(byte[] verifier, byte[] id, String principal, String cbNetid, String cbAddr,
+			long cbProgram, int cbIdent, java.net.InetAddress from) throws Nfs4Exception {
 		String name = nameKey(id);
 		ClientRecord confirmed = confirmedByName.get(name);
 		if( confirmed != null && !confirmed.principal.equals(principal) && hasState(confirmed) ) {
@@ -457,6 +468,9 @@ public class StateManager {
 			clientid = newClientid();
 		}
 		ClientRecord ret = new ClientRecord(clientid, verifier.clone(), name, principal, newVerifier(), cbNetid, cbAddr);
+		ret.cbProgram = cbProgram;
+		ret.cbIdent = cbIdent;
+		ret.cbFrom = from;
 		unconfirmedByName.put(name, ret);
 		unconfirmedById.put(clientid, ret);
 		return ret;
@@ -482,6 +496,10 @@ public class StateManager {
 				// a callback update: the record (and its state) stays, with the new callback
 				c.cbNetid = u.cbNetid;
 				c.cbAddr = u.cbAddr;
+				c.cbProgram = u.cbProgram;
+				c.cbIdent = u.cbIdent;
+				c.cbFrom = u.cbFrom;
+				c.cbUp = false;
 				c.confirmVerifier = u.confirmVerifier;
 				c.lastRenew = System.currentTimeMillis();
 				return;
@@ -968,6 +986,150 @@ public class StateManager {
 		return false;
 	}
 
+	// ================================================================== delegations
+
+	/** A read delegation (RFC 7530 section 10.4): the client may serve reads of the file itself until it is recalled. */
+	public static final class DelegationState {
+		final byte[] other;
+		final ClientRecord client;
+		final Node node;
+		/** when the recall began, 0 before; the client has the lease time from then to return it */
+		volatile long recalledAt;
+		/** set by whoever sends the CB_RECALL, so one is sent */
+		final java.util.concurrent.atomic.AtomicBoolean recallSent = new java.util.concurrent.atomic.AtomicBoolean();
+
+		DelegationState(byte[] other, ClientRecord client, Node node) {
+			this.other = other;
+			this.client = client;
+			this.node = node;
+		}
+
+		public StateId stateId() {
+			return new StateId(1, other);
+		}
+
+		public ClientRecord getClient() {
+			return client;
+		}
+
+		public Node getNode() {
+			return node;
+		}
+	}
+
+	/**
+	 * Hand a client a read delegation of a file it has just opened for reading, if that is safe: its callback
+	 * path is up, nobody has the file open for writing, no delegation of it is being recalled and the client
+	 * has none already.
+	 * @return the delegation, null if none is given
+	 */
+	public synchronized DelegationState grantRead(ClientRecord c, Node node) {
+		if( !c.cbUp || !c.confirmed || confirmedById.get(c.clientid) != c ) {
+			return null;
+		}
+		for (DelegationState d : node.delegations) {
+			if( d.client == c || d.recalledAt != 0 ) {
+				return null;
+			}
+		}
+		for (OpenState s : node.opens) {
+			if( (s.access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
+				return null;
+			}
+		}
+		DelegationState d = new DelegationState(newOther(c), c, node);
+		node.delegations.add(d);
+		c.delegations.add(d);
+		delegationStates.put(stateKey(d.other), d);
+		return d;
+	}
+
+	/**
+	 * The delegations of a file that a conflicting access has to wait for. The recall of each begins (the
+	 * caller sends the CB_RECALL); a delegation whose recall ran past the lease is revoked and left out.
+	 * @param ignore a client whose own delegation is no conflict (it reopens by it), may be null
+	 * @return the delegations to wait for, empty if the access may go on
+	 */
+	public synchronized List<DelegationState> recallFor(Node node, ClientRecord ignore, long now) {
+		List<DelegationState> ret = new ArrayList<DelegationState>();
+		for (DelegationState d : new ArrayList<DelegationState>(node.delegations)) {
+			if( d.client == ignore ) {
+				continue;
+			}
+			if( d.recalledAt != 0 && now - d.recalledAt > leaseMillis ) {
+				revoke(d);
+				continue;
+			}
+			if( d.recalledAt == 0 ) {
+				d.recalledAt = now;
+			}
+			ret.add(d);
+		}
+		return ret;
+	}
+
+	/** Take back the delegations whose recall has run past the lease. */
+	public synchronized void revokeOverdue(long now) {
+		for (DelegationState d : new ArrayList<DelegationState>(delegationStates.values())) {
+			if( d.recalledAt != 0 && now - d.recalledAt > leaseMillis ) {
+				revoke(d);
+			}
+		}
+	}
+
+	private void revoke(DelegationState d) {
+		forget(d);
+		revokedDelegations.add(stateKey(d.other));
+		if( revokedDelegations.size() > EXPIRED_REMEMBERED ) {
+			Iterator<String> i = revokedDelegations.iterator();
+			i.next();
+			i.remove();
+		}
+	}
+
+	private void forget(DelegationState d) {
+		d.node.delegations.remove(d);
+		d.client.delegations.remove(d);
+		delegationStates.remove(stateKey(d.other));
+	}
+
+	/**
+	 * The delegation a stateid names.
+	 * @return null if the stateid isn't a delegation's
+	 * @throws Nfs4Exception NFS4ERR_DELEG_REVOKED, or NFS4ERR_BAD_STATEID if it's another file's delegation
+	 */
+	public synchronized DelegationState findDelegation(StateId id, Node node) throws Nfs4Exception {
+		if( id.isSpecial() || id.other.length != Nfs4.NFS4_OTHER_SIZE ) {
+			return null;
+		}
+		String key = stateKey(id.other);
+		DelegationState d = delegationStates.get(key);
+		if( d == null ) {
+			if( revokedDelegations.contains(key) ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_DELEG_REVOKED);
+			}
+			return null;
+		}
+		if( d.node != node ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "delegation of another file");
+		}
+		d.client.lastRenew = System.currentTimeMillis();
+		return d;
+	}
+
+	/** DELEGRETURN */
+	public synchronized void returnDelegation(StateId id, Node node) throws Nfs4Exception {
+		DelegationState d = findDelegation(id, node);
+		if( d == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
+		}
+		forget(d);
+	}
+
+	public synchronized int getDelegationCount() {
+		return delegationStates.size();
+	}
+
 	// ================================================================== leases
 
 	/**
@@ -1006,6 +1168,9 @@ public class StateManager {
 
 	private List<Node> dropState(ClientRecord c) {
 		List<Node> ret = new ArrayList<Node>();
+		for (DelegationState d : new ArrayList<DelegationState>(c.delegations)) {
+			forget(d);
+		}
 		// the client's locks go with it (D20)
 		for (LockOwner o : new ArrayList<LockOwner>(c.lockOwners.values())) {
 			dropLockOwner(o);
