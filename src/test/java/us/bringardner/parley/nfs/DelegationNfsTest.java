@@ -73,8 +73,9 @@ public class DelegationNfsTest {
 		final List<byte[][]> recalls = Collections.synchronizedList(new ArrayList<byte[][]>());
 		volatile boolean closed;
 
+		/** @param host the address to listen on, null for all of them */
 		Callbacks(String host) throws IOException {
-			socket = new ServerSocket(0, 10, InetAddress.getByName(host));
+			socket = new ServerSocket(0, 10, host == null ? null : InetAddress.getByName(host));
 			thread = new Thread(this::run, "test-callbacks");
 			thread.setDaemon(true);
 			thread.start();
@@ -82,8 +83,13 @@ public class DelegationNfsTest {
 
 		/** the universal address of this socket */
 		String addr() {
+			return addr(socket.getInetAddress().getHostAddress());
+		}
+
+		/** the universal address of this socket's port on a host */
+		String addr(String host) {
 			int p = socket.getLocalPort();
-			return socket.getInetAddress().getHostAddress()+"."+(p >> 8)+"."+(p & 255);
+			return host+"."+(p >> 8)+"."+(p & 255);
 		}
 
 		private void run() {
@@ -224,6 +230,20 @@ public class DelegationNfsTest {
 		Callbacks c = new Callbacks(host);
 		callbacks.add(c);
 		return c;
+	}
+
+	/** @return an IPv4 address of this machine that isn't a loopback address, null for none */
+	private static String otherAddress() throws IOException {
+		for (java.net.NetworkInterface i : Collections.list(java.net.NetworkInterface.getNetworkInterfaces())) {
+			if( i.isUp() && !i.isLoopback() ) {
+				for (InetAddress a : Collections.list(i.getInetAddresses())) {
+					if( a instanceof java.net.Inet4Address && !a.isLinkLocalAddress() ) {
+						return a.getHostAddress();
+					}
+				}
+			}
+		}
+		return null;
 	}
 
 	private static byte[] bytes(String s) {
@@ -443,9 +463,12 @@ public class DelegationNfsTest {
 	@Test
 	public void theCallbackAddressIsTheClientsOwnHost() throws Exception {
 		start(true, "90s");
-		Callbacks elsewhere = callbacks("127.0.0.2");
+		// a callback server that answers on this machine's other address, which isn't where the client comes from
+		String other = otherAddress();
+		org.junit.jupiter.api.Assumptions.assumeTrue(other != null, "this machine has no address besides 127.0.0.1");
+		Callbacks elsewhere = callbacks(null);
 		TestClient c = client();
-		long id = clientid(c, "a", elsewhere.addr());
+		long id = clientid(c, "a", elsewhere.addr(other));
 		Thread.sleep(500);
 		assertEquals(0, elsewhere.nulls, "another host isn't called");
 		byte[] dir = rootFh(c);

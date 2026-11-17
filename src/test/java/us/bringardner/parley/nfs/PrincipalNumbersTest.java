@@ -152,10 +152,11 @@ public class PrincipalNumbersTest {
 		String group = root.getGroup().getName();
 
 		BasicUserRegistry registry = new BasicUserRegistry(1000);
-		for (String name : new String[] {"tony", owner}) {
+		// the caller is named so that it can't be the user who owns the files (that is tony on a Mac)
+		for (String name : new String[] {"caller", owner}) {
 			ParleyPrincipal u = registry.createUser(name);
 			registry.grant(u, new BasicParleyPermission(StandardPermissions.READ, export.getId()));
-			registry.setAttribute(u, "uid", name.equals("tony") ? "2000" : "4321");
+			registry.setAttribute(u, "uid", name.equals("caller") ? "2000" : "4321");
 		}
 		// users and groups share names in a registry, so a group named like the owner (root and root) can't be tested here
 		boolean testGroup = !group.equals(owner);
