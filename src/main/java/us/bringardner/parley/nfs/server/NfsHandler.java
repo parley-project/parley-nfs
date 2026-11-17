@@ -93,17 +93,20 @@ public class NfsHandler implements INioHandler {
 		switch (call.getCredentialFlavor()) {
 		case Rpc.AUTH_NONE:
 			if( !server.isAuthNoneAllowed() ) {
+				server.logInfo("Call "+Integer.toUnsignedString(xid)+" refused: AUTH_NONE (no credential) isn't allowed");
 				return Rpc.authError(xid, Rpc.AUTH_TOOWEAK);
 			}
 			caller = Caller.none();
 			break;
 		case Rpc.AUTH_SYS:
 			if( !server.allowsSec(NfsServer.SEC_SYS) ) {
+				server.logInfo("Call "+Integer.toUnsignedString(xid)+" refused: AUTH_SYS isn't in "+server.propertyName(NfsServer.PROPERTY_SEC));
 				return Rpc.authError(xid, Rpc.AUTH_TOOWEAK);
 			}
 			try {
 				caller = new Caller(Rpc.AUTH_SYS, AuthSys.decode(call.getCredentialBody()));
 			} catch (XdrException e) {
+				server.logInfo("Call "+Integer.toUnsignedString(xid)+" refused: the AUTH_SYS credential isn't understood ("+e.getMessage()+")");
 				return Rpc.authError(xid, Rpc.AUTH_BADCRED);
 			}
 			break;
@@ -120,6 +123,7 @@ public class NfsHandler implements INioHandler {
 			caller = Caller.gss(gc.ctx.getPrincipal(), gc.ctx.getUser());
 			break;
 		default:
+			server.logInfo("Call "+Integer.toUnsignedString(xid)+" refused: credential flavor "+call.getCredentialFlavor()+" isn't known");
 			return Rpc.authError(xid, Rpc.AUTH_BADCRED);
 		}
 		if( call.getProgram() != Nfs4.PROGRAM ) {
