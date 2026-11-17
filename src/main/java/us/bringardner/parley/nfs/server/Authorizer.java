@@ -65,7 +65,7 @@ public class Authorizer {
 	public static final String METHOD_GSS = "rpcsec_gss";
 
 	private final UserRegistry registry;
-	private final IdMap idMap;
+	private final IdNumbers numbers;
 	private final String anonymous;
 	private final String serverName;
 	private final long cacheMillis;
@@ -84,24 +84,24 @@ public class Authorizer {
 
 	/**
 	 * @param registry the user registry, null for no checks
-	 * @param idMap uid to user name
+	 * @param numbers uid to user (the registry's uid attributes, then the id map); null for none
 	 * @param anonymous the user name of unmapped uids and AUTH_NONE, null to refuse them
 	 * @param serverName for the requester
 	 * @param cacheMillis how long an answer is kept
 	 */
-	public Authorizer(UserRegistry registry, IdMap idMap, String anonymous, String serverName, long cacheMillis) {
-		this(registry, idMap, anonymous, serverName, cacheMillis, null);
+	public Authorizer(UserRegistry registry, IdNumbers numbers, String anonymous, String serverName, long cacheMillis) {
+		this(registry, numbers, anonymous, serverName, cacheMillis, null);
 	}
 
 	/**
 	 * @param refusals told (once for each fresh answer, not each call) when a call is refused, so an
 	 * operator can see why without turning on debug logging; null for none
 	 */
-	public Authorizer(UserRegistry registry, IdMap idMap, String anonymous, String serverName, long cacheMillis,
+	public Authorizer(UserRegistry registry, IdNumbers numbers, String anonymous, String serverName, long cacheMillis,
 			java.util.function.Consumer<String> refusals) {
 		this.refusals = refusals;
 		this.registry = registry;
-		this.idMap = idMap;
+		this.numbers = numbers;
 		this.anonymous = anonymous;
 		this.serverName = serverName;
 		this.cacheMillis = cacheMillis;
@@ -157,13 +157,13 @@ public class Authorizer {
 	}
 
 	/** The registry user a caller is: the Kerberos user, the id map's user for the uid, else the anonymous user; null for none. */
-	private String userName(Caller caller) {
+	private String userName(Caller caller) throws UserRegistryUnavailableException {
 		boolean gss = caller.getFlavor() == Rpc.RPCSEC_GSS;
 		String name = null;
 		if( gss ) {
 			name = caller.getUser();
 		} else if( caller.getFlavor() == Rpc.AUTH_SYS ) {
-			name = idMap == null ? null : idMap.userName(caller.getUid());
+			name = numbers == null ? null : numbers.user(caller.getUid());
 		}
 		if( name == null && !gss ) {
 			name = anonymous;
@@ -231,7 +231,12 @@ public class Authorizer {
 		if( e != null && e.until >= now ) {
 			return e.identity;
 		}
-		String name = userName(caller);
+		String name;
+		try {
+			name = userName(caller);
+		} catch (UserRegistryUnavailableException ex) {
+			throw new Nfs4Exception(us.bringardner.parley.nfs.protocol.Nfs4.NFS4ERR_DELAY, ex.getMessage());
+		}
 		java.util.Set<Long> gids = new java.util.HashSet<Long>();
 		if( caller.getAuthSys() != null ) {
 			gids.add(caller.getAuthSys().getGid());
@@ -263,7 +268,12 @@ public class Authorizer {
 
 	private AuthorizationResult decide(Export export, Caller caller, InetAddress client, int localPort, String permission) {
 		boolean gss = caller.getFlavor() == Rpc.RPCSEC_GSS;
-		String name = userName(caller);
+		String name;
+		try {
+			name = userName(caller);
+		} catch (UserRegistryUnavailableException ex) {
+			return AuthorizationResult.unavailable(ex.getMessage());
+		}
 		if( name == null ) {
 			return AuthorizationResult.denied(caller+" isn't mapped to a user and there is no anonymous user");
 		}
@@ -294,5 +304,8 @@ public class Authorizer {
 	public void clear() {
 		cache.clear();
 		identities.clear();
+		if( numbers != null ) {
+			numbers.clear();
+		}
 	}
 }

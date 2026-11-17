@@ -94,7 +94,7 @@ Without a user registry every client that can connect may read (and, unless `rea
 the export, as a classic NFS export to a trusted network.
 
 With a user registry (parley-net's provider setting, or `setUserRegistry`) each call's AUTH_SYS uid
-is mapped to a user name with the id map, the user is found in the registry, and the registry is
+is mapped to a user name (the user whose `uid` attribute it is, else the id map), the user is found in the registry, and the registry is
 asked for the `read` or `write` permission on the export (a resource of type `nfs-export`). AUTH_SYS
 proves nothing; the server vouches for it, and a registry that handles `VouchedCredential` decides
 whether to trust that.
@@ -105,6 +105,14 @@ and without an anonymous user that is refused ("access denied by server"). Root 
 unless the id map says so, so it acts as the anonymous user too. The id map is read when the server
 starts; the registry's own user file is read again when it changes. A refused call is logged once
 for each answer (a minute, `parley.nfs.authCacheTime`) at INFO with the user and the reason.
+
+## Numbers for users and groups
+
+A user in the registry can carry a `uid` attribute and a group a `gid` attribute (in a FileUserRegistry users
+file: `tony, ..., uid=1000` on the user line). An AUTH_SYS call is the user whose `uid` it is; a file's owner is
+sent as its user's `uid`, and its group as its group's `gid`, so a Linux client shows them as its own users.
+`parley.nfs.idmap` (`uid.1000=tony`) is the fallback for a user without the attribute. If two users have one
+`uid`, the registry can't tell who a call is and the id map decides.
 
 ## Access control lists
 
