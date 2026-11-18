@@ -52,6 +52,10 @@ done
 $CLIENT_EXEC test -f "$MOUNT/$NAME" 2>/dev/null \
 	|| { echo "the VM doesn't see $MOUNT/$NAME: is the export mounted there, and does $VM answer?"; exit 2; }
 
+# a client's first OPEN after a server start has to be confirmed, and the server gives no delegation on it; so read
+# the file once first, and the open that follows is given one
+$CLIENT_EXEC cat "$MOUNT/$NAME" > /dev/null 2>&1
+
 # the client opens the file for reading and keeps it open
 $CLIENT_EXEC sh -c 'exec 3< "$1"; echo OPEN; sleep 900' sh "$MOUNT/$NAME" > "$TMP/holder.out" 2>&1 &
 HOLDER=$!
@@ -61,9 +65,20 @@ until grep -q '^OPEN' "$TMP/holder.out" 2>/dev/null; do
 	[ $n -le 0 ] && { echo "the VM didn't open the file: $(cat "$TMP/holder.out")"; exit 2; }
 	sleep 0.2
 done
-echo "the client has $MOUNT/$NAME open (a read delegation should have been given)."
+echo "the client has $MOUNT/$NAME open."
 [ -n "$SERVER_LOG" ] && [ ! -f "$SERVER_LOG" ] && { echo "SERVER_LOG $SERVER_LOG doesn't exist"; exit 2; }
 # the server writes a delegation down when it gives it, so this shows whether one is there to be reclaimed
+# the delegation is written down when it is given; no entry means the test would prove nothing
+n=10
+while [ $n -gt 0 ] && ! grep -q "$NAME" "$STATE_DIR/delegations.state" 2>/dev/null; do
+	n=$(( n - 1 ))
+	sleep 0.5
+done
+if ! grep -q "$NAME" "$STATE_DIR/delegations.state" 2>/dev/null; then
+	echo "no delegation of $NAME is in $STATE_DIR/delegations.state: the server gave the client none, so a restart would show nothing."
+	echo "Look for 'Gave a read delegation' or 'No read delegation ... : <reason>' in the server's log."
+	exit 2
+fi
 if [ -f "$STATE_DIR/delegations.state" ]; then
 	echo "delegations.state: $(wc -c < "$STATE_DIR/delegations.state" | tr -d ' ') bytes, changed $(date -r "$STATE_DIR/delegations.state" +%T) (now $(date +%T))"
 	strings "$STATE_DIR/delegations.state" | head -5 | sed 's/^/      /'
