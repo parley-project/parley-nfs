@@ -71,7 +71,7 @@ import us.bringardner.parley.net.server.ServerMain;
  * <li>{@code leaseTime}: default 90s</li>
  * <li>{@code mirrorLocks}: true to hold the clients' byte-range locks as FileSource locks too, so another
  *     Parley program that locks the file sees them (and a lock it holds is refused to the clients), default false (D68)</li>
- * <li>{@code delegations}: true to give clients read delegations (needs a callback address that works), default false</li>
+ * <li>{@code delegations}: true to give clients read delegations (needs a callback address that works), default false; none are given while mirrorLocks is on</li>
  * <li>{@code ioSize}: the most bytes one READ returns or one WRITE takes, default 1 MiB</li>
  * <li>{@code workerThreads}: threads that run requests (file access blocks), default {@value #DEFAULT_WORKER_THREADS}</li>
  * <li>{@code idmap}: properties file mapping AUTH_SYS uids to user names ({@link IdMap})</li>
@@ -289,17 +289,20 @@ public class NfsServer extends NioServer {
 			stateManager.setLockMirror(new LockMirror(node -> node.getExport().resolve(node), message -> logWarn(message)));
 			logInfo("Server "+getName()+": byte-range locks of clients are also held as file locks ("+propertyName(PROPERTY_MIRROR_LOCKS)+"=true)");
 		}
-		delegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false) ? new Delegations(this) : null;
-		writeDelegations = getBooleanProperty(propertyName(PROPERTY_WRITE_DELEGATIONS), false);
-		if( writeDelegations && delegations == null ) {
+		boolean wantDelegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false);
+		boolean wantWrites = getBooleanProperty(propertyName(PROPERTY_WRITE_DELEGATIONS), false);
+		if( wantWrites && !wantDelegations ) {
 			throw new IOException(propertyName(PROPERTY_WRITE_DELEGATIONS)+" needs "+propertyName(PROPERTY_DELEGATIONS)+"=true: write delegations are delegations that are also given for writing (decision D62)");
 		}
-		if( writeDelegations && stateManager.hasLockMirror() ) {
-			// a client holding a write delegation takes its byte-range locks itself and never tells the server,
-			// so they could not be held as file locks (decision D69)
-			writeDelegations = false;
-			logInfo("Server "+getName()+": no write delegations are given, because "+propertyName(PROPERTY_MIRROR_LOCKS)+"=true: a client with a write delegation keeps its locks to itself");
+		if( wantDelegations && stateManager.hasLockMirror() ) {
+			// a client holding a delegation, read or write, takes its byte-range locks itself and never tells
+			// the server, so they could not be held as file locks (decisions D69, D70)
+			wantDelegations = false;
+			wantWrites = false;
+			logInfo("Server "+getName()+": no delegations are given, because "+propertyName(PROPERTY_MIRROR_LOCKS)+"=true: a client with a delegation keeps its locks to itself");
 		}
+		delegations = wantDelegations ? new Delegations(this) : null;
+		writeDelegations = wantWrites;
 		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
 		replayCache = replays > 0 ? new ReplayCache(replays) : null;
 		String anonymous = getProperty(propertyName(PROPERTY_ANONYMOUS));
