@@ -28,9 +28,11 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,6 +47,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import us.bringardner.parley.files.FileSource;
+import us.bringardner.parley.files.lock.FileSourceLock;
 import us.bringardner.parley.files.DelegatingFileSource;
 import us.bringardner.parley.files.memory.MemoryFileSourceFactory;
 import us.bringardner.parley.iam.ParleyPrincipal;
@@ -1412,6 +1415,149 @@ public class NfsServerTest {
 		Locked l = lockNew(a, ro.fh, ro, 5, ida, "l", Nfs4.READW_LT, 0, 10);
 		assertEquals(Nfs4.NFS4_OK, l.status);
 		assertEquals(1, server.getStateManager().getLockCount());
+	}
+
+	// ------------------------------------------------------------------ mirrored locks (D68)
+
+	/** @return true if this JVM holds a lock on the region of the file (the server's mirror, here) */
+	private boolean fileLocked(String name, long position, long size) throws IOException {
+		try (FileSourceLock l = root.getChild(name).tryLock(position, size, false)) {
+			return l == null;
+		} catch (OverlappingFileLockException e) {
+			return true;
+		}
+	}
+
+	/** A client's locks are file locks too: held while it holds them, split and joined as they are. */
+	@Test
+	public void lockedRangesAreHeldAsFileLocks() throws Exception {
+		property("test.nfs.mirror.mirrorLocks", "true");
+		TestClient a = start("test.nfs.mirror", false);
+		long ida = clientid(a, "client-a");
+		Opened oa = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, oa, 2);
+		assertFalse(fileLocked("f", 0, 100));
+
+		Locked la = lockNew(a, oa.fh, oa, 3, ida, "a-lock", Nfs4.WRITE_LT, 0, 50);
+		assertEquals(Nfs4.NFS4_OK, la.status);
+		assertEquals(Nfs4.NFS4_OK, lockMore(a, oa.fh, la.lock, 1, Nfs4.WRITE_LT, 50, 50).status);
+		assertTrue(fileLocked("f", 10, 1));
+		assertTrue(fileLocked("f", 90, 1));
+		assertFalse(fileLocked("f", 100, 10));
+
+		// a part unlocked: the rest is held, the part is not
+		assertEquals(Nfs4.NFS4_OK, locku(a, oa.fh, la.lock, 2, 40, 20));
+		assertTrue(fileLocked("f", 10, 1));
+		assertFalse(fileLocked("f", 45, 10));
+		assertTrue(fileLocked("f", 90, 1));
+
+		// to the end of the file
+		assertEquals(Nfs4.NFS4_OK, lockMore(a, oa.fh, la.lock, 3, Nfs4.READ_LT, 1000, -1L).status);
+		assertTrue(fileLocked("f", 1L << 40, 1));
+
+		assertEquals(Nfs4.NFS4_OK, locku(a, oa.fh, la.lock, 4, 0, -1L));
+		assertFalse(fileLocked("f", 0, 100));
+		assertFalse(fileLocked("f", 1000, 100));
+	}
+
+	/** Another program's lock on the file is the answer to a LOCK or a LOCKT, and nothing is kept. */
+	@Test
+	public void aLockAnotherProgramHoldsDeniesTheLock() throws Exception {
+		property("test.nfs.mirrorforeign.mirrorLocks", "true");
+		TestClient a = start("test.nfs.mirrorforeign", false);
+		long ida = clientid(a, "client-a");
+		Opened oa = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, oa, 2);
+		try (FileSourceLock foreign = root.getChild("f").tryLock(0, 100, false)) {
+			assertNotNull(foreign);
+			Locked l = lockNew(a, oa.fh, oa, 3, ida, "a-lock", Nfs4.WRITE_LT, 50, 10);
+			assertEquals(Nfs4.NFS4ERR_DENIED, l.status);
+			assertEquals(50, l.offset);
+			assertEquals(10, l.length);
+			assertEquals(Nfs4.WRITE_LT, l.type);
+			assertEquals(0, l.clientid);
+			assertEquals("", l.owner);
+			assertEquals(0, server.getStateManager().getLockCount());
+
+			Locked t = lockt(a, oa.fh, ida, "a-lock", Nfs4.READ_LT, 99, 5);
+			assertEquals(Nfs4.NFS4ERR_DENIED, t.status);
+			assertEquals(99, t.offset);
+			// past it
+			assertEquals(Nfs4.NFS4_OK, lockt(a, oa.fh, ida, "a-lock", Nfs4.WRITE_LT, 100, 5).status);
+		}
+		// released: the lock is given, and the foreign lock is not there to test
+		Locked l = lockNew(a, oa.fh, oa, 4, ida, "a-lock", Nfs4.WRITE_LT, 50, 10);
+		assertEquals(Nfs4.NFS4_OK, l.status);
+		assertTrue(fileLocked("f", 55, 1));
+		assertEquals(Nfs4.NFS4_OK, lockt(a, oa.fh, ida, "a-lock", Nfs4.WRITE_LT, 50, 10).status);
+	}
+
+	/** A LOCK that can't be given leaves what the owner held as it was, still held. */
+	@Test
+	public void aRefusedLockKeepsWhatTheOwnerHeld() throws Exception {
+		property("test.nfs.mirrorkeep.mirrorLocks", "true");
+		TestClient a = start("test.nfs.mirrorkeep", false);
+		long ida = clientid(a, "client-a");
+		Opened oa = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, oa, 2);
+		Locked la = lockNew(a, oa.fh, oa, 3, ida, "a-lock", Nfs4.WRITE_LT, 0, 100);
+		assertEquals(Nfs4.NFS4_OK, la.status);
+		try (FileSourceLock foreign = root.getChild("f").tryLock(150, 10, false)) {
+			assertNotNull(foreign);
+			// reaching over the foreign lock
+			assertEquals(Nfs4.NFS4ERR_DENIED, lockMore(a, oa.fh, la.lock, 1, Nfs4.WRITE_LT, 0, 200).status);
+			assertTrue(fileLocked("f", 10, 1));
+			assertTrue(fileLocked("f", 99, 1));
+			assertFalse(fileLocked("f", 100, 20));
+		}
+		// the client's lock is still the one of [0, 100)
+		assertEquals(Nfs4.NFS4_OK, lockMore(a, oa.fh, la.lock, 2, Nfs4.WRITE_LT, 0, 200).status);
+		assertTrue(fileLocked("f", 150, 1));
+	}
+
+	/** Without parley.nfs.mirrorLocks the file is not locked, and another program's lock is not looked at. */
+	@Test
+	public void locksAreNotMirroredByDefault() throws Exception {
+		TestClient a = start("test.nfs.nomirror", false);
+		long ida = clientid(a, "client-a");
+		Opened oa = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, oa, 2);
+		assertEquals(Nfs4.NFS4_OK, lockNew(a, oa.fh, oa, 3, ida, "a-lock", Nfs4.WRITE_LT, 0, 100).status);
+		assertFalse(fileLocked("f", 0, 100));
+		try (FileSourceLock foreign = root.getChild("f").tryLock(200, 10, false)) {
+			assertNotNull(foreign);
+			assertEquals(Nfs4.NFS4_OK, lockt(a, oa.fh, ida, "a-lock", Nfs4.WRITE_LT, 200, 10).status);
+		}
+	}
+
+	/** The locks of a client whose lease ran out, and all of them when the server stops, are released. */
+	@Test
+	public void mirroredLocksEndWithTheLeaseAndTheServer() throws Exception {
+		property("test.nfs.mirrorend.mirrorLocks", "true");
+		property("test.nfs.mirrorend.leaseTime", "1s");
+		TestClient a = start("test.nfs.mirrorend", false);
+		long ida = clientid(a, "client-gone");
+		Opened oa = open(a, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, ida, "a", true, "f");
+		confirm(a, oa, 2);
+		assertEquals(Nfs4.NFS4_OK, lockNew(a, oa.fh, oa, 3, ida, "l", Nfs4.WRITE_LT, 0, -1L).status);
+		assertTrue(fileLocked("f", 0, 10));
+		long end = System.currentTimeMillis()+10000;
+		while( server.getStateManager().getLockCount() > 0 && System.currentTimeMillis() < end ) {
+			Thread.sleep(100);
+		}
+		assertEquals(0, server.getStateManager().getLockCount());
+		assertFalse(fileLocked("f", 0, 10));
+
+		// a second client's lock, held while the server stops
+		TestClient b = client();
+		long idb = clientid(b, "client-b");
+		Opened ob = open(b, 1, Nfs4.OPEN4_SHARE_ACCESS_BOTH, Nfs4.OPEN4_SHARE_DENY_NONE, idb, "b", false, "f");
+		confirm(b, ob, 2);
+		assertEquals(Nfs4.NFS4_OK, lockNew(b, ob.fh, ob, 3, idb, "l", Nfs4.WRITE_LT, 0, 10).status);
+		assertTrue(fileLocked("f", 0, 10));
+		server.stop();
+		assertTrue(server.awaitStopped(10000));
+		assertFalse(fileLocked("f", 0, 10));
 	}
 
 	/** D20: a client's locks go when its lease runs out. */
