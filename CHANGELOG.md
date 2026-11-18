@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-18: delegations across a restart)
+
+- **Delegations survive a restart of the server (D67).** With `parley.nfs.stateDir` set they are kept in
+  `delegations.state`; a restarted server has a grace period of one lease time, in which the client takes a delegation
+  back with OPEN (CLAIM_PREVIOUS) and conflicting calls on that file get NFS4ERR_GRACE. A delegation nobody comes back
+  for is given up (a warning for a write delegation), and so is one whose client started again.
+
 ### Changed (2026-11-18: quieter logs)
 
 - **A RPCSEC_GSS call for a service that isn't in `parley.nfs.sec` is logged at the debug level, not INFO.** A

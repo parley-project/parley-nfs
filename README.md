@@ -32,8 +32,9 @@ Not yet (answered with NFS4ERR_NOTSUPP):
 `df` shows the space of the export's FileSource (total, free and usable by the server); a FileSource
 that can't tell shows 0. File counts (`df -i`) aren't reported.
 
-There is no stable storage of client state, so a restarted server has no grace period: clients
-start over with SETCLIENTID and can't reclaim opens. File handles are kept (see "File handles").
+There is no stable storage of open and lock state, so a restarted server has no grace period for them:
+clients start over with SETCLIENTID and can't reclaim opens or locks. File handles are kept (see "File
+handles"), and so are delegations when `parley.nfs.stateDir` is set (see "Delegations").
 
 ## Running
 
@@ -149,6 +150,17 @@ has written its changes and returned the delegation. A request that names no cli
 a special stateid) from the holder's own host is taken to be the holder's. If the holder doesn't return the delegation
 within the lease it is revoked, and the changes it hadn't written are lost: the log says so. READDIR's attributes
 and LOCKT are not checked against a write delegation.
+
+With `parley.nfs.stateDir` set, the server keeps the delegations it gives in `delegations.state` there (written
+before the client is told), so they survive a restart (decision D67). A restarted server has a grace period of one
+lease time: a client that comes back with SETCLIENTID and the same client name, as the same principal, takes its
+delegation back with OPEN (CLAIM_PREVIOUS), and a Linux client does so for each file it still has open. Until then
+a call that would conflict with the delegation (another client's open, a write open, REMOVE, RENAME, SETATTR, and,
+for a write delegation, READ, WRITE and a request for the size or times) gets NFS4ERR_GRACE; calls on other files go
+on. A delegation nobody comes back for within the lease is given up, and the log says so for a write delegation
+(its changes are lost); so is one whose client has restarted since. Opens and locks aren't kept, so a CLAIM_PREVIOUS
+for one that held no delegation gets NFS4ERR_NO_GRACE and the client opens again. Without `stateDir` nothing is
+kept, as before.
 
 ## File handles
 

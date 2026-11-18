@@ -46,9 +46,11 @@ import us.bringardner.parley.nfs.protocol.Nfs4;
  * open-owners and lock-owners and their sequence numbers, opens and their share reservations,
  * and byte-range locks (decisions D17 to D22: kept here only, advisory, no waiting).
  * <p>
- * Nothing is kept on disk (decision D7): after a restart every client ID and stateid is stale,
- * clients start over with SETCLIENTID, and there is no grace period, so an open can't be
- * reclaimed (CLAIM_PREVIOUS gets NFS4ERR_NO_GRACE).
+ * Open and lock state is kept in memory only (decision D7): after a restart every client ID and
+ * stateid is stale, clients start over with SETCLIENTID, and an open can't be reclaimed
+ * (CLAIM_PREVIOUS gets NFS4ERR_NO_GRACE). The exception is a delegation (decision D67): with a state
+ * folder it is written down, and for one lease time after a restart its client can take it back
+ * with CLAIM_PREVIOUS while conflicting calls on the file get NFS4ERR_GRACE.
  *
  * @author Tony Bringardner
  */
@@ -75,6 +77,13 @@ public class StateManager {
 	/** told things the operator should know, like a write delegation that was lost; may be null */
 	private volatile java.util.function.Consumer<String> warnings;
 	private final Set<Integer> expired = new LinkedHashSet<Integer>();
+	/** where the delegations are kept so that they survive a restart (D67), null when there is no state folder */
+	private DelegationStore store;
+	/** the delegations of the run before: their clients may reclaim them until {@link #graceEnd}, guarded by the StateManager */
+	private final List<DelegationStore.Entry> reclaims = new ArrayList<DelegationStore.Entry>();
+	private long graceEnd;
+	/** true while the grace period runs, so a call can ask without the StateManager's lock */
+	private volatile boolean reclaiming;
 
 	/**
 	 * @param boot identifies this run of the server (seconds since the epoch at start); client IDs
@@ -513,6 +522,7 @@ public class StateManager {
 				dropState(c);
 				rememberExpired(c);
 			}
+			forgetOfRebooted(u);
 			u.confirmed = true;
 			u.lastRenew = System.currentTimeMillis();
 			confirmedById.put(clientid, u);
@@ -1051,6 +1061,9 @@ public class StateManager {
 			}
 		}
 		DelegationState d = new DelegationState(newOther(c), c, node, false);
+		if( !keep(d) ) {
+			return null;
+		}
 		node.delegations.add(d);
 		c.delegations.add(d);
 		delegationStates.put(stateKey(d.other), d);
@@ -1076,6 +1089,9 @@ public class StateManager {
 			}
 		}
 		DelegationState d = new DelegationState(newOther(c), c, node, true);
+		if( !keep(d) ) {
+			return null;
+		}
 		node.delegations.add(d);
 		node.setWriteDelegated(true);
 		c.delegations.add(d);
@@ -1211,6 +1227,7 @@ public class StateManager {
 	}
 
 	private void forget(DelegationState d) {
+		unkeep(d);
 		d.node.delegations.remove(d);
 		if( d.write ) {
 			d.node.setWriteDelegated(false);
@@ -1254,6 +1271,218 @@ public class StateManager {
 
 	public synchronized int getDelegationCount() {
 		return delegationStates.size();
+	}
+
+
+	// ================================================================== delegations across a restart (D67)
+
+	/**
+	 * Take up the delegations the run before kept: their clients can reclaim them for one lease time, and
+	 * until then the files are only open to their holders (NFS4ERR_GRACE).
+	 * @param store where the delegations are kept; it is rewritten with those that are still to be reclaimed
+	 * @return how many delegations may be reclaimed
+	 */
+	synchronized int recover(DelegationStore store, long now) throws java.io.IOException {
+		List<DelegationStore.Entry> found = store.load();
+		store.compact(found);
+		this.store = store;
+		reclaims.clear();
+		reclaims.addAll(found);
+		graceEnd = now+leaseMillis;
+		reclaiming = !reclaims.isEmpty();
+		return reclaims.size();
+	}
+
+	/** Start keeping delegations, with no run before to take up. */
+	synchronized void keepIn(DelegationStore store) throws java.io.IOException {
+		store.compact(new ArrayList<DelegationStore.Entry>());
+		this.store = store;
+	}
+
+	synchronized void closeStore() throws java.io.IOException {
+		DelegationStore s = store;
+		store = null;
+		if( s != null ) {
+			s.close();
+		}
+	}
+
+	/** @return true while delegations of the run before can still be reclaimed */
+	public boolean isReclaiming() {
+		return reclaiming;
+	}
+
+	/** Write a delegation down before the client is told of it: false if that failed, then it isn't given. */
+	private boolean keep(DelegationState d) {
+		DelegationStore s = store;
+		if( s == null ) {
+			return true;
+		}
+		try {
+			s.add(entry(d));
+			return true;
+		} catch (java.io.IOException e) {
+			warn("Can't keep a delegation of "+d.node+" in the state folder, so none is given: "+e.getMessage());
+			return false;
+		}
+	}
+
+	private static DelegationStore.Entry entry(DelegationState d) {
+		return new DelegationStore.Entry(d.client.name, hex(d.client.verifier), d.client.principal,
+				d.node.getExport().getName(), d.node.getFileid(), d.write);
+	}
+
+	private static String hex(byte[] b) {
+		StringBuilder s = new StringBuilder();
+		for (byte x : b) {
+			s.append(Character.forDigit((x >> 4) & 15, 16)).append(Character.forDigit(x & 15, 16));
+		}
+		return s.toString();
+	}
+
+	private void unkeep(DelegationState d) {
+		DelegationStore s = store;
+		if( s == null ) {
+			return;
+		}
+		String export = d.node.getExport().getName();
+		reclaims.removeIf(e -> e.is(d.client.name, export, d.node.getFileid()));
+		try {
+			s.remove(d.client.name, export, d.node.getFileid());
+		} catch (java.io.IOException e) {
+			warn("Can't take the delegation of "+d.node+" out of the state folder: "+e.getMessage());
+		}
+	}
+
+	/** A client that starts again with another verifier has rebooted: it won't reclaim what it held. */
+	private void forgetOfRebooted(ClientRecord u) {
+		if( reclaims.isEmpty() ) {
+			return;
+		}
+		String verifier = hex(u.verifier);
+		for (DelegationStore.Entry e : new ArrayList<DelegationStore.Entry>(reclaims)) {
+			if( e.client.equals(u.name) && !e.verifier.equals(verifier) ) {
+				giveUp(e, "the client started again");
+			}
+		}
+	}
+
+	private void giveUp(DelegationStore.Entry e, String why) {
+		reclaims.remove(e);
+		if( e.write ) {
+			warn("The write delegation of "+e.export+" file "+Long.toHexString(e.fileid)+" held by client \""+text(e.client)
+				+"\" before the restart isn't coming back ("+why+"); changes it hadn't written are lost");
+		}
+		DelegationStore s = store;
+		if( s != null ) {
+			try {
+				s.remove(e.client, e.export, e.fileid);
+			} catch (java.io.IOException ex) {
+				warn("Can't take a delegation out of the state folder: "+ex.getMessage());
+			}
+		}
+	}
+
+	private static String text(String client) {
+		try {
+			return new String(Base64.getDecoder().decode(client), StandardCharsets.ISO_8859_1);
+		} catch (IllegalArgumentException e) {
+			return client;
+		}
+	}
+
+	/**
+	 * End the grace period when its time is over: what no client came back for is given up.
+	 */
+	public synchronized void endGrace(long now) {
+		if( !reclaiming || now < graceEnd ) {
+			return;
+		}
+		reclaiming = false;
+		for (DelegationStore.Entry e : new ArrayList<DelegationStore.Entry>(reclaims)) {
+			if( !e.reclaimed ) {
+				giveUp(e, "no reclaim within the lease");
+			}
+		}
+		reclaims.clear();
+	}
+
+	/**
+	 * A call that conflicts with a delegation of the run before that its client hasn't reclaimed yet has to wait
+	 * (NFS4ERR_GRACE): the client may hold changes the server doesn't know.
+	 * @param writeOnly the call only conflicts with a write delegation (a read, a request for attributes)
+	 */
+	public void checkGrace(Node node, boolean writeOnly, long now) throws Nfs4Exception {
+		if( !reclaiming || node == null ) {
+			return;
+		}
+		synchronized (this) {
+			endGrace(now);
+			String export = node.getExport().getName();
+			for (DelegationStore.Entry e : reclaims) {
+				if( !e.reclaimed && e.fileid == node.getFileid() && e.export.equals(export) && (e.write || !writeOnly) ) {
+					throw new Nfs4Exception(Nfs4.NFS4ERR_GRACE, node+" has a delegation its client may still reclaim");
+				}
+			}
+		}
+	}
+
+	/** The result of {@link #reclaim}. */
+	public static final class Reclaimed {
+		public final DelegationState delegation;
+		/** false if the client already had it back: the OPEN doesn't hand it over again */
+		public final boolean fresh;
+
+		Reclaimed(DelegationState delegation, boolean fresh) {
+			this.delegation = delegation;
+			this.fresh = fresh;
+		}
+	}
+
+	/**
+	 * OPEN with CLAIM_PREVIOUS: the client takes back a delegation it held before the restart.
+	 * @param claimed the delegation the client says it held, OPEN_DELEGATE_READ or _WRITE
+	 * @throws Nfs4Exception NFS4ERR_NO_GRACE if there is nothing for this client to reclaim (opens and locks aren't kept),
+	 * NFS4ERR_RECLAIM_BAD if it held a delegation of another kind
+	 */
+	public synchronized Reclaimed reclaim(ClientRecord c, Node node, int claimed, long now) throws Nfs4Exception {
+		endGrace(now);
+		String export = node.getExport().getName();
+		DelegationStore.Entry found = null;
+		for (DelegationStore.Entry e : reclaims) {
+			if( e.is(c.name, export, node.getFileid()) && e.principal.equals(c.principal) ) {
+				found = e;
+				break;
+			}
+		}
+		if( !reclaiming || found == null || (claimed != Nfs4.OPEN_DELEGATE_READ && claimed != Nfs4.OPEN_DELEGATE_WRITE) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE);
+		}
+		if( found.write != (claimed == Nfs4.OPEN_DELEGATE_WRITE) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_RECLAIM_BAD, "the delegation was "+(found.write ? "a write" : "a read")+" one");
+		}
+		if( found.reclaimed ) {
+			for (DelegationState d : c.delegations) {
+				if( d.node == node ) {
+					return new Reclaimed(d, false);
+				}
+			}
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE);
+		}
+		for (DelegationState d : node.delegations) {
+			if( d.write || found.write ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_RECLAIM_CONFLICT);
+			}
+		}
+		DelegationState d = new DelegationState(newOther(c), c, node, found.write);
+		node.delegations.add(d);
+		if( d.write ) {
+			node.setWriteDelegated(true);
+		}
+		c.delegations.add(d);
+		delegationStates.put(stateKey(d.other), d);
+		found.reclaimed = true;
+		return new Reclaimed(d, true);
 	}
 
 	// ================================================================== leases

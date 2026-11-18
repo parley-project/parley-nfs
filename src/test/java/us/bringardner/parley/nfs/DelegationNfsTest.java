@@ -40,6 +40,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -196,6 +197,28 @@ public class DelegationNfsTest {
 		start(delegations, false, lease);
 	}
 
+	private java.nio.file.Path stateDir;
+
+	/** Start with a state folder, so that delegations and file handles survive {@link #restart()}. */
+	private void startKeeping(String lease) throws Exception {
+		stateDir = java.nio.file.Files.createTempDirectory("nfs-deleg-state");
+		property("test.deleg.stateDir", stateDir.toString());
+		start(true, true, lease);
+	}
+
+	/** Stop the server and start it again on the same files and state folder: a restart. */
+	private void restart() throws Exception {
+		for (TestClient c : clients) {
+			c.close();
+		}
+		clients.clear();
+		server.stop();
+		assertTrue(server.awaitStopped(10000));
+		server = new NfsServer("test.deleg", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+	}
+
 	private void start(boolean delegations, boolean writes, String lease) throws Exception {
 		if( delegations ) {
 			property("test.deleg.delegations", "true");
@@ -232,6 +255,11 @@ public class DelegationNfsTest {
 		}
 		for (String p : properties) {
 			System.clearProperty(p);
+		}
+		if( stateDir != null ) {
+			try (java.util.stream.Stream<java.nio.file.Path> w = java.nio.file.Files.walk(stateDir)) {
+				w.sorted(Comparator.reverseOrder()).forEach(f -> f.toFile().delete());
+			}
 		}
 	}
 
@@ -274,8 +302,13 @@ public class DelegationNfsTest {
 
 	/** SETCLIENTID and its confirm, with this callback address ("" for none). */
 	private static long clientid(TestClient c, String name, String cbAddr) throws IOException {
+		return clientid(c, name, cbAddr, (byte) 1);
+	}
+
+	/** SETCLIENTID with a verifier that starts with this byte: another one is a client that rebooted. */
+	private static long clientid(TestClient c, String name, String cbAddr, byte verifier) throws IOException {
 		Ops ops = new Ops().op(Nfs4.OP_SETCLIENTID);
-		ops.args().writeFixedOpaque(new byte[] {1, 2, 3, 4, 5, 6, 7, 8});
+		ops.args().writeFixedOpaque(new byte[] {verifier, 2, 3, 4, 5, 6, 7, 8});
 		ops.args().writeOpaque(bytes(name));
 		ops.args().writeInt(0x40000000).writeString("tcp").writeString(cbAddr).writeInt(7);
 		Result r = c.compound(ops);
@@ -348,6 +381,53 @@ public class DelegationNfsTest {
 		o.fh = r.in.readOpaque(128);
 		if( (rflags & Nfs4.OPEN4_RESULT_CONFIRM) != 0 ) {
 			Ops conf = new Ops().putfh(o.fh).op(Nfs4.OP_OPEN_CONFIRM);
+			conf.args().writeInt(o.seqid).writeFixedOpaque(o.other).writeInt(seq[0]++);
+			Result cr = c.compound(conf);
+			cr.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_OPEN_CONFIRM);
+			o.seqid = cr.in.readInt();
+			o.other = cr.in.readFixedOpaque(12);
+		}
+		return o;
+	}
+
+
+	/** OPEN with CLAIM_PREVIOUS of the file the handle names, saying the client held this delegation (decision D67). */
+	private Opened reclaim(TestClient c, byte[] fh, long clientid, int access, String owner, int held) throws IOException {
+		int[] seq = seqids.computeIfAbsent(owner, k -> new int[] {1});
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_OPEN);
+		ops.args().writeInt(seq[0]++).writeInt(access).writeInt(0).writeLong(clientid).writeOpaque(bytes(owner))
+			.writeInt(Nfs4.OPEN4_NOCREATE).writeInt(Nfs4.CLAIM_PREVIOUS).writeInt(held);
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTFH);
+		Opened o = new Opened();
+		o.fh = fh;
+		o.status = r.next(Nfs4.OP_OPEN);
+		if( o.status != Nfs4.NFS4_OK ) {
+			return o;
+		}
+		o.seqid = r.in.readInt();
+		o.other = r.in.readFixedOpaque(12);
+		r.in.readBoolean();
+		r.in.readLong();
+		r.in.readLong();
+		int rflags = r.in.readInt();
+		r.in.readIntArray(8);
+		o.delegation = r.in.readInt();
+		if( o.delegation != Nfs4.OPEN_DELEGATE_NONE ) {
+			r.in.readInt();
+			o.delegationOther = r.in.readFixedOpaque(12);
+			assertFalse(r.in.readBoolean());
+			if( o.delegation == Nfs4.OPEN_DELEGATE_WRITE ) {
+				assertEquals(Nfs4.NFS_LIMIT_SIZE, r.in.readInt());
+				r.in.readLong();
+			}
+			r.in.readInt();
+			r.in.readInt();
+			r.in.readInt();
+			assertEquals("EVERYONE@", r.in.readString(100));
+		}
+		if( (rflags & Nfs4.OPEN4_RESULT_CONFIRM) != 0 ) {
+			Ops conf = new Ops().putfh(fh).op(Nfs4.OP_OPEN_CONFIRM);
 			conf.args().writeInt(o.seqid).writeFixedOpaque(o.other).writeInt(seq[0]++);
 			Result cr = c.compound(conf);
 			cr.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_OPEN_CONFIRM);
@@ -704,5 +784,133 @@ public class DelegationNfsTest {
 		assertEquals(Nfs4.NFS4_OK, status, "the reader goes on once it is revoked");
 		assertEquals(0, server.getStateManager().getDelegationCount());
 		assertEquals(Nfs4.NFS4ERR_DELEG_REVOKED, write(a, held.fh, held.delegationOther), "the holder is told");
+	}
+
+	// ------------------------------------------------------------------ after a restart (D67)
+
+	/** A client takes back its write delegation after a restart; until it does, the file is closed to others. */
+	@Test
+	public void aDelegationIsReclaimedAfterARestart() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = writeHolder(client(), cb, "a");
+		assertEquals(Nfs4.OPEN_DELEGATE_WRITE, held.delegation);
+		restart();
+		assertTrue(server.getStateManager().isReclaiming());
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		assertEquals(Nfs4.NFS4ERR_GRACE, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status,
+				"the holder may still come back");
+		assertEquals(Nfs4.NFS4ERR_GRACE, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo2", "f").status,
+				"a read open sees what it holds back");
+		TestClient a = client();
+		long id = clientid(a, "a", cb.addr());
+		Opened back = reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "a-owner", Nfs4.OPEN_DELEGATE_WRITE);
+		assertEquals(Nfs4.NFS4_OK, back.status);
+		assertEquals(Nfs4.OPEN_DELEGATE_WRITE, back.delegation);
+		assertEquals(Nfs4.NFS4_OK, write(a, held.fh, back.delegationOther), "it writes with the delegation again");
+		assertEquals(1, server.getStateManager().getDelegationCount());
+		assertEquals(Nfs4.NFS4ERR_DELAY, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo2", "f").status,
+				"now it is an ordinary write delegation: recalled");
+		waitFor(() -> cb.recalls.size() == 1, "the CB_RECALL");
+		assertEquals(Nfs4.NFS4_OK, delegreturn(a, held.fh, back.delegationOther));
+		assertEquals(Nfs4.NFS4_OK, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo2", "f").status);
+	}
+
+	/** A read delegation can be reclaimed too, and a second open of the file under it too. */
+	@Test
+	public void aReadDelegationIsReclaimedAfterARestart() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = holder(client(), cb, "a");
+		assertEquals(Nfs4.OPEN_DELEGATE_READ, held.delegation);
+		restart();
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		assertEquals(Nfs4.NFS4_OK, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo", "f").status,
+				"another client's read doesn't conflict with a read delegation");
+		assertEquals(Nfs4.NFS4ERR_GRACE, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status,
+				"its write does");
+		TestClient a = client();
+		long id = clientid(a, "a", cb.addr());
+		Opened one = reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_READ, "a-owner", Nfs4.OPEN_DELEGATE_READ);
+		assertEquals(Nfs4.OPEN_DELEGATE_READ, one.delegation);
+		Opened two = reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_READ, "a-owner2", Nfs4.OPEN_DELEGATE_READ);
+		assertEquals(Nfs4.NFS4_OK, two.status);
+		assertEquals(Nfs4.OPEN_DELEGATE_NONE, two.delegation, "the client has it back already");
+		assertEquals(1, server.getStateManager().getDelegationCount());
+	}
+
+	/** What nobody came back for is given up when the lease is over, and the file is open again. */
+	@Test
+	public void anUnreclaimedDelegationIsGivenUpAfterTheLease() throws Exception {
+		startKeeping("2s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = writeHolder(client(), cb, "a");
+		restart();
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		assertEquals(Nfs4.NFS4ERR_GRACE, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
+		long end = System.currentTimeMillis()+10000;
+		int status;
+		do {
+			Thread.sleep(200);
+			status = open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status;
+		} while( status == Nfs4.NFS4ERR_GRACE && System.currentTimeMillis() < end );
+		assertEquals(Nfs4.NFS4_OK, status);
+		assertFalse(server.getStateManager().isReclaiming());
+		TestClient a = client();
+		long id = clientid(a, "a", cb.addr());
+		assertEquals(Nfs4.NFS4ERR_NO_GRACE, reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "a-owner", Nfs4.OPEN_DELEGATE_WRITE).status);
+	}
+
+	/** A client that starts again (another verifier) lost what it held: nothing waits for it. */
+	@Test
+	public void aRebootedClientDoesNotReclaim() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = writeHolder(client(), cb, "a");
+		restart();
+		TestClient a = client();
+		long id = clientid(a, "a", cb.addr(), (byte) 9);
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		assertEquals(Nfs4.NFS4_OK, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
+		assertEquals(Nfs4.NFS4ERR_NO_GRACE, reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "a-owner", Nfs4.OPEN_DELEGATE_WRITE).status);
+	}
+
+	/** Only the client that held a delegation, as the kind it held, can reclaim it; opens without one aren't kept (D7). */
+	@Test
+	public void onlyTheHolderReclaimsWhatItHeld() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = writeHolder(client(), cb, "a");
+		restart();
+		TestClient c = client();
+		long cid = clientid(c, "c", "");
+		assertEquals(Nfs4.NFS4ERR_NO_GRACE, reclaim(c, held.fh, cid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "c-owner", Nfs4.OPEN_DELEGATE_WRITE).status,
+				"another client");
+		TestClient a = client();
+		long id = clientid(a, "a", cb.addr());
+		assertEquals(Nfs4.NFS4ERR_NO_GRACE, reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "a-owner", Nfs4.OPEN_DELEGATE_NONE).status,
+				"an open that had no delegation");
+		assertEquals(Nfs4.NFS4ERR_RECLAIM_BAD, reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_READ, "a-owner", Nfs4.OPEN_DELEGATE_READ).status,
+				"it held a write delegation");
+		assertEquals(Nfs4.NFS4_OK, reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "a-owner", Nfs4.OPEN_DELEGATE_WRITE).status);
+	}
+
+	/** A delegation that was returned isn't waited for after a restart, and with none there is no grace period. */
+	@Test
+	public void aReturnedDelegationIsNotWaitedFor() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		TestClient a = client();
+		Opened held = writeHolder(a, cb, "a");
+		assertEquals(Nfs4.NFS4_OK, delegreturn(a, held.fh, held.delegationOther));
+		restart();
+		assertFalse(server.getStateManager().isReclaiming());
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		assertEquals(Nfs4.NFS4_OK, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
 	}
 }

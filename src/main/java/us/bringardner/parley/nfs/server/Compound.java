@@ -652,7 +652,7 @@ public class Compound {
 		if( Attributes.hasWriteOnly(request) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "write-only attribute asked for");
 		}
-		if( current != null && current.isWriteDelegated() && asksWhatWritingChanges(request) ) {
+		if( current != null && (current.isWriteDelegated() || state.isReclaiming()) && asksWhatWritingChanges(request) ) {
 			recallWriteDelegation(current);
 		}
 		attributes.encode(source(current, f), request, out);
@@ -1248,6 +1248,7 @@ public class Compound {
 		if( d == null || node == null ) {
 			return;
 		}
+		state.checkGrace(node, writeOnly, System.currentTimeMillis());
 		List<StateManager.DelegationState> list = state.recallFor(node, requester, byDelegation, writeOnly, client,
 				System.currentTimeMillis());
 		if( list.isEmpty() ) {
@@ -1268,7 +1269,7 @@ public class Compound {
 	 * write delegation of the file is recalled first (decision D63), the holder's own host's call isn't a conflict (D65).
 	 */
 	private void recallWriteDelegation(Node node) throws Nfs4Exception {
-		if( node != null && node.isWriteDelegated() ) {
+		if( node != null && (node.isWriteDelegated() || state.isReclaiming()) ) {
 			recallDelegations(node, null, false, true);
 		}
 	}
@@ -1307,12 +1308,13 @@ public class Compound {
 		int claim = in.readInt();
 		String name = null;
 		StateId delegation = null;
+		int previous = Nfs4.OPEN_DELEGATE_NONE;
 		switch (claim) {
 		case Nfs4.CLAIM_NULL:
 			name = in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
 			break;
 		case Nfs4.CLAIM_PREVIOUS:
-			in.readInt();
+			previous = in.readInt();
 			break;
 		case Nfs4.CLAIM_DELEGATE_CUR:
 			delegation = stateid();
@@ -1333,12 +1335,14 @@ public class Compound {
 		OpenOwner owner = state.openOwner(c, ownerBytes, seqid);
 		final String fname = name;
 		final StateId fdelegation = delegation;
+		final int fprevious = previous;
 		final int fhow = how;
 		final Attributes.Settings fsettings = settings;
 		final byte[] fexclusive = exclusive;
 		sequenced(owner, seqid, Nfs4.OP_OPEN, () -> {
 			if( claim == Nfs4.CLAIM_PREVIOUS ) {
-				throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE);
+				// the current file handle is the file (RFC 7530 section 16.16.2)
+				return openPrevious(owner, dir, access, deny, fprevious);
 			}
 			if( claim != Nfs4.CLAIM_NULL && claim != Nfs4.CLAIM_DELEGATE_CUR ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP, "no delegations across a restart");
@@ -1352,6 +1356,46 @@ public class Compound {
 			}
 			return openNull(owner, dir, fname, access, deny, opentype, fhow, fsettings, fexclusive, claim == Nfs4.CLAIM_DELEGATE_CUR);
 		});
+	}
+
+
+	/**
+	 * OPEN with CLAIM_PREVIOUS (decision D67): after a restart a client takes back a delegation it held, and the
+	 * open of the file that goes with it. Opens and locks aren't kept (D7), so a claim for any other open gets
+	 * NFS4ERR_NO_GRACE.
+	 */
+	private Node openPrevious(OpenOwner owner, Node node, int access, int deny, int claimed) throws Nfs4Exception, IOException {
+		if( node == null || node.isRoot() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE);
+		}
+		FileSource f = currentFile();
+		if( f.isDirectory() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_ISDIR);
+		}
+		StateManager.Reclaimed r = state.reclaim(owner.getClient(), node, claimed, System.currentTimeMillis());
+		OpenState s = state.open(owner, node, access, deny);
+		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
+			openForWrite(node, f);
+		}
+		writeStateid(s.stateId());
+		changeInfo(0, 0);
+		out.writeInt(Nfs4.OPEN4_RESULT_LOCKTYPE_POSIX | (owner.isConfirmed() ? 0 : Nfs4.OPEN4_RESULT_CONFIRM));
+		out.writeIntArray(new int[0]);
+		if( !r.fresh ) {
+			out.writeInt(Nfs4.OPEN_DELEGATE_NONE);
+		} else {
+			StateManager.DelegationState granted = r.delegation;
+			server.logInfo("Client "+owner.getClient()+" took back its "+(granted.isWrite() ? "write " : "read ")+"delegation of "+node+" after the restart");
+			out.writeInt(granted.isWrite() ? Nfs4.OPEN_DELEGATE_WRITE : Nfs4.OPEN_DELEGATE_READ);
+			writeStateid(granted.stateId());
+			out.writeBoolean(false);
+			if( granted.isWrite() ) {
+				out.writeInt(Nfs4.NFS_LIMIT_SIZE).writeLong(0);
+			}
+			out.writeInt(Nfs4.ACE4_ACCESS_ALLOWED_ACE_TYPE).writeInt(0).writeInt(0).writeString(Ace.EVERYONE);
+		}
+		current = node;
+		return node;
 	}
 
 	/** @return the node of a file in a folder, as the delegation of that file names it */
@@ -1436,7 +1480,7 @@ public class Compound {
 				server.logDebug(() -> "Open of "+wn+" for change by client "+wc+": delegations held: "+state.describeDelegations(wn));
 			}
 			recallDelegations(node, owner.getClient(), byDelegation, false);
-		} else if( node.isWriteDelegated() ) {
+		} else if( node.isWriteDelegated() || state.isReclaiming() ) {
 			// a read open sees what a write delegation holds back
 			recallDelegations(node, owner.getClient(), byDelegation, true);
 		}

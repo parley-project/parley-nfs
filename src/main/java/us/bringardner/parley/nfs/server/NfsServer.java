@@ -103,6 +103,8 @@ public class NfsServer extends NioServer {
 	/** The security flavors taken, comma separated: sys, krb5, krb5i, krb5p (decision D34). */
 	/** The folder that keeps each export's node file, so handles survive a restart (decision D41). */
 	public static final String PROPERTY_STATE_DIR = "stateDir";
+	/** the file in the state folder that keeps the delegations (D67) */
+	static final String DELEGATION_FILE = "delegations.state";
 	public static final String PROPERTY_DELEGATIONS = "delegations";
 	public static final String PROPERTY_WRITE_DELEGATIONS = "writeDelegations";
 	/** The most nodes kept in memory per export (decision D42). */
@@ -352,6 +354,14 @@ public class NfsServer extends NioServer {
 				logInfo("Server "+getName()+": export "+e.getName()+" keeps "+acls.size()+" access control lists in "+state);
 			}
 		}
+		if( state != null && delegations != null ) {
+			// delegations are kept, so that their clients can reclaim them after a restart (D67)
+			DelegationStore store = new DelegationStore(state.getChild(DELEGATION_FILE));
+			int n = stateManager.recover(store, System.currentTimeMillis());
+			if( n > 0 ) {
+				logInfo("Server "+getName()+": "+n+" delegations of the run before can be reclaimed for "+stateManager.getLeaseMillis()/1000+"s; the files wait until then");
+			}
+		}
 	}
 
 	private static void closeAcls(Export e) {
@@ -394,6 +404,7 @@ public class NfsServer extends NioServer {
 			StateManager s = stateManager;
 			if( s != null ) {
 				s.revokeOverdue(now);
+				s.endGrace(now);
 				for (Node n : s.expire(now)) {
 					if( !s.hasOpens(n) ) {
 						openFiles.release(n);
@@ -445,6 +456,11 @@ public class NfsServer extends NioServer {
 			Delegations d = delegations;
 			if( d != null ) {
 				d.close();
+			}
+			try {
+				stateManager.closeStore();
+			} catch (IOException ex) {
+				logError("Closing the delegation file failed", ex);
 			}
 			GssServer g = gss;
 			gss = null;
