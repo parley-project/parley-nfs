@@ -426,6 +426,7 @@ public class DelegationNfsTest {
 			r.in.readInt();
 			assertEquals("EVERYONE@", r.in.readString(100));
 		}
+		assertEquals(0, rflags & Nfs4.OPEN4_RESULT_CONFIRM, "a reclaim is never asked to confirm (RFC 7530 section 16.16.5)");
 		if( (rflags & Nfs4.OPEN4_RESULT_CONFIRM) != 0 ) {
 			Ops conf = new Ops().putfh(fh).op(Nfs4.OP_OPEN_CONFIRM);
 			conf.args().writeInt(o.seqid).writeFixedOpaque(o.other).writeInt(seq[0]++);
