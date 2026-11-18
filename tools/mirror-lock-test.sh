@@ -89,6 +89,16 @@ client_lock_try() {
 	esac
 }
 
+# what holds the lock files right now (the check that failed ran while the lock was still held)
+diagnose() {
+	echo "      --- lock files in $LOCKDIR:"
+	ls -la "$LOCKDIR" 2>&1 | sed 's/^/      /'
+	echo "      --- programs holding them (lsof):"
+	lsof +D "$LOCKDIR" 2>&1 | sed 's/^/      /'
+	echo "      --- the client's lock program in $VM:"
+	$CLIENT_EXEC pgrep -fl "$CLIENT_SCRIPT" 2>&1 | sed 's/^/      /'
+}
+
 check() {
 	if [ "$2" = "$3" ]; then
 		echo "PASS  $1"
@@ -96,6 +106,7 @@ check() {
 	else
 		echo "FAIL  $1: expected $2, got $3"
 		failed=$(( failed + 1 ))
+		diagnose
 	fi
 }
 
