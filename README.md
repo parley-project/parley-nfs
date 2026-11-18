@@ -180,6 +180,8 @@ LOCKT reports it. Notes:
   without a mirror. A client's locks are released with its lease, and all of them when the server stops.
 - `tools/LockProbe.java` is another program that tries or holds a FileSource lock on a file, for checking the mirror
   against real clients; it must run on the server's machine with the same lock settings as the server.
+- `tools/mirror-lock-test.sh` runs the whole check with one command on the server's machine: the probe runs there and the
+  clients' side runs in a Multipass VM (`--lease` adds the lease expiry check, about 2.5 minutes).
 - A local file's lock may be a lock file beside it (`.parley-locks`, see parley-files), which would show in an
   exported folder; set `parley.files.lockDirectory` to put them elsewhere.
 
