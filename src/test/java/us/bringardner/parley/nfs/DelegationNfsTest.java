@@ -661,6 +661,18 @@ public class DelegationNfsTest {
 		assertFalse(server.getWriteDelegations());
 	}
 
+	/** Decision D69: a client with a write delegation keeps its locks to itself, so none is given while locks are mirrored. */
+	@Test
+	public void noWriteDelegationWhileLocksAreMirrored() throws Exception {
+		property("test.deleg.mirrorLocks", "true");
+		start(true, true, "90s");
+		assertFalse(server.getWriteDelegations());
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened o = writeHolder(client(), cb, "a");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		assertEquals(Nfs4.OPEN_DELEGATE_NONE, o.delegation);
+	}
+
 	/** A write open of a file nobody else has is given a write delegation, which reads and writes. */
 	@Test
 	public void aWriteOpenGetsAWriteDelegation() throws Exception {

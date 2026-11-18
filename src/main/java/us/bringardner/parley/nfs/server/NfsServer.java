@@ -294,6 +294,12 @@ public class NfsServer extends NioServer {
 		if( writeDelegations && delegations == null ) {
 			throw new IOException(propertyName(PROPERTY_WRITE_DELEGATIONS)+" needs "+propertyName(PROPERTY_DELEGATIONS)+"=true: write delegations are delegations that are also given for writing (decision D62)");
 		}
+		if( writeDelegations && stateManager.hasLockMirror() ) {
+			// a client holding a write delegation takes its byte-range locks itself and never tells the server,
+			// so they could not be held as file locks (decision D69)
+			writeDelegations = false;
+			logInfo("Server "+getName()+": no write delegations are given, because "+propertyName(PROPERTY_MIRROR_LOCKS)+"=true: a client with a write delegation keeps its locks to itself");
+		}
 		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
 		replayCache = replays > 0 ? new ReplayCache(replays) : null;
 		String anonymous = getProperty(propertyName(PROPERTY_ANONYMOUS));

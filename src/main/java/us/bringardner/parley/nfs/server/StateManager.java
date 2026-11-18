@@ -1153,6 +1153,11 @@ public class StateManager {
 	}
 
 	/** Hold the clients' locks as FileSource locks too (D68); null, the default, does not. */
+	/** @return true if the clients' locks are also held as file locks (D68) */
+	boolean hasLockMirror() {
+		return mirror != null;
+	}
+
 	synchronized void setLockMirror(LockMirror mirror) {
 		this.mirror = mirror;
 	}
