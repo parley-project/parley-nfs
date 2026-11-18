@@ -5,7 +5,7 @@ An NFS version 4.0 server ([RFC 7530](https://www.rfc-editor.org/rfc/rfc7530), X
 It shares one folder of any FileSource: a local folder, a memory file system, or any other
 parley-files provider.
 
-## Status: phases 1, 2, 4 and 5
+## Status
 
 Supported:
 
@@ -17,13 +17,17 @@ Supported:
    OPEN_DOWNGRADE, CLOSE) and owner sequence numbers with replies saved for retransmissions.
 4. READ, WRITE (unstable or stable) and COMMIT through a random access stream kept open per file.
 5. Byte-range locks (LOCK, LOCKT, LOCKU, RELEASE_LOCKOWNER): shared and exclusive, per lock-owner,
-   advisory, kept by the server for its NFS clients only. A lock that can't be had is denied at once
-   (the client tries again); a client's locks go when its lease runs out; there is no reclaim after
-   a restart. On Linux both `flock` and `fcntl` locks work on the mount.
+   advisory, kept by the server for its NFS clients only, or also as FileSource locks with
+   `parley.nfs.mirrorLocks` (see "Locks"). A lock that can't be had is denied at once (the client tries
+   again); a client's locks go when its lease runs out; there is no reclaim after a restart. On Linux both
+   `flock` and `fcntl` locks work on the mount.
+6. Read and write delegations, which survive a restart (see "Delegations").
+7. Access control lists (see "Access control lists"), a state folder that keeps file identities and lists
+   across a restart (see "File handles"), and a folder for each user.
 
 Not yet (answered with NFS4ERR_NOTSUPP):
 
-1. Delegations, ACLs and named attributes (phase 3).
+1. Named attributes (OPENATTR).
 2. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos. A FileSource
    can't make them, so a client gets errors it can name: `ln` says "Invalid cross-device link"
    (NFS4ERR_XDEV) and `ln -s`, `mkfifo` and `mknod` say "Operation not permitted" (NFS4ERR_PERM).
@@ -65,6 +69,8 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.authCacheTime` | 60s | How long a permission answer is kept |
 | `parley.nfs.fileIdleTime` | 30s | How long an unused file stays open |
 | `parley.nfs.stateDir` | none | A folder (a path or `filesource:` URL) that keeps one node file per export, so handles survive a restart (see "File handles"). Without it the start-up log says what is lost: stale handles of renamed files after a restart, no access control lists, no delegations across a restart |
+| `parley.nfs.delegations` | false | true to give read delegations (see "Delegations"); none are given while `mirrorLocks` is on |
+| `parley.nfs.writeDelegations` | false | true (with `delegations`) to give write delegations too |
 | `parley.nfs.mirrorLocks` | false | true to hold the clients' byte-range locks as FileSource locks too (see "Locks") |
 | `parley.nfs.maxNodes` | 100000 | The most files per export kept in memory; those nobody has asked for lately go first |
 | `parley.nfs.replayCacheSize` | 1024 | How many replies of COMPOUNDs that changed something are kept for a client that sends the call again; 0 for none |
@@ -151,6 +157,7 @@ has written its changes and returned the delegation. A request that names no cli
 a special stateid) from the holder's own host is taken to be the holder's. If the holder doesn't return the delegation
 within the lease it is revoked, and the changes it hadn't written are lost: the log says so. READDIR's attributes
 and LOCKT are not checked against a write delegation.
+
 With `parley.nfs.mirrorLocks=true` no delegation is given, read or write (D69, D70): a client holding one takes its
 byte-range locks itself and never tells the server, so they could not be held as file locks (tried with a read
 delegation: another program was given a lock the client held). The server says so when it starts.
@@ -164,7 +171,8 @@ for a write delegation, READ, WRITE and a request for the size or times) gets NF
 on. A delegation nobody comes back for within the lease is given up, and the log says so for a write delegation
 (its changes are lost); so is one whose client has restarted since. Opens and locks aren't kept, so a CLAIM_PREVIOUS
 for one that held no delegation gets NFS4ERR_NO_GRACE and the client opens again. Without `stateDir` nothing is
-kept, as before.
+kept, as before. `tools/reclaim-test.sh` times a real client's reclaim after a restart with one command (a Multipass
+VM opens a file, you restart the server, the script reports how soon the file answers).
 
 ## Locks
 
@@ -184,7 +192,8 @@ LOCKT reports it. Notes:
 - `tools/LockProbe.java` is another program that tries or holds a FileSource lock on a file, for checking the mirror
   against real clients; it must run on the server's machine with the same lock settings as the server.
 - `tools/mirror-lock-test.sh` runs the whole check with one command on the server's machine: the probe runs there and the
-  clients' side runs in a Multipass VM (`--lease` adds the lease expiry check, about 2.5 minutes).
+  clients' side runs in a Multipass VM (`--lease` adds the lease expiry check, about 2.5 minutes). Its check F shows
+  why no delegations are given while locks are mirrored: it is skipped when the server gives none.
 - A local file's lock may be a lock file beside it (`.parley-locks`, see parley-files), which would show in an
   exported folder; set `parley.files.lockDirectory` to put them elsewhere.
 
@@ -238,7 +247,7 @@ its ticket, or until the client destroys it.
 ## Testing
 
 `mvn test` runs the protocol tests against a memory file system with a small test client. The
-server has also been tried with a Linux kernel mount (`tools/nfs-mount-test.sh`, run in the client) and libnfs (`nfs-ls`, `nfs-cat`, `nfs-cp`, `nfs-stat` with `?version=4`).
+server has also been tried with a Linux kernel mount (`tools/nfs-mount-test.sh`, run in the client; `tools/mirror-lock-test.sh` checks the mirror of locks and `tools/reclaim-test.sh` the reclaim of a delegation after a restart, with a Multipass VM) and libnfs (`nfs-ls`, `nfs-cat`, `nfs-cp`, `nfs-stat` with `?version=4`).
 
 It has also been run against pynfs's NFSv4.0 server tests (`nfs4.0/testserver.py ... all`). What still
 fails there is objects the server doesn't serve (hard links, symbolic links, devices, sockets, fifos), and checks the server leaves to the user registry:

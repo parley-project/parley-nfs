@@ -2,6 +2,12 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-18: tools for trying the server with real clients)
+
+- `tools/LockProbe.java` (another program that tries or holds a FileSource lock), `tools/lock-client.py` (fcntl locks
+  from a Linux client), `tools/mirror-lock-test.sh` (the mirror of locks, one command, with a Multipass VM) and
+  `tools/reclaim-test.sh` (the reclaim of a delegation after a restart).
+
 ### Changed (2026-11-18: delegations and mirrored locks)
 
 - **No delegations, read or write, while `parley.nfs.mirrorLocks` is on (D69, D70).** A client with a delegation takes
