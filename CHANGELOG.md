@@ -2,6 +2,11 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-18: write delegations and mirrored locks)
+
+- **No write delegations while `parley.nfs.mirrorLocks` is on (D69).** A client with a write delegation takes its
+  byte-range locks itself, so they never reached the server to be held as file locks. The server logs it at start-up.
+
 ### Added (2026-11-18: locks as file locks)
 
 - **`parley.nfs.mirrorLocks` holds the clients' byte-range locks as FileSource locks too (D68).** Off by default.
