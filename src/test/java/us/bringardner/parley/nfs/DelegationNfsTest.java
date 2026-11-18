@@ -27,6 +27,7 @@ package us.bringardner.parley.nfs;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -661,16 +662,14 @@ public class DelegationNfsTest {
 		assertFalse(server.getWriteDelegations());
 	}
 
-	/** Decision D69: a client with a write delegation keeps its locks to itself, so none is given while locks are mirrored. */
+	/** Decisions D69 and D70: a client with a delegation keeps its locks to itself, so none is given while locks are mirrored. */
 	@Test
-	public void noWriteDelegationWhileLocksAreMirrored() throws Exception {
+	public void noDelegationsWhileLocksAreMirrored() throws Exception {
 		property("test.deleg.mirrorLocks", "true");
 		start(true, true, "90s");
 		assertFalse(server.getWriteDelegations());
-		Callbacks cb = callbacks("127.0.0.1");
-		Opened o = writeHolder(client(), cb, "a");
-		assertEquals(Nfs4.NFS4_OK, o.status);
-		assertEquals(Nfs4.OPEN_DELEGATE_NONE, o.delegation);
+		assertNull(server.getDelegations());
+		// with no delegations the server never calls a client back, so there is nothing to give
 	}
 
 	/** A write open of a file nobody else has is given a write delegation, which reads and writes. */

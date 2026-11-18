@@ -151,8 +151,9 @@ has written its changes and returned the delegation. A request that names no cli
 a special stateid) from the holder's own host is taken to be the holder's. If the holder doesn't return the delegation
 within the lease it is revoked, and the changes it hadn't written are lost: the log says so. READDIR's attributes
 and LOCKT are not checked against a write delegation.
-With `parley.nfs.mirrorLocks=true` no write delegation is given: a client holding one takes its byte-range locks itself
-and never tells the server, so they could not be held as file locks (D69). The server says so when it starts.
+With `parley.nfs.mirrorLocks=true` no delegation is given, read or write (D69, D70): a client holding one takes its
+byte-range locks itself and never tells the server, so they could not be held as file locks (tried with a read
+delegation: another program was given a lock the client held). The server says so when it starts.
 
 With `parley.nfs.stateDir` set, the server keeps the delegations it gives in `delegations.state` there (written
 before the client is told), so they survive a restart (decision D67). A restarted server has a grace period of one
