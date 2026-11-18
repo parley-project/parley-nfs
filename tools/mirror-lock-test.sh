@@ -177,19 +177,24 @@ check "D6 other program gets it all after the client lets go" GOT "$(try_probe 0
 
 # F: a client with a read delegation may take its shared locks itself and never tell the server (needs
 # parley.nfs.delegations=true and a stateDir; skipped when the server gave the client no delegation)
+# an entry of an earlier run may still be in delegations.state, so count the entries before and after
+delegations_of_file() {
+	grep -c "$NAME" "$STATE_DIR/delegations.state" 2>/dev/null || true
+}
+before=$(delegations_of_file)
 $CLIENT_EXEC sh -c 'cat "$1" > /dev/null' sh "$MOUNT/$NAME" 2>&1 | head -3
 start_client_lock F 0 0 25 r
 check "F1 client holds a shared lock on a file it has open for reading" 0 $?
 n=10
-while [ $n -gt 0 ] && ! grep -q "$NAME" "$STATE_DIR/delegations.state" 2>/dev/null; do
+while [ $n -gt 0 ] && [ "$(delegations_of_file)" -le "$before" ]; do
 	n=$(( n - 1 ))
 	sleep 0.5
 done
-if grep -q "$NAME" "$STATE_DIR/delegations.state" 2>/dev/null; then
+if [ "$(delegations_of_file)" -gt "$before" ]; then
 	echo "      the client holds a read delegation of the file"
 	check "F2 other program is refused an exclusive lock while the client holds a shared one" NOT "$(try_probe 0 0)"
 else
-	echo "skip  F2: no delegation of the file in $STATE_DIR/delegations.state (parley.nfs.delegations off, or none given)"
+	echo "skip  F2: the server gave the client no delegation of the file (parley.nfs.delegations off, or none given while mirrorLocks is on)"
 fi
 wait "$LAST_PID" 2>/dev/null
 
