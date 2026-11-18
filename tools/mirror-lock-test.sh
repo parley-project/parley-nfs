@@ -69,7 +69,13 @@ start_client_lock() {
 	client_py lock "$MOUNT/$NAME" "$2" "$3" w "$4" > "$TMP/$1.out" 2>&1 &
 	PIDS="$PIDS $!"
 	LAST_PID=$!
-	wait_for "$TMP/$1.out" "GOT" 30
+	# "GOT ..." or "NOT GOT ..." at the start of a line: 0 if the client holds the lock
+	wait_for "$TMP/$1.out" "^\(NOT \)\{0,1\}GOT" 30 || { echo "      client $1: no answer: $(cat "$TMP/$1.out")"; return 1; }
+	if grep -q "^NOT GOT" "$TMP/$1.out"; then
+		echo "      client $1 was refused: $(head -1 "$TMP/$1.out")"
+		return 2
+	fi
+	return 0
 }
 
 # client_lock_try POSITION LENGTH: GOT or NOT, the client's answer for a lock it doesn't hold on
@@ -131,7 +137,7 @@ mkfifo "$TMP/hold.fifo"
 probe hold "$FILE" 0 0 < "$TMP/hold.fifo" > "$TMP/hold.out" &
 HOLD_PID=$!
 exec 9> "$TMP/hold.fifo"
-wait_for "$TMP/hold.out" "GOT" 30
+wait_for "$TMP/hold.out" "^GOT" 30
 check "B1 other program holds a lock" 0 $?
 check "B2 client is refused while the other program holds it" NOT "$(client_lock_try 0 0)"
 out=$(client_py test "$MOUNT/$NAME" 0 0 w 2>&1)
