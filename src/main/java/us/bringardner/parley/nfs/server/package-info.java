@@ -23,6 +23,6 @@
  *
  */
 /**
- * The NFS version 4.0 server (RFC 7530): {@link us.bringardner.parley.nfs.server.NfsServer} on parley-net's NioServer, sharing one folder of any FileSource. Phase 1 (decision D1): no byte-range locks, delegations, ACLs, named attributes or RPCSEC_GSS yet.
+ * The NFS version 4.0 server (RFC 7530): {@link us.bringardner.parley.nfs.server.NfsServer} on parley-net's NioServer, sharing one folder of any FileSource. It has byte-range locks (also as FileSource locks, decision D68), read and write delegations, ACLs, Kerberos (RPCSEC_GSS) and more than one export; named attributes, links, devices, sockets and fifos are not built.
  */
 package us.bringardner.parley.nfs.server;
