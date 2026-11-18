@@ -424,8 +424,9 @@ public class Compound {
 		}
 	}
 
-	private static void aclsOn(Export export, Attributes.Settings s) throws Nfs4Exception {
+	private void aclsOn(Export export, Attributes.Settings s) throws Nfs4Exception {
 		if( s != null && s.acl != null && export.getAcls() == null ) {
+			server.aclsNeedStateDir();
 			throw new Nfs4Exception(Nfs4.NFS4ERR_ATTRNOTSUPP, "access control lists need parley.nfs.stateDir");
 		}
 	}

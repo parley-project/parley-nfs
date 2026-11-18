@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-18: messages about the state folder)
+
+- **Without `parley.nfs.stateDir` the log says what that costs.** The start-up line names the handles, the access
+  control lists and (with delegations on) the delegations that don't survive a restart; the first time a client
+  tries to set an access control list, a line says why it got NFS4ERR_ATTRNOTSUPP. A `stateDir` that names a file,
+  or a folder that can't be made, is refused at start with a message that says which.
+
 ### Added (2026-11-18: delegations across a restart)
 
 - **Delegations survive a restart of the server (D67).** With `parley.nfs.stateDir` set they are kept in
