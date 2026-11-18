@@ -54,7 +54,8 @@ $CLIENT_EXEC test -f "$MOUNT/$NAME" 2>/dev/null \
 
 # a client's first OPEN after a server start has to be confirmed, and the server gives no delegation on it; so read
 # the file once first, and the open that follows is given one
-$CLIENT_EXEC cat "$MOUNT/$NAME" > /dev/null 2>&1
+# (the output is thrown away in the VM: multipass exec hangs when its own output goes to /dev/null)
+$CLIENT_EXEC sh -c 'cat "$1" > /dev/null' sh "$MOUNT/$NAME" 2>&1 | head -3
 
 # the client opens the file for reading and keeps it open
 $CLIENT_EXEC sh -c 'exec 3< "$1"; echo OPEN; sleep 900' sh "$MOUNT/$NAME" > "$TMP/holder.out" 2>&1 &
