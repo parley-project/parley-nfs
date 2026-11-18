@@ -70,6 +70,8 @@ public class StateManager {
 	private final Map<Long, ClientRecord> unconfirmedById = new HashMap<Long, ClientRecord>();
 	private final Map<String, ClientRecord> unconfirmedByName = new HashMap<String, ClientRecord>();
 	private final Map<String, OpenState> states = new HashMap<String, OpenState>();
+	/** the clients' locks as FileSource locks, null unless parley.nfs.mirrorLocks (D68) */
+	private volatile LockMirror mirror;
 	private final Map<String, LockState> lockStates = new HashMap<String, LockState>();
 	private final Map<String, DelegationState> delegationStates = new HashMap<String, DelegationState>();
 	/** Delegations taken back after the lease ran out, so their stateids get NFS4ERR_DELEG_REVOKED */
@@ -310,6 +312,16 @@ public class StateManager {
 		public final boolean write;
 		public final long clientid;
 		public final byte[] owner;
+
+		/** a lock another program holds on the file (decision D68): no client, no owner */
+		LockDeniedException(Range r) {
+			super(Nfs4.NFS4ERR_DENIED);
+			this.offset = r.start;
+			this.length = r.length();
+			this.write = true;
+			this.clientid = 0;
+			this.owner = new byte[0];
+		}
 
 		LockDeniedException(Range r, SeqOwner holder) {
 			super(Nfs4.NFS4ERR_DENIED);
@@ -837,6 +849,10 @@ public class StateManager {
 		l.node.locks.remove(l);
 		l.owner.states.remove(l.node);
 		lockStates.remove(stateKey(l.other));
+		LockMirror m = mirror;
+		if( m != null ) {
+			m.resync(l.node);
+		}
 	}
 
 	/**
@@ -882,9 +898,18 @@ public class StateManager {
 		if( denied != null ) {
 			throw denied;
 		}
+		List<Range> before = new ArrayList<Range>(l.ranges);
 		remove(l.ranges, start, end);
 		l.ranges.add(new Range(start, end, write));
 		merge(l.ranges);
+		LockMirror m = mirror;
+		if( m != null && m.sync(l.node) != null ) {
+			// another program holds part of it (D68): the lock isn't given, and what the owner held stays
+			l.ranges.clear();
+			l.ranges.addAll(before);
+			m.resync(l.node);
+			throw new LockDeniedException(new Range(start, end, true));
+		}
 		l.seqid++;
 	}
 
@@ -894,6 +919,10 @@ public class StateManager {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
 		}
 		remove(l.ranges, start, end);
+		LockMirror m = mirror;
+		if( m != null ) {
+			m.resync(l.node);
+		}
 		l.seqid++;
 	}
 
@@ -903,7 +932,12 @@ public class StateManager {
 	 */
 	public synchronized LockDeniedException test(Node node, ClientRecord client, byte[] owner, boolean write, long start, long end) {
 		LockOwner mine = client.lockOwners.get(ownerKey(owner));
-		return conflict(node, mine, write, start, end);
+		LockDeniedException ret = conflict(node, mine, write, start, end);
+		LockMirror m = mirror;
+		if( ret == null && m != null && m.test(node, write, start, end) ) {
+			ret = new LockDeniedException(new Range(start, end, true));
+		}
+		return ret;
 	}
 
 	/**
@@ -1116,6 +1150,19 @@ public class StateManager {
 			}
 		}
 		return "no reason found";
+	}
+
+	/** Hold the clients' locks as FileSource locks too (D68); null, the default, does not. */
+	synchronized void setLockMirror(LockMirror mirror) {
+		this.mirror = mirror;
+	}
+
+	/** Let go of the FileSource locks (the server stops). */
+	synchronized void closeLockMirror() {
+		LockMirror m = mirror;
+		if( m != null ) {
+			m.close();
+		}
 	}
 
 	public void setWarnings(java.util.function.Consumer<String> warnings) {

@@ -2,6 +2,12 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-18: locks as file locks)
+
+- **`parley.nfs.mirrorLocks` holds the clients' byte-range locks as FileSource locks too (D68).** Off by default.
+  Another Parley program that locks the file sees them; a lock another program holds makes a LOCK come back
+  NFS4ERR_DENIED and shows in LOCKT. A lock that can't be given leaves what the owner held as it was.
+
 ### Changed (2026-11-18: messages about the state folder)
 
 - **Without `parley.nfs.stateDir` the log says what that costs.** The start-up line names the handles, the access

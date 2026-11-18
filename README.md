@@ -65,6 +65,7 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.authCacheTime` | 60s | How long a permission answer is kept |
 | `parley.nfs.fileIdleTime` | 30s | How long an unused file stays open |
 | `parley.nfs.stateDir` | none | A folder (a path or `filesource:` URL) that keeps one node file per export, so handles survive a restart (see "File handles"). Without it the start-up log says what is lost: stale handles of renamed files after a restart, no access control lists, no delegations across a restart |
+| `parley.nfs.mirrorLocks` | false | true to hold the clients' byte-range locks as FileSource locks too (see "Locks") |
 | `parley.nfs.maxNodes` | 100000 | The most files per export kept in memory; those nobody has asked for lately go first |
 | `parley.nfs.replayCacheSize` | 1024 | How many replies of COMPOUNDs that changed something are kept for a client that sends the call again; 0 for none |
 
@@ -161,6 +162,24 @@ on. A delegation nobody comes back for within the lease is given up, and the log
 (its changes are lost); so is one whose client has restarted since. Opens and locks aren't kept, so a CLAIM_PREVIOUS
 for one that held no delegation gets NFS4ERR_NO_GRACE and the client opens again. Without `stateDir` nothing is
 kept, as before.
+
+## Locks
+
+By default the byte-range locks are the server's own: advisory, and seen by its NFS clients only. With
+`parley.nfs.mirrorLocks=true` they are also taken as FileSource locks (`tryLock`) on the file, so another Parley
+program that locks the same file (a mail server and its mailbox, say) sees them, and a lock it holds is seen by
+the clients: a LOCK over it is denied (NFS4ERR_DENIED, with the range asked for, client ID 0 and no owner), and
+LOCKT reports it. Notes:
+
+- The file system decides how far a FileSource lock reaches (`FileSource.getLockScope()`): this JVM for most, the
+  host for a local file. A lock of a program in the same JVM is refused whether it is shared or not.
+- The server holds, per file, the pieces that its clients' locks cover together, each shared or exclusive. When a
+  client's lock changes, a piece that has to shrink is let go and its rest taken again, so for a moment another
+  program could take it; if it does, the server logs a warning and the client keeps thinking it has the lock.
+- A file that can't be locked (it is gone, its FileSource has no locks) is logged once; the clients' locks stand
+  without a mirror. A client's locks are released with its lease, and all of them when the server stops.
+- A local file's lock may be a lock file beside it (`.parley-locks`, see parley-files), which would show in an
+  exported folder; set `parley.files.lockDirectory` to put them elsewhere.
 
 ## File handles
 

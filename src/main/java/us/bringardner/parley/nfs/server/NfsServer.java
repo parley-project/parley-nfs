@@ -69,6 +69,8 @@ import us.bringardner.parley.net.server.ServerMain;
  * <li>{@code domain}: the domain of owner names (user@domain), which must match the clients'
  * NFSv4 domain; default the DNS domain of this host's name, else {@value #DEFAULT_DOMAIN}</li>
  * <li>{@code leaseTime}: default 90s</li>
+ * <li>{@code mirrorLocks}: true to hold the clients' byte-range locks as FileSource locks too, so another
+ *     Parley program that locks the file sees them (and a lock it holds is refused to the clients), default false (D68)</li>
  * <li>{@code delegations}: true to give clients read delegations (needs a callback address that works), default false</li>
  * <li>{@code ioSize}: the most bytes one READ returns or one WRITE takes, default 1 MiB</li>
  * <li>{@code workerThreads}: threads that run requests (file access blocks), default {@value #DEFAULT_WORKER_THREADS}</li>
@@ -107,6 +109,7 @@ public class NfsServer extends NioServer {
 	static final String DELEGATION_FILE = "delegations.state";
 	public static final String PROPERTY_DELEGATIONS = "delegations";
 	public static final String PROPERTY_WRITE_DELEGATIONS = "writeDelegations";
+	public static final String PROPERTY_MIRROR_LOCKS = "mirrorLocks";
 	/** The most nodes kept in memory per export (decision D42). */
 	public static final String PROPERTY_MAX_NODES = "maxNodes";
 	public static final String PROPERTY_SEC = "sec";
@@ -282,6 +285,9 @@ public class NfsServer extends NioServer {
 			Node n = e.getNodes().find(fileid);
 			return n != null ? n.getPath() : e.getNodes().storedPath(fileid);
 		});
+		if( getBooleanProperty(propertyName(PROPERTY_MIRROR_LOCKS), false) ) {
+			stateManager.setLockMirror(new LockMirror(node -> node.getExport().resolve(node), message -> logWarn(message)));
+		}
 		delegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false) ? new Delegations(this) : null;
 		writeDelegations = getBooleanProperty(propertyName(PROPERTY_WRITE_DELEGATIONS), false);
 		if( writeDelegations && delegations == null ) {
@@ -481,6 +487,7 @@ public class NfsServer extends NioServer {
 			if( d != null ) {
 				d.close();
 			}
+			stateManager.closeLockMirror();
 			try {
 				stateManager.closeStore();
 			} catch (IOException ex) {
