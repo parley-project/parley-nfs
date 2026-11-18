@@ -1329,7 +1329,7 @@ public class StateManager {
 
 	private static DelegationStore.Entry entry(DelegationState d) {
 		return new DelegationStore.Entry(d.client.name, hex(d.client.verifier), d.client.principal,
-				d.node.getExport().getName(), d.node.getFileid(), d.write);
+				d.node.getExport().getName(), d.node.getFileid(), d.write, d.node.getPath());
 	}
 
 	private static String hex(byte[] b) {
@@ -1367,10 +1367,37 @@ public class StateManager {
 		}
 	}
 
+	/** finds the path a file has now, from its export and fileid; returns null if the server doesn't know it */
+	private volatile java.util.function.BiFunction<String, Long, String> paths;
+
+	public void setPaths(java.util.function.BiFunction<String, Long, String> paths) {
+		this.paths = paths;
+	}
+
+	/** @return the file as the log names it: its path now, else the path it had when the delegation was given, else its id */
+	private String describeFile(DelegationStore.Entry e) {
+		java.util.function.BiFunction<String, Long, String> f = paths;
+		String path = null;
+		if( f != null ) {
+			try {
+				path = f.apply(e.export, e.fileid);
+			} catch (RuntimeException ex) {
+				// not known: the recorded path is next
+			}
+		}
+		if( path != null ) {
+			return e.export+":/"+path;
+		}
+		if( !e.path.isEmpty() ) {
+			return e.export+":/"+e.path+" (as it was when given)";
+		}
+		return e.export+" file "+Long.toHexString(e.fileid);
+	}
+
 	private void giveUp(DelegationStore.Entry e, String why) {
 		reclaims.remove(e);
 		if( e.write ) {
-			warn("The write delegation of "+e.export+" file "+Long.toHexString(e.fileid)+" held by client \""+text(e.client)
+			warn("The write delegation of "+describeFile(e)+" held by client \""+text(e.client)
 				+"\" before the restart isn't coming back ("+why+"); changes it hadn't written are lost");
 		}
 		DelegationStore s = store;
@@ -1392,7 +1419,7 @@ public class StateManager {
 			if( b.length() > 0 ) {
 				b.append("; ");
 			}
-			b.append(e.write ? "write " : "read ").append(e.export).append(" file ").append(Long.toHexString(e.fileid))
+			b.append(e.write ? "write " : "read ").append(describeFile(e))
 				.append(" of \"").append(text(e.client)).append("\" as ").append(e.principal);
 		}
 		return b.toString();

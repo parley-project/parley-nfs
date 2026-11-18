@@ -849,6 +849,8 @@ public class DelegationNfsTest {
 		Callbacks cb = callbacks("127.0.0.1");
 		Opened held = writeHolder(client(), cb, "a");
 		restart();
+		List<String> warnings = new java.util.concurrent.CopyOnWriteArrayList<String>();
+		server.getStateManager().setWarnings(warnings::add);
 		TestClient b = client();
 		long bid = clientid(b, "b", "");
 		assertEquals(Nfs4.NFS4ERR_GRACE, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
@@ -860,6 +862,8 @@ public class DelegationNfsTest {
 		} while( status == Nfs4.NFS4ERR_GRACE && System.currentTimeMillis() < end );
 		assertEquals(Nfs4.NFS4_OK, status);
 		assertFalse(server.getStateManager().isReclaiming());
+		assertEquals(1, warnings.size(), warnings.toString());
+		assertTrue(warnings.get(0).contains("test:/f"), "the warning names the file by its path: "+warnings.get(0));
 		TestClient a = client();
 		long id = clientid(a, "a", cb.addr());
 		assertEquals(Nfs4.NFS4ERR_NO_GRACE, reclaim(a, held.fh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "a-owner", Nfs4.OPEN_DELEGATE_WRITE).status);

@@ -274,6 +274,14 @@ public class NfsServer extends NioServer {
 		attributes = new Attributes(domain.trim(), numbers, lease/1000, ioSize, ioSize);
 		stateManager = new StateManager((int) (System.currentTimeMillis()/1000), lease);
 		stateManager.setWarnings(message -> logWarn(message));
+		stateManager.setPaths((export, fileid) -> {
+			Export e = findExport(export);
+			if( e == null ) {
+				return null;
+			}
+			Node n = e.getNodes().find(fileid);
+			return n != null ? n.getPath() : e.getNodes().storedPath(fileid);
+		});
 		delegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false) ? new Delegations(this) : null;
 		writeDelegations = getBooleanProperty(propertyName(PROPERTY_WRITE_DELEGATIONS), false);
 		if( writeDelegations && delegations == null ) {
