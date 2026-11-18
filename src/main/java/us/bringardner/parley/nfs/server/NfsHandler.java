@@ -203,11 +203,10 @@ public class NfsHandler implements INioHandler {
 		return Rpc.startAccepted(xid, Rpc.RPCSEC_GSS, gc.verifier, stat, size);
 	}
 
-	/** A RPCSEC_GSS call refused: said at INFO, because the client only sees a failed mount. */
+	/** A RPCSEC_GSS call refused: said at INFO, because the client only sees a failed mount (a service that isn't allowed is the exception). */
 	private XdrEncoder gssDeny(int xid, int stat) {
 		String why = stat == Rpc.AUTH_BADCRED ? "AUTH_BADCRED (credential isn't understood, or the flavor isn't set up)"
 				: stat == Rpc.AUTH_BADVERF ? "AUTH_BADVERF (the checksum of the call doesn't check)"
-				: stat == Rpc.AUTH_TOOWEAK ? "AUTH_TOOWEAK (that service isn't in parley.nfs.sec)"
 				: stat == Rpc.RPCSEC_GSS_CREDPROBLEM ? "RPCSEC_GSS_CREDPROBLEM (no such context)"
 				: stat == Rpc.RPCSEC_GSS_CTXPROBLEM ? "RPCSEC_GSS_CTXPROBLEM (the context is used up)"
 				: "auth_stat "+stat;
@@ -287,7 +286,11 @@ public class NfsHandler implements INioHandler {
 		String flavor = service == GssServer.SVC_PRIVACY ? NfsServer.SEC_KRB5P
 				: service == GssServer.SVC_INTEGRITY ? NfsServer.SEC_KRB5I : NfsServer.SEC_KRB5;
 		if( !server.allowsSec(flavor) ) {
-			return gssDeny(xid, Rpc.AUTH_TOOWEAK);
+			// A Linux client probes the stronger services (krb5i, krb5p) of a mount and settles on one
+			// that is allowed: that is routine, so it is said at the debug level only.
+			server.logDebug(() -> "RPCSEC_GSS call "+Integer.toUnsignedString(xid)+" refused: AUTH_TOOWEAK ("+flavor+" isn't in "
+				+server.propertyName(NfsServer.PROPERTY_SEC)+")");
+			return Rpc.authError(xid, Rpc.AUTH_TOOWEAK);
 		}
 		server.logDebug(() -> "RPCSEC_GSS call "+Integer.toUnsignedString(xid)+" from "+ctx.getPrincipal()
 			+": procedure "+call.getProcedure()+", service "+service+", sequence number "+gc.seq);

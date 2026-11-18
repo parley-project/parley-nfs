@@ -2,6 +2,11 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-18: quieter logs)
+
+- **A RPCSEC_GSS call for a service that isn't in `parley.nfs.sec` is logged at the debug level, not INFO.** A
+  Linux client probes krb5i and krb5p before settling on an allowed service, so the INFO lines were noise.
+
 ### Added (2026-11-17: write delegations)
 
 - **`parley.nfs.writeDelegations` (default false, needs `parley.nfs.delegations=true`): write delegations (D62 to
