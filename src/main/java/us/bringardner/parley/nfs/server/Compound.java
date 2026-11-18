@@ -1384,9 +1384,14 @@ public class Compound {
 		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
 			openForWrite(node, f);
 		}
+		// a reclaim never asks for a confirm (RFC 7530 section 16.16.5): a Linux client sends the OPEN_CONFIRM
+		// with no file handle and the reclaim fails; the client has proved itself by naming what it held
+		if( !owner.isConfirmed() ) {
+			state.confirmOwner(s);
+		}
 		writeStateid(s.stateId());
 		changeInfo(0, 0);
-		out.writeInt(Nfs4.OPEN4_RESULT_LOCKTYPE_POSIX | (owner.isConfirmed() ? 0 : Nfs4.OPEN4_RESULT_CONFIRM));
+		out.writeInt(Nfs4.OPEN4_RESULT_LOCKTYPE_POSIX);
 		out.writeIntArray(new int[0]);
 		if( !r.fresh ) {
 			out.writeInt(Nfs4.OPEN_DELEGATE_NONE);
