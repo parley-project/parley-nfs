@@ -287,6 +287,7 @@ public class NfsServer extends NioServer {
 		});
 		if( getBooleanProperty(propertyName(PROPERTY_MIRROR_LOCKS), false) ) {
 			stateManager.setLockMirror(new LockMirror(node -> node.getExport().resolve(node), message -> logWarn(message)));
+			logInfo("Server "+getName()+": byte-range locks of clients are also held as file locks ("+propertyName(PROPERTY_MIRROR_LOCKS)+"=true)");
 		}
 		delegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false) ? new Delegations(this) : null;
 		writeDelegations = getBooleanProperty(propertyName(PROPERTY_WRITE_DELEGATIONS), false);
