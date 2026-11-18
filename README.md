@@ -178,6 +178,8 @@ LOCKT reports it. Notes:
   program could take it; if it does, the server logs a warning and the client keeps thinking it has the lock.
 - A file that can't be locked (it is gone, its FileSource has no locks) is logged once; the clients' locks stand
   without a mirror. A client's locks are released with its lease, and all of them when the server stops.
+- `tools/LockProbe.java` is another program that tries or holds a FileSource lock on a file, for checking the mirror
+  against real clients; it must run on the server's machine with the same lock settings as the server.
 - A local file's lock may be a lock file beside it (`.parley-locks`, see parley-files), which would show in an
   exported folder; set `parley.files.lockDirectory` to put them elsewhere.
 
