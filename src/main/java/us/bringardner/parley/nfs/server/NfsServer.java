@@ -354,13 +354,15 @@ public class NfsServer extends NioServer {
 				logInfo("Server "+getName()+": export "+e.getName()+" keeps "+acls.size()+" access control lists in "+state);
 			}
 		}
+		if( state == null && delegations != null ) {
+			logInfo("Server "+getName()+": no "+propertyName(PROPERTY_STATE_DIR)+", so delegations aren't kept and don't survive a restart");
+		}
 		if( state != null && delegations != null ) {
 			// delegations are kept, so that their clients can reclaim them after a restart (D67)
 			DelegationStore store = new DelegationStore(state.getChild(DELEGATION_FILE));
 			int n = stateManager.recover(store, System.currentTimeMillis());
-			if( n > 0 ) {
-				logInfo("Server "+getName()+": "+n+" delegations of the run before can be reclaimed for "+stateManager.getLeaseMillis()/1000+"s; the files wait until then");
-			}
+			logInfo("Server "+getName()+": delegations are kept in "+store+"; "+n+" of the run before can be reclaimed for "
+				+stateManager.getLeaseMillis()/1000+"s"+(n > 0 ? ", the files wait until then" : ""));
 		}
 	}
 
