@@ -81,9 +81,22 @@ echo "server is up again ($(date +%T)); asking the client about the file every 2
 answered=""
 while [ $(( $(date +%s) - START )) -lt 150 ]; do
 	t=$(( $(date +%s) - START ))
-	if $CLIENT_EXEC timeout 5 stat -c %s "$MOUNT/$NAME" > /dev/null 2>&1; then
+	# a call stuck in the kernel can't be stopped by `timeout` in the VM, so the wait is done here
+	$CLIENT_EXEC stat -c %s "$MOUNT/$NAME" > "$TMP/stat.out" 2>&1 &
+	spid=$!
+	w=0
+	while kill -0 "$spid" 2>/dev/null && [ $w -lt 10 ]; do
+		sleep 0.5
+		w=$(( w + 1 ))
+	done
+	if kill -0 "$spid" 2>/dev/null; then
+		echo "      $t s after the restart: stat has not answered for 5 s (the call is stuck in the client)"
+		kill "$spid" 2>/dev/null
+	elif grep -q '^[0-9]' "$TMP/stat.out"; then
 		answered=$t
 		break
+	else
+		echo "      $t s after the restart: $(head -1 "$TMP/stat.out")"
 	fi
 	sleep 2
 done
