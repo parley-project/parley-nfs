@@ -139,7 +139,16 @@ works: the client's SETCLIENTID names it, the server calls it (CB_NULL) when the
 doesn't answer gets none. Only the host the client connects from is called. When another client opens the file for
 writing, changes its size, removes or renames it, the server recalls the delegation and answers NFS4ERR_DELAY until
 the client returns it (or the lease runs out and it is revoked). Programs on the server's machine that write the
-same files are not seen. Read delegations only; off by default.
+same files are not seen. Off by default.
+
+`parley.nfs.writeDelegations=true` (with `parley.nfs.delegations=true`) also gives a write delegation to a client
+that opens a file for writing when no other client has it open or holds a delegation of it. The client may keep its
+changes until the server asks for them. Another client's open, or another host's request for the file's size, change
+or times, READ, WRITE, SETATTR, REMOVE or RENAME, recalls it; the other client waits (NFS4ERR_DELAY) until the holder
+has written its changes and returned the delegation. A request that names no client (GETATTR, or READ and WRITE with
+a special stateid) from the holder's own host is taken to be the holder's. If the holder doesn't return the delegation
+within the lease it is revoked, and the changes it hadn't written are lost: the log says so. READDIR's attributes
+and LOCKT are not checked against a write delegation.
 
 ## File handles
 

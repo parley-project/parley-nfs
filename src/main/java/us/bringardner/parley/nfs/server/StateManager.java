@@ -72,6 +72,8 @@ public class StateManager {
 	private final Map<String, DelegationState> delegationStates = new HashMap<String, DelegationState>();
 	/** Delegations taken back after the lease ran out, so their stateids get NFS4ERR_DELEG_REVOKED */
 	private final Set<String> revokedDelegations = new LinkedHashSet<String>();
+	/** told things the operator should know, like a write delegation that was lost; may be null */
+	private volatile java.util.function.Consumer<String> warnings;
 	private final Set<Integer> expired = new LinkedHashSet<Integer>();
 
 	/**
@@ -993,15 +995,22 @@ public class StateManager {
 		final byte[] other;
 		final ClientRecord client;
 		final Node node;
+		/** a write delegation: the client may hold changes that the server hasn't seen (decision D62) */
+		final boolean write;
 		/** when the recall began, 0 before; the client has the lease time from then to return it */
 		volatile long recalledAt;
 		/** set by whoever sends the CB_RECALL, so one is sent */
 		final java.util.concurrent.atomic.AtomicBoolean recallSent = new java.util.concurrent.atomic.AtomicBoolean();
 
-		DelegationState(byte[] other, ClientRecord client, Node node) {
+		DelegationState(byte[] other, ClientRecord client, Node node, boolean write) {
 			this.other = other;
 			this.client = client;
 			this.node = node;
+			this.write = write;
+		}
+
+		public boolean isWrite() {
+			return write;
 		}
 
 		public StateId stateId() {
@@ -1032,7 +1041,7 @@ public class StateManager {
 			return null;
 		}
 		for (DelegationState d : node.delegations) {
-			if( d.client == c || d.recalledAt != 0 ) {
+			if( d.client == c || d.recalledAt != 0 || d.write ) {
 				return null;
 			}
 		}
@@ -1041,11 +1050,67 @@ public class StateManager {
 				return null;
 			}
 		}
-		DelegationState d = new DelegationState(newOther(c), c, node);
+		DelegationState d = new DelegationState(newOther(c), c, node, false);
 		node.delegations.add(d);
 		c.delegations.add(d);
 		delegationStates.put(stateKey(d.other), d);
 		return d;
+	}
+
+	/**
+	 * Hand a client a write delegation of a file it has just opened for writing, if that is safe: its callback
+	 * path is up, nobody else has the file open or holds a delegation of it, and the client has none already
+	 * (decisions D56 and D62).
+	 * @return the delegation, null if none is given
+	 */
+	public synchronized DelegationState grantWrite(ClientRecord c, Node node) {
+		if( !c.cbUp || !c.confirmed || confirmedById.get(c.clientid) != c ) {
+			return null;
+		}
+		if( !node.delegations.isEmpty() ) {
+			return null;
+		}
+		for (OpenState s : node.opens) {
+			if( s.owner.getClient() != c ) {
+				return null;
+			}
+		}
+		DelegationState d = new DelegationState(newOther(c), c, node, true);
+		node.delegations.add(d);
+		node.setWriteDelegated(true);
+		c.delegations.add(d);
+		delegationStates.put(stateKey(d.other), d);
+		return d;
+	}
+
+	/** @return why a write delegation of the file isn't given to the client now, for the log */
+	public synchronized String whyNoWriteDelegation(ClientRecord c, Node node) {
+		if( !c.confirmed || confirmedById.get(c.clientid) != c ) {
+			return "the client's id isn't confirmed";
+		}
+		if( !c.cbUp ) {
+			return "the client's callback path isn't up";
+		}
+		if( !node.delegations.isEmpty() ) {
+			return "a delegation of the file is held ("+describeDelegations(node)+")";
+		}
+		for (OpenState s : node.opens) {
+			if( s.owner.getClient() != c ) {
+				return "another client has the file open";
+			}
+		}
+		return "no reason found";
+	}
+
+	public void setWarnings(java.util.function.Consumer<String> warnings) {
+		this.warnings = warnings;
+	}
+
+	private void warn(String message) {
+		java.util.function.Consumer<String> w = warnings;
+		if( w != null ) {
+			w.accept(message);
+		}
 	}
 
 	/** @return why a read delegation of the file isn't given to the client now, for the log */
@@ -1082,7 +1147,7 @@ public class StateManager {
 			if( b.length() > 0 ) {
 				b.append(", ");
 			}
-			b.append("client ").append(d.client).append(d.recalledAt != 0 ? " (being recalled)" : "");
+			b.append(d.write ? "write " : "").append("client ").append(d.client).append(d.recalledAt != 0 ? " (being recalled)" : "");
 		}
 		return b.toString();
 	}
@@ -1090,13 +1155,26 @@ public class StateManager {
 	/**
 	 * The delegations of a file that a conflicting access has to wait for. The recall of each begins (the
 	 * caller sends the CB_RECALL); a delegation whose recall ran past the lease is revoked and left out.
-	 * @param ignore a client whose own delegation is no conflict (it reopens by it), may be null
+	 * @param requester the client that makes the access, null when the call doesn't say (GETATTR, READ and WRITE
+	 *        with a stateid that is no client's); its own write delegation is no conflict, and neither is its own
+	 *        delegation when it reopens by it
+	 * @param byDelegation the requester reopens a file it holds a delegation of (CLAIM_DELEGATE_CUR)
+	 * @param writeOnly the access only conflicts with a write delegation (a read, or a request for attributes)
+	 * @param host where the call comes from: with no requester, the holder of a write delegation that is on this
+	 *        host is taken to be the one asking (decision D65), may be null
 	 * @return the delegations to wait for, empty if the access may go on
 	 */
-	public synchronized List<DelegationState> recallFor(Node node, ClientRecord ignore, long now) {
+	public synchronized List<DelegationState> recallFor(Node node, ClientRecord requester, boolean byDelegation,
+			boolean writeOnly, java.net.InetAddress host, long now) {
 		List<DelegationState> ret = new ArrayList<DelegationState>();
 		for (DelegationState d : new ArrayList<DelegationState>(node.delegations)) {
-			if( d.client == ignore ) {
+			if( requester != null && d.client == requester && (d.write || byDelegation) ) {
+				continue;
+			}
+			if( requester == null && d.write && host != null && host.equals(d.client.cbFrom) ) {
+				continue;
+			}
+			if( writeOnly && !d.write ) {
 				continue;
 			}
 			if( d.recalledAt != 0 && now - d.recalledAt > leaseMillis ) {
@@ -1121,6 +1199,8 @@ public class StateManager {
 	}
 
 	private void revoke(DelegationState d) {
+		warn("Revoked the "+(d.write ? "write " : "")+"delegation of "+d.node+" from client "+d.client
+				+": it wasn't returned within the lease"+(d.write ? "; changes the client hadn't written are lost" : ""));
 		forget(d);
 		revokedDelegations.add(stateKey(d.other));
 		if( revokedDelegations.size() > EXPIRED_REMEMBERED ) {
@@ -1132,6 +1212,9 @@ public class StateManager {
 
 	private void forget(DelegationState d) {
 		d.node.delegations.remove(d);
+		if( d.write ) {
+			d.node.setWriteDelegated(false);
+		}
 		d.client.delegations.remove(d);
 		delegationStates.remove(stateKey(d.other));
 	}
@@ -1212,6 +1295,9 @@ public class StateManager {
 	private List<Node> dropState(ClientRecord c) {
 		List<Node> ret = new ArrayList<Node>();
 		for (DelegationState d : new ArrayList<DelegationState>(c.delegations)) {
+			if( d.write ) {
+				warn("Client "+c+" lost its write delegation of "+d.node+" with its lease; changes it hadn't written are lost");
+			}
 			forget(d);
 		}
 		// the client's locks go with it (D20)

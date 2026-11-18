@@ -193,8 +193,15 @@ public class DelegationNfsTest {
 	}
 
 	private void start(boolean delegations, String lease) throws Exception {
+		start(delegations, false, lease);
+	}
+
+	private void start(boolean delegations, boolean writes, String lease) throws Exception {
 		if( delegations ) {
 			property("test.deleg.delegations", "true");
+		}
+		if( writes ) {
+			property("test.deleg.writeDelegations", "true");
 		}
 		property("test.deleg.leaseTime", lease);
 		mem = new MemoryFileSourceFactory();
@@ -230,6 +237,13 @@ public class DelegationNfsTest {
 
 	private TestClient client() throws IOException {
 		TestClient c = new TestClient(server.getLocalPort());
+		clients.add(c);
+		return c;
+	}
+
+	/** a client that comes from the given address of this machine */
+	private TestClient clientFrom(String host) throws IOException {
+		TestClient c = new TestClient(host, server.getLocalPort());
 		clients.add(c);
 		return c;
 	}
@@ -319,6 +333,16 @@ public class DelegationNfsTest {
 			r.in.readInt();
 			r.in.readInt();
 			assertEquals("EVERYONE@", r.in.readString(100));
+		} else if( o.delegation == Nfs4.OPEN_DELEGATE_WRITE ) {
+			r.in.readInt();
+			o.delegationOther = r.in.readFixedOpaque(12);
+			assertFalse(r.in.readBoolean());
+			assertEquals(Nfs4.NFS_LIMIT_SIZE, r.in.readInt());
+			assertEquals(0L, r.in.readLong(), "a size limit of 0 (D64)");
+			r.in.readInt();
+			r.in.readInt();
+			r.in.readInt();
+			assertEquals("EVERYONE@", r.in.readString(100));
 		}
 		r.ok(Nfs4.OP_GETFH);
 		o.fh = r.in.readOpaque(128);
@@ -355,6 +379,12 @@ public class DelegationNfsTest {
 		return r.next(Nfs4.OP_WRITE);
 	}
 
+	private static int getattr(TestClient c, byte[] fh, int... bits) throws IOException {
+		Result r = c.compound(new Ops().putfh(fh).getattr(bits));
+		r.ok(Nfs4.OP_PUTFH);
+		return r.next(Nfs4.OP_GETATTR);
+	}
+
 	private static int remove(TestClient c, byte[] dir, String name) throws IOException {
 		Ops ops = new Ops().putfh(dir).op(Nfs4.OP_REMOVE);
 		ops.args().writeString(name);
@@ -382,6 +412,17 @@ public class DelegationNfsTest {
 		Opened o = open(c, dir, id, Nfs4.OPEN4_SHARE_ACCESS_READ, name+"-owner", "f");
 		assertEquals(Nfs4.NFS4_OK, o.status);
 		return o;
+	}
+
+	/** A client with a working callback address that holds a write delegation of f. */
+	private Opened writeHolder(TestClient c, Callbacks cb, String name) throws Exception {
+		long id = clientid(c, name, cb.addr());
+		waitFor(() -> cb.nulls > 0, "the callback check");
+		Thread.sleep(200);
+		byte[] dir = rootFh(c);
+		assertEquals(Nfs4.OPEN_DELEGATE_NONE, open(c, dir, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, name+"-owner", "f").delegation,
+				"the open-owner's first open is confirmed, no delegation yet");
+		return open(c, dir, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, name+"-owner", "f");
 	}
 
 	// ------------------------------------------------------------------ tests
@@ -524,5 +565,144 @@ public class DelegationNfsTest {
 		assertEquals(Nfs4.NFS4_OK, remove(b, dir, "f"));
 		assertFalse(root.getChild("f").exists());
 		assertNotNull(held);
+	}
+
+	// ------------------------------------------------------------------ write delegations (D62 to D65)
+
+	/** Decision D62: nothing is given for writing unless its own setting is on. */
+	@Test
+	public void writeDelegationsAreOffUnlessTheirSettingIsOn() throws Exception {
+		start(true, "90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened o = writeHolder(client(), cb, "a");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		assertEquals(Nfs4.OPEN_DELEGATE_NONE, o.delegation);
+		assertFalse(server.getWriteDelegations());
+	}
+
+	/** A write open of a file nobody else has is given a write delegation, which reads and writes. */
+	@Test
+	public void aWriteOpenGetsAWriteDelegation() throws Exception {
+		start(true, true, "90s");
+		assertTrue(server.getWriteDelegations());
+		Callbacks cb = callbacks("127.0.0.1");
+		TestClient a = client();
+		Opened held = writeHolder(a, cb, "a");
+		assertEquals(Nfs4.OPEN_DELEGATE_WRITE, held.delegation);
+		assertEquals(Nfs4.NFS4_OK, write(a, held.fh, held.delegationOther), "WRITE with the delegation's stateid");
+		assertEquals(Nfs4.NFS4_OK, read(a, held.fh, held.delegationOther), "READ with it");
+		assertEquals(1, server.getStateManager().getDelegationCount());
+		assertTrue(root.getChild("f").length() > 0, "what the holder wrote is in the file");
+	}
+
+	/** Decision D63: another client's read open waits for the holder to write its changes back. */
+	@Test
+	public void anotherClientsReadRecallsIt() throws Exception {
+		start(true, true, "90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		TestClient a = client();
+		Opened held = writeHolder(a, cb, "a");
+		assertEquals(Nfs4.OPEN_DELEGATE_WRITE, held.delegation);
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		byte[] dir = rootFh(b);
+		assertEquals(Nfs4.NFS4ERR_DELAY, open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo", "f").status);
+		waitFor(() -> cb.recalls.size() == 1, "the CB_RECALL");
+		assertArrayEquals(held.delegationOther, cb.recalls.get(0)[0]);
+		assertEquals(Nfs4.NFS4_OK, delegreturn(a, held.fh, held.delegationOther));
+		assertEquals(0, server.getStateManager().getDelegationCount());
+		assertEquals(Nfs4.NFS4_OK, open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo", "f").status);
+	}
+
+	/** Another client's write open waits for it too. */
+	@Test
+	public void anotherClientsWriteRecallsIt() throws Exception {
+		start(true, true, "90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		TestClient a = client();
+		Opened held = writeHolder(a, cb, "a");
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		byte[] dir = rootFh(b);
+		assertEquals(Nfs4.NFS4ERR_DELAY, open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
+		waitFor(() -> cb.recalls.size() == 1, "the CB_RECALL");
+		assertEquals(Nfs4.NFS4_OK, delegreturn(a, held.fh, held.delegationOther));
+		assertEquals(Nfs4.NFS4_OK, open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
+	}
+
+	/** The holder's own opens are no conflict, and neither are its own requests for the size. */
+	@Test
+	public void theHolderIsNoConflict() throws Exception {
+		start(true, true, "90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		TestClient a = client();
+		Opened held = writeHolder(a, cb, "a");
+		long id = clientid(a, "a", cb.addr());
+		byte[] dir = rootFh(a);
+		assertEquals(Nfs4.NFS4_OK, open(a, dir, id, Nfs4.OPEN4_SHARE_ACCESS_BOTH, "a-owner", "f").status, "its own open");
+		assertEquals(Nfs4.NFS4_OK, getattr(a, held.fh, Nfs4.FATTR4_SIZE, Nfs4.FATTR4_CHANGE, Nfs4.FATTR4_TIME_MODIFY),
+				"its own request, from its own host (D65)");
+		Thread.sleep(100);
+		assertTrue(cb.recalls.isEmpty());
+		assertEquals(1, server.getStateManager().getDelegationCount());
+	}
+
+	/** Decisions D63 and D65: a request for the size from another host recalls it; one for the type doesn't. */
+	@Test
+	public void anotherHostsRequestForTheSizeRecallsIt() throws Exception {
+		start(true, true, "90s");
+		String other = otherAddress();
+		org.junit.jupiter.api.Assumptions.assumeTrue(other != null, "this machine has no address besides 127.0.0.1");
+		Callbacks cb = callbacks("127.0.0.1");
+		TestClient a = client();
+		Opened held = writeHolder(a, cb, "a");
+		assertEquals(Nfs4.OPEN_DELEGATE_WRITE, held.delegation);
+		TestClient b = clientFrom(other);
+		assertEquals(Nfs4.NFS4_OK, getattr(b, held.fh, Nfs4.FATTR4_TYPE), "the type doesn't change by writing");
+		Thread.sleep(100);
+		assertTrue(cb.recalls.isEmpty());
+		assertEquals(Nfs4.NFS4ERR_DELAY, getattr(b, held.fh, Nfs4.FATTR4_SIZE), "the size does");
+		waitFor(() -> cb.recalls.size() == 1, "the CB_RECALL");
+		assertEquals(Nfs4.NFS4_OK, delegreturn(a, held.fh, held.delegationOther));
+		assertEquals(Nfs4.NFS4_OK, getattr(b, held.fh, Nfs4.FATTR4_SIZE));
+	}
+
+	/** A write delegation is given only when no other client has the file open. */
+	@Test
+	public void noWriteDelegationWhileAnotherClientHasTheFileOpen() throws Exception {
+		start(true, true, "90s");
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		byte[] dir = rootFh(b);
+		open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo", "f");
+		assertEquals(Nfs4.NFS4_OK, open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo", "f").status);
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened o = writeHolder(client(), cb, "a");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		assertEquals(Nfs4.OPEN_DELEGATE_NONE, o.delegation, "b has it open");
+		assertEquals(0, server.getStateManager().getDelegationCount());
+	}
+
+	/** A write delegation not returned within the lease is taken back, and its stateid is revoked. */
+	@Test
+	public void aWriteDelegationNotReturnedIsRevoked() throws Exception {
+		start(true, true, "2s");
+		Callbacks cb = callbacks("127.0.0.1");
+		TestClient a = client();
+		Opened held = writeHolder(a, cb, "a");
+		assertEquals(Nfs4.OPEN_DELEGATE_WRITE, held.delegation);
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		byte[] dir = rootFh(b);
+		assertEquals(Nfs4.NFS4ERR_DELAY, open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo", "f").status);
+		long end = System.currentTimeMillis()+10000;
+		int status;
+		do {
+			Thread.sleep(300);
+			status = open(b, dir, bid, Nfs4.OPEN4_SHARE_ACCESS_READ, "bo", "f").status;
+		} while( status == Nfs4.NFS4ERR_DELAY && System.currentTimeMillis() < end );
+		assertEquals(Nfs4.NFS4_OK, status, "the reader goes on once it is revoked");
+		assertEquals(0, server.getStateManager().getDelegationCount());
+		assertEquals(Nfs4.NFS4ERR_DELEG_REVOKED, write(a, held.fh, held.delegationOther), "the holder is told");
 	}
 }

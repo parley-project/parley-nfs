@@ -46,6 +46,8 @@ public final class Node {
 	/** The lock states of this file (decision D17), guarded by the StateManager. */
 	/** The delegations of this file, guarded by the StateManager. */
 	final List<StateManager.DelegationState> delegations = new ArrayList<StateManager.DelegationState>();
+	/** true while a client holds a write delegation of this file, so a call can ask without the StateManager's lock */
+	private volatile boolean writeDelegated;
 	final List<StateManager.LockState> locks = new ArrayList<StateManager.LockState>();
 
 	Node(long fileid, String path, Export export) {
@@ -112,5 +114,14 @@ public final class Node {
 	@Override
 	public String toString() {
 		return "/"+path+" ("+fileid+")";
+	}
+
+	/** @return true if a client holds a write delegation of this file (decision D62 to D65) */
+	public boolean isWriteDelegated() {
+		return writeDelegated;
+	}
+
+	void setWriteDelegated(boolean b) {
+		writeDelegated = b;
 	}
 }
