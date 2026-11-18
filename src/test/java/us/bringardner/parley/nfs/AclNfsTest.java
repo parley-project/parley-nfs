@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -85,6 +86,8 @@ public class AclNfsTest {
 	private NfsServer server;
 	private final List<TestClient> clients = new ArrayList<TestClient>();
 	private final List<String> properties = new ArrayList<String>();
+	/** what the server said at INFO */
+	private final List<String> infos = new java.util.concurrent.CopyOnWriteArrayList<String>();
 
 	private void property(String name, String value) {
 		System.setProperty(name, value);
@@ -121,7 +124,14 @@ public class AclNfsTest {
 				}
 			}
 		}
-		server = new NfsServer("test.acl", 0);
+		infos.clear();
+		server = new NfsServer("test.acl", 0) {
+			@Override
+			public void logInfo(String message) {
+				infos.add(message);
+				super.logInfo(message);
+			}
+		};
 		server.setExport(export);
 		server.setUserRegistry(registry);
 		server.startAndWait(10000);
@@ -361,6 +371,23 @@ public class AclNfsTest {
 		assertEquals(0, aclSupport(c, rootFh));
 		assertNull(getAcl(c, rootFh), "the acl attribute isn't returned");
 		assertEquals(Nfs4.NFS4ERR_ATTRNOTSUPP, setAcl(c, rootFh, Arrays.asList(Ace.allow(0, READ, Ace.EVERYONE))));
+		assertEquals(Nfs4.NFS4ERR_ATTRNOTSUPP, setAcl(c, rootFh, Arrays.asList(Ace.allow(0, READ, Ace.EVERYONE))));
+		assertEquals(1, infos.stream().filter(m -> m.contains("tried to set an access control list")).count(),
+				"said once: "+infos);
+		assertTrue(infos.stream().anyMatch(m -> m.contains("no test.acl.stateDir") && m.contains("access control lists can't be set")),
+				"the start says what the missing folder costs: "+infos);
+	}
+
+	/** A state folder setting that names a file is refused at start, and the message says why. */
+	@Test
+	public void aStateFolderThatIsAFileIsSaidSo(@TempDir Path tmp) throws Exception {
+		Files.write(tmp.resolve("state"), new byte[] {1});
+		Exception e = assertThrows(Exception.class, () -> start(tmp, true));
+		StringBuilder all = new StringBuilder();
+		for (Throwable t = e; t != null; t = t.getCause()) {
+			all.append(t.getMessage()).append(" | ");
+		}
+		assertTrue(all.toString().contains("is a file: it has to be a folder"), all.toString());
 	}
 
 	@Test

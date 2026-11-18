@@ -337,6 +337,16 @@ public class NfsServer extends NioServer {
 				+(authorizer.isChecking() ? ", users checked by the registry" : ""));
 	}
 
+	private final java.util.concurrent.atomic.AtomicBoolean aclsNeedStateDirSaid = new java.util.concurrent.atomic.AtomicBoolean();
+
+	/** A client tried to set an access control list but there is no state folder: said once, because the client only sees "not supported". */
+	void aclsNeedStateDir() {
+		if( aclsNeedStateDirSaid.compareAndSet(false, true) ) {
+			logInfo("Server "+getName()+": a client tried to set an access control list, which needs "+propertyName(PROPERTY_STATE_DIR)
+				+" (it got NFS4ERR_ATTRNOTSUPP); this is said once");
+		}
+	}
+
 	/** Open each export's node file (when there is a state folder) and set the node limit. */
 	private void prepareNodes() throws IOException {
 		int max = getIntProperty(propertyName(PROPERTY_MAX_NODES), NodeTable.DEFAULT_MAX_NODES);
@@ -344,8 +354,11 @@ public class NfsServer extends NioServer {
 		FileSource state = null;
 		if( dir != null && !dir.trim().isEmpty() ) {
 			state = FileSourceFactory.getDefaultFactory().resolve(dir.trim());
+			if( state.exists() && !state.isDirectory() ) {
+				throw new IOException(propertyName(PROPERTY_STATE_DIR)+" "+dir+" is a file: it has to be a folder");
+			}
 			if( !state.exists() && !state.mkdirs() ) {
-				throw new IOException("Can't make "+propertyName(PROPERTY_STATE_DIR)+" "+dir);
+				throw new IOException("Can't make the folder "+propertyName(PROPERTY_STATE_DIR)+" "+dir+" (does its parent exist, and may the server write there?)");
 			}
 		}
 		for (Export e : getExports()) {
@@ -362,8 +375,9 @@ public class NfsServer extends NioServer {
 				logInfo("Server "+getName()+": export "+e.getName()+" keeps "+acls.size()+" access control lists in "+state);
 			}
 		}
-		if( state == null && delegations != null ) {
-			logInfo("Server "+getName()+": no "+propertyName(PROPERTY_STATE_DIR)+", so delegations aren't kept and don't survive a restart");
+		if( state == null ) {
+			logInfo("Server "+getName()+": no "+propertyName(PROPERTY_STATE_DIR)+", so after a restart a renamed file's handle is stale, "
+				+"access control lists can't be set (NFS4ERR_ATTRNOTSUPP)"+(delegations != null ? " and delegations aren't kept" : ""));
 		}
 		if( state != null && delegations != null ) {
 			// delegations are kept, so that their clients can reclaim them after a restart (D67)
