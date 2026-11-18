@@ -37,7 +37,8 @@ import us.bringardner.parley.files.FileSource;
 /**
  * The file that keeps the delegations clients hold, so that a restarted server can let them be reclaimed
  * (decision D67; the other client state stays in memory, D7). A journal of lines, each
- * {@code G <client> <verifier> <principal> <export> <fileid> <r|w>} (a delegation given) or
+ * {@code G <client> <verifier> <principal> <export> <fileid> <r|w> <path>} (a delegation given; the path is
+ * left out in older files) or
  * {@code X <client> <export> <fileid>} (one gone), fields separated by a tab with {@code \}, tab, newline and
  * return escaped. It is read once at start-up and rewritten (compacted) then; every change is flushed at once,
  * because a delegation the client holds must be on disk before the client is told about it.
@@ -58,16 +59,19 @@ final class DelegationStore {
 		final String export;
 		final long fileid;
 		final boolean write;
+		/** the path the file had when the delegation was given (it may have been renamed since), "" if unknown */
+		final String path;
 		/** true once the client has taken the delegation back (CLAIM_PREVIOUS); not kept in the file */
 		volatile boolean reclaimed;
 
-		Entry(String client, String verifier, String principal, String export, long fileid, boolean write) {
+		Entry(String client, String verifier, String principal, String export, long fileid, boolean write, String path) {
 			this.client = client;
 			this.verifier = verifier;
 			this.principal = principal;
 			this.export = export;
 			this.fileid = fileid;
 			this.write = write;
+			this.path = path;
 		}
 
 		boolean is(String client, String export, long fileid) {
@@ -96,12 +100,13 @@ final class DelegationStore {
 			while( (line = in.readLine()) != null ) {
 				String[] f = line.split("\t", -1);
 				try {
-					if( f[0].equals("G") && f.length == 7 ) {
+					if( f[0].equals("G") && (f.length == 7 || f.length == 8) ) {
 						String client = NodeStore.unescape(f[1]);
 						String export = NodeStore.unescape(f[4]);
 						long fileid = Long.parseUnsignedLong(f[5], 16);
 						ret.removeIf(e -> e.is(client, export, fileid));
-						ret.add(new Entry(client, NodeStore.unescape(f[2]), NodeStore.unescape(f[3]), export, fileid, f[6].equals("w")));
+						ret.add(new Entry(client, NodeStore.unescape(f[2]), NodeStore.unescape(f[3]), export, fileid, f[6].equals("w"),
+								f.length == 8 ? NodeStore.unescape(f[7]) : ""));
 					} else if( f[0].equals("X") && f.length == 4 ) {
 						String client = NodeStore.unescape(f[1]);
 						String export = NodeStore.unescape(f[2]);
@@ -142,7 +147,7 @@ final class DelegationStore {
 
 	private static String line(Entry e) {
 		return "G\t"+NodeStore.escape(e.client)+"\t"+NodeStore.escape(e.verifier)+"\t"+NodeStore.escape(e.principal)
-				+"\t"+NodeStore.escape(e.export)+"\t"+Long.toHexString(e.fileid)+"\t"+(e.write ? "w" : "r")+"\n";
+				+"\t"+NodeStore.escape(e.export)+"\t"+Long.toHexString(e.fileid)+"\t"+(e.write ? "w" : "r")+"\t"+NodeStore.escape(e.path)+"\n";
 	}
 
 	/** Keep a delegation that was given: written out before this returns. */
