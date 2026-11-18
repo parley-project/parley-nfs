@@ -11,7 +11,7 @@
 # NFS traffic to the server (port 2049 only) until the lease runs out, about 2.5 minutes.
 #
 # It makes lockmirror-test.dat and lockmirror-lock-client.py in the exported folder and removes them at the end.
-# Settings (environment): EXPORT_DIR, MOUNT, VM, LOCKDIR, MAC_IP, CP, CLIENT_EXEC.
+# Settings (environment): EXPORT_DIR, MOUNT, VM, LOCKDIR, MAC_IP, CP, CLIENT_EXEC, STATE_DIR.
 
 : "${EXPORT_DIR:=/Volumes/Data/nfs-test}"      # the exported folder, on this machine
 : "${MOUNT:=/mnt/parley/docs}"                   # the same folder, mounted in the VM
@@ -20,6 +20,7 @@
 : "${MAC_IP:=192.168.252.1}"                     # the server's address as the VM sees it
 M2=$HOME/.m2/repository/us/bringardner/parley
 : "${CP:=$M2/parley-files/2.0.0-SNAPSHOT/parley-files-2.0.0-SNAPSHOT.jar:$M2/parley-core/2.0.0-SNAPSHOT/parley-core-2.0.0-SNAPSHOT.jar:$M2/parley-io/2.0.0-SNAPSHOT/parley-io-2.0.0-SNAPSHOT.jar}"
+: "${STATE_DIR:=/Volumes/Data/nfs-state}"       # parley.nfs.stateDir of the server (F: is a delegation given?)
 : "${CLIENT_EXEC:=multipass exec $VM --}"        # how a command runs in the VM
 
 LEASE=false
@@ -64,9 +65,9 @@ wait_for() {
 	return 1
 }
 
-# start_client_lock LABEL POSITION LENGTH SECONDS: the client takes the lock and holds it in the background
+# start_client_lock LABEL POSITION LENGTH SECONDS [r|w]: the client takes the lock and holds it in the background
 start_client_lock() {
-	client_py lock "$MOUNT/$NAME" "$2" "$3" w "$4" > "$TMP/$1.out" 2>&1 &
+	client_py lock "$MOUNT/$NAME" "$2" "$3" "${5:-w}" "$4" > "$TMP/$1.out" 2>&1 &
 	PIDS="$PIDS $!"
 	LAST_PID=$!
 	# "GOT ..." or "NOT GOT ..." at the start of a line: 0 if the client holds the lock
@@ -173,6 +174,24 @@ check "D4 other program gets the part after it (100 +10)" GOT "$(try_probe 100 1
 check "D5 other program gets the part far after it (150 +10)" GOT "$(try_probe 150 10)"
 wait "$LAST_PID" 2>/dev/null
 check "D6 other program gets it all after the client lets go" GOT "$(try_probe 0 0)"
+
+# F: a client with a read delegation may take its shared locks itself and never tell the server (needs
+# parley.nfs.delegations=true and a stateDir; skipped when the server gave the client no delegation)
+$CLIENT_EXEC sh -c 'cat "$1" > /dev/null' sh "$MOUNT/$NAME" 2>&1 | head -3
+start_client_lock F 0 0 25 r
+check "F1 client holds a shared lock on a file it has open for reading" 0 $?
+n=10
+while [ $n -gt 0 ] && ! grep -q "$NAME" "$STATE_DIR/delegations.state" 2>/dev/null; do
+	n=$(( n - 1 ))
+	sleep 0.5
+done
+if grep -q "$NAME" "$STATE_DIR/delegations.state" 2>/dev/null; then
+	echo "      the client holds a read delegation of the file"
+	check "F2 other program is refused an exclusive lock while the client holds a shared one" NOT "$(try_probe 0 0)"
+else
+	echo "skip  F2: no delegation of the file in $STATE_DIR/delegations.state (parley.nfs.delegations off, or none given)"
+fi
+wait "$LAST_PID" 2>/dev/null
 
 # E: a lock goes with its client's lease
 if $LEASE; then
