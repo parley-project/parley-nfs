@@ -37,14 +37,14 @@ def main(argv):
         fcntl.fcntl(fd, fcntl.F_SETLK, packed)
     except OSError as e:
         if e.errno in (errno.EACCES, errno.EAGAIN):
-            print("NOT GOT %s: another lock conflicts" % what)
+            print("NOT GOT %s: another lock conflicts" % what, flush=True)
             return 1
         raise
-    print("GOT %s" % what)
+    print("GOT %s" % what, flush=True)
     if len(argv) > 6:
         time.sleep(float(argv[6]))
     else:
-        print("holding it; press Enter to let go")
+        print("holding it; press Enter to let go", flush=True)
         sys.stdin.readline()
     os.close(fd)
     print("released")
