@@ -2,6 +2,17 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-17: write delegations)
+
+- **`parley.nfs.writeDelegations` (default false, needs `parley.nfs.delegations=true`): write delegations (D62 to
+  D65).** A client that opens a file for writing, with a working callback address, while no other client has the
+  file open or holds a delegation of it, can be given a write delegation: it may keep its changes until the
+  server asks for them. Another client's open (read too), another host's request for the size, change or times,
+  READ, WRITE, SETATTR, REMOVE or RENAME of the file sends a CB_RECALL and gets NFS4ERR_DELAY until DELEGRETURN. A
+  delegation not returned within the lease is revoked, and a warning says the client's unwritten changes are lost.
+  The space limit is a size of 0. Callbacks now carry an AUTH_SYS credential, which a Linux client needs for
+  CB_RECALL. Revocations of read delegations are logged too.
+
 ### Added (2026-11-17: a folder for each user)
 
 - **The `nfs.root` principal attribute confines a user to a folder of the export (D49).** It is the root the user

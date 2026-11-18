@@ -465,19 +465,22 @@ public class Compound {
 	 */
 	private void checkIo(StateId id, Node node, int access) throws Nfs4Exception {
 		if( id.isBypass() && access == Nfs4.OPEN4_SHARE_ACCESS_READ ) {
+			recallWriteDelegation(node);
 			return;
 		}
 		if( id.isSpecial() ) {
 			state.checkAnonymous(node, access);
 			if( access == Nfs4.OPEN4_SHARE_ACCESS_WRITE ) {
-				recallDelegations(node, null);
+				recallDelegations(node, null, false, false);
+			} else {
+				recallWriteDelegation(node);
 			}
 			return;
 		}
 		StateManager.DelegationState d = state.findDelegation(id, node);
 		if( d != null ) {
 			// a read delegation's stateid reads, and doesn't write
-			if( access == Nfs4.OPEN4_SHARE_ACCESS_WRITE ) {
+			if( access == Nfs4.OPEN4_SHARE_ACCESS_WRITE && !d.isWrite() ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_OPENMODE);
 			}
 			return;
@@ -649,6 +652,9 @@ public class Compound {
 		if( Attributes.hasWriteOnly(request) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "write-only attribute asked for");
 		}
+		if( current != null && current.isWriteDelegated() && asksWhatWritingChanges(request) ) {
+			recallWriteDelegation(current);
+		}
 		attributes.encode(source(current, f), request, out);
 	}
 
@@ -684,6 +690,7 @@ public class Compound {
 		Node node = current();
 		FileSource f = currentFile();
 		allowWrite();
+		recallWriteDelegation(node);
 		aclsOn(node.getExport(), s);
 		int needed = 0;
 		if( s.acl != null ) {
@@ -995,7 +1002,7 @@ public class Compound {
 		if( !f.exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
-		recallDelegations(export.getNodes().findPath(path), null);
+		recallDelegations(export.getNodes().findPath(path), null, false, false);
 		if( export.getAcls() != null ) {
 			aclCheckDelete(dir, d, export.getNodes().get(path), f);
 		}
@@ -1056,8 +1063,8 @@ public class Compound {
 			}
 			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "can't move a folder into itself");
 		}
-		recallDelegations(export.getNodes().findPath(fromPath), null);
-		recallDelegations(export.getNodes().findPath(toPath), null);
+		recallDelegations(export.getNodes().findPath(fromPath), null, false, false);
+		recallDelegations(export.getNodes().findPath(toPath), null, false, false);
 		long fromBefore = change(fromDir, fd);
 		long toBefore = change(toDir, td);
 		boolean fromIsDir = from.isDirectory();
@@ -1236,23 +1243,41 @@ public class Compound {
 	 * and the access gets NFS4ERR_DELAY, which a client answers by trying again (RFC 7530 section 10.4.1).
 	 * @param own a client whose own delegation isn't a conflict, may be null
 	 */
-	private void recallDelegations(Node node, ClientRecord own) throws Nfs4Exception {
+	private void recallDelegations(Node node, ClientRecord requester, boolean byDelegation, boolean writeOnly) throws Nfs4Exception {
 		Delegations d = server.getDelegations();
 		if( d == null || node == null ) {
 			return;
 		}
-		List<StateManager.DelegationState> list = state.recallFor(node, own, System.currentTimeMillis());
+		List<StateManager.DelegationState> list = state.recallFor(node, requester, byDelegation, writeOnly, client,
+				System.currentTimeMillis());
 		if( list.isEmpty() ) {
 			return;
 		}
 		byte[] fh = node.getExport().toHandle(node);
 		for (StateManager.DelegationState s : list) {
 			if( !s.isRecallSent() ) {
-				server.logInfo("Recalling the delegation of "+node+" from client "+s.getClient()+": another access needs the file");
+				server.logInfo("Recalling the "+(s.isWrite() ? "write " : "")+"delegation of "+node+" from client "+s.getClient()+": another access needs the file");
 			}
 			d.recall(s, fh);
 		}
 		throw new Nfs4Exception(Nfs4.NFS4ERR_DELAY, "a delegation of "+node+" is being recalled");
+	}
+
+	/**
+	 * A call that reads the file or its size and times, from a client the call doesn't name: another client's
+	 * write delegation of the file is recalled first (decision D63), the holder's own host's call isn't a conflict (D65).
+	 */
+	private void recallWriteDelegation(Node node) throws Nfs4Exception {
+		if( node != null && node.isWriteDelegated() ) {
+			recallDelegations(node, null, false, true);
+		}
+	}
+
+	/** @return true if the request names an attribute that a write delegation's holder changes by writing */
+	private static boolean asksWhatWritingChanges(int[] request) {
+		return Attributes.isSet(request, Nfs4.FATTR4_SIZE) || Attributes.isSet(request, Nfs4.FATTR4_CHANGE)
+				|| Attributes.isSet(request, Nfs4.FATTR4_SPACE_USED) || Attributes.isSet(request, Nfs4.FATTR4_TIME_ACCESS)
+				|| Attributes.isSet(request, Nfs4.FATTR4_TIME_METADATA) || Attributes.isSet(request, Nfs4.FATTR4_TIME_MODIFY);
 	}
 
 	// ================================================================ opens
@@ -1410,7 +1435,10 @@ public class Compound {
 				final ClientRecord wc = owner.getClient();
 				server.logDebug(() -> "Open of "+wn+" for change by client "+wc+": delegations held: "+state.describeDelegations(wn));
 			}
-			recallDelegations(node, byDelegation ? owner.getClient() : null);
+			recallDelegations(node, owner.getClient(), byDelegation, false);
+		} else if( node.isWriteDelegated() ) {
+			// a read open sees what a write delegation holds back
+			recallDelegations(node, owner.getClient(), byDelegation, true);
 		}
 		OpenState s = state.open(owner, node, access, deny);
 		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
@@ -1432,24 +1460,36 @@ public class Compound {
 		out.writeInt(rflags);
 		out.writeIntArray(attrset);
 		StateManager.DelegationState granted = null;
-		if( server.getDelegations() != null && !byDelegation && opentype == Nfs4.OPEN4_NOCREATE && owner.isConfirmed()
-				&& access == Nfs4.OPEN4_SHARE_ACCESS_READ && deny == Nfs4.OPEN4_SHARE_DENY_NONE ) {
-			granted = state.grantRead(owner.getClient(), node);
-			if( granted != null ) {
-				final Node gn = node;
-				server.logInfo("Gave a read delegation of "+gn+" to client "+owner.getClient());
-			} else {
-				server.logInfo("No read delegation of "+node+" to client "+owner.getClient()+": "+state.whyNoReadDelegation(owner.getClient(), node));
+		if( server.getDelegations() != null && !byDelegation && owner.isConfirmed() && deny == Nfs4.OPEN4_SHARE_DENY_NONE ) {
+			if( opentype == Nfs4.OPEN4_NOCREATE && access == Nfs4.OPEN4_SHARE_ACCESS_READ ) {
+				granted = state.grantRead(owner.getClient(), node);
+				if( granted != null ) {
+					server.logInfo("Gave a read delegation of "+node+" to client "+owner.getClient());
+				} else {
+					server.logInfo("No read delegation of "+node+" to client "+owner.getClient()+": "+state.whyNoReadDelegation(owner.getClient(), node));
+				}
+			} else if( server.getWriteDelegations() && (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0
+					&& (opentype == Nfs4.OPEN4_NOCREATE || how != Nfs4.EXCLUSIVE4) ) {
+				granted = state.grantWrite(owner.getClient(), node);
+				if( granted != null ) {
+					server.logInfo("Gave a write delegation of "+node+" to client "+owner.getClient());
+				} else {
+					server.logInfo("No write delegation of "+node+" to client "+owner.getClient()+": "+state.whyNoWriteDelegation(owner.getClient(), node));
+				}
 			}
 		}
 		if( granted == null ) {
 			out.writeInt(Nfs4.OPEN_DELEGATE_NONE);
 		} else {
-			// open_read_delegation4: the stateid, whether it is already being recalled, and the permissions
-			// the client may take for granted: none, so it asks the server (ACCESS) about each user
-			out.writeInt(Nfs4.OPEN_DELEGATE_READ);
+			// open_read_delegation4 and open_write_delegation4: the stateid, whether it is already being recalled
+			// (a write one also the space limit, D64), and the permissions the client may take for granted: none,
+			// so it asks the server (ACCESS) about each user
+			out.writeInt(granted.isWrite() ? Nfs4.OPEN_DELEGATE_WRITE : Nfs4.OPEN_DELEGATE_READ);
 			writeStateid(granted.stateId());
 			out.writeBoolean(false);
+			if( granted.isWrite() ) {
+				out.writeInt(Nfs4.NFS_LIMIT_SIZE).writeLong(0);
+			}
 			out.writeInt(Nfs4.ACE4_ACCESS_ALLOWED_ACE_TYPE).writeInt(0).writeInt(0).writeString(Ace.EVERYONE);
 		}
 		current = node;

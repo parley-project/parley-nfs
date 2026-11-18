@@ -104,6 +104,7 @@ public class NfsServer extends NioServer {
 	/** The folder that keeps each export's node file, so handles survive a restart (decision D41). */
 	public static final String PROPERTY_STATE_DIR = "stateDir";
 	public static final String PROPERTY_DELEGATIONS = "delegations";
+	public static final String PROPERTY_WRITE_DELEGATIONS = "writeDelegations";
 	/** The most nodes kept in memory per export (decision D42). */
 	public static final String PROPERTY_MAX_NODES = "maxNodes";
 	public static final String PROPERTY_SEC = "sec";
@@ -140,6 +141,7 @@ public class NfsServer extends NioServer {
 	private volatile boolean hideUnreadable = true;
 	private volatile StateManager stateManager;
 	private volatile Delegations delegations;
+	private volatile boolean writeDelegations;
 	private final OpenFiles openFiles = new OpenFiles();
 	private volatile Attributes attributes;
 	private volatile Authorizer authorizer;
@@ -269,7 +271,12 @@ public class NfsServer extends NioServer {
 		IdNumbers numbers = new IdNumbers(getUserRegistry(), idMap, numberCache);
 		attributes = new Attributes(domain.trim(), numbers, lease/1000, ioSize, ioSize);
 		stateManager = new StateManager((int) (System.currentTimeMillis()/1000), lease);
+		stateManager.setWarnings(message -> logWarn(message));
 		delegations = getBooleanProperty(propertyName(PROPERTY_DELEGATIONS), false) ? new Delegations(this) : null;
+		writeDelegations = getBooleanProperty(propertyName(PROPERTY_WRITE_DELEGATIONS), false);
+		if( writeDelegations && delegations == null ) {
+			throw new IOException(propertyName(PROPERTY_WRITE_DELEGATIONS)+" needs "+propertyName(PROPERTY_DELEGATIONS)+"=true: write delegations are delegations that are also given for writing (decision D62)");
+		}
 		int replays = getIntProperty(propertyName(PROPERTY_REPLAY_CACHE_SIZE), DEFAULT_REPLAY_CACHE_SIZE);
 		replayCache = replays > 0 ? new ReplayCache(replays) : null;
 		String anonymous = getProperty(propertyName(PROPERTY_ANONYMOUS));
@@ -641,6 +648,11 @@ public class NfsServer extends NioServer {
 			e.tagged((int) (NodeTable.hash(e.getName()) & 0x7fffffff));
 		}
 		pseudo = p;
+	}
+
+	/** @return true if a client that opens a file for writing may be given a write delegation (D62) */
+	public boolean getWriteDelegations() {
+		return writeDelegations;
 	}
 
 	/** @return the calls to clients, null unless {@code parley.nfs.delegations} is on (D47) */

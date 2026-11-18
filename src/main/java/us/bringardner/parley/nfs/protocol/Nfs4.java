@@ -311,6 +311,8 @@ public final class Nfs4 {
 	public static final int OPEN_DELEGATE_NONE = 0;
 	public static final int OPEN_DELEGATE_READ = 1;
 	public static final int OPEN_DELEGATE_WRITE = 2;
+	/** nfs_space_limit4: limited by a size (RFC 7530 section 16.16) */
+	public static final int NFS_LIMIT_SIZE = 1;
 	// OPEN rflags
 	public static final int OPEN4_RESULT_CONFIRM = 0x02;
 	public static final int OPEN4_RESULT_LOCKTYPE_POSIX = 0x04;

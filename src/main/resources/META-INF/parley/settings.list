@@ -26,3 +26,4 @@ parley.nfs.krb5.keytab
 parley.nfs.stateDir
 parley.nfs.maxNodes
 parley.nfs.delegations
+parley.nfs.writeDelegations

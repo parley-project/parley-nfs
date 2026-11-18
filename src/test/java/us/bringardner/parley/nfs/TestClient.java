@@ -51,7 +51,12 @@ public class TestClient implements Closeable {
 	public long uid = 1000;
 
 	public TestClient(int port) throws IOException {
-		socket = new Socket("127.0.0.1", port);
+		this("127.0.0.1", port);
+	}
+
+	/** @param host the server's address: the client comes from the same address when it is one of this machine's */
+	public TestClient(String host, int port) throws IOException {
+		socket = new Socket(host, port);
 		socket.setSoTimeout(10000);
 		in = new DataInputStream(socket.getInputStream());
 		out = socket.getOutputStream();
