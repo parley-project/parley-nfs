@@ -14,7 +14,7 @@
 #   answered only after about 90 s: the client did not reclaim in time (the open question)
 #
 # Settings (environment): EXPORT_DIR, MOUNT, VM, SERVER_HOST, PORT, CLIENT_EXEC, SERVER_LOG (optional: the
-# file the server's log goes to; then the script also counts the GRACE answers and shows the reclaims).
+# file the server's log goes to, it must exist; then the script also counts the GRACE answers and shows the reclaims).
 
 : "${EXPORT_DIR:=/Volumes/Data/nfs-test}"      # the exported folder, on this machine
 : "${MOUNT:=/mnt/parley/docs}"                   # the same folder, mounted in the VM
@@ -23,6 +23,7 @@
 : "${PORT:=2049}"
 : "${CLIENT_EXEC:=multipass exec $VM --}"        # how a command runs in the VM
 : "${SERVER_LOG:=}"
+: "${STATE_DIR:=/Volumes/Data/nfs-state}"       # parley.nfs.stateDir of the server
 
 NAME=reclaim-test.dat
 FILE=$EXPORT_DIR/$NAME
@@ -61,6 +62,14 @@ until grep -q '^OPEN' "$TMP/holder.out" 2>/dev/null; do
 	sleep 0.2
 done
 echo "the client has $MOUNT/$NAME open (a read delegation should have been given)."
+[ -n "$SERVER_LOG" ] && [ ! -f "$SERVER_LOG" ] && { echo "SERVER_LOG $SERVER_LOG doesn't exist"; exit 2; }
+# the server writes a delegation down when it gives it, so this shows whether one is there to be reclaimed
+if [ -f "$STATE_DIR/delegations.state" ]; then
+	echo "delegations.state: $(wc -c < "$STATE_DIR/delegations.state" | tr -d ' ') bytes, changed $(date -r "$STATE_DIR/delegations.state" +%T) (now $(date +%T))"
+	strings "$STATE_DIR/delegations.state" | head -5 | sed 's/^/      /'
+else
+	echo "no $STATE_DIR/delegations.state: the server keeps no delegations (no stateDir?)"
+fi
 [ -n "$SERVER_LOG" ] && echo "server log says: $(grep -c 'Gave a read delegation' "$SERVER_LOG") read delegations given so far"
 
 echo
