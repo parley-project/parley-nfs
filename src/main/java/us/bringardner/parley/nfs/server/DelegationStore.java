@@ -163,6 +163,11 @@ final class DelegationStore {
 		out.flush();
 	}
 
+	@Override
+	public String toString() {
+		return file.toString();
+	}
+
 	synchronized void close() throws IOException {
 		if( out != null ) {
 			try {

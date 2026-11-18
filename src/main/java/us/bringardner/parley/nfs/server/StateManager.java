@@ -1383,6 +1383,21 @@ public class StateManager {
 		}
 	}
 
+	private String describeReclaims() {
+		if( reclaims.isEmpty() ) {
+			return "none";
+		}
+		StringBuilder b = new StringBuilder();
+		for (DelegationStore.Entry e : reclaims) {
+			if( b.length() > 0 ) {
+				b.append("; ");
+			}
+			b.append(e.write ? "write " : "read ").append(e.export).append(" file ").append(Long.toHexString(e.fileid))
+				.append(" of \"").append(text(e.client)).append("\" as ").append(e.principal);
+		}
+		return b.toString();
+	}
+
 	private static String text(String client) {
 		try {
 			return new String(Base64.getDecoder().decode(client), StandardCharsets.ISO_8859_1);
@@ -1455,8 +1470,16 @@ public class StateManager {
 				break;
 			}
 		}
-		if( !reclaiming || found == null || (claimed != Nfs4.OPEN_DELEGATE_READ && claimed != Nfs4.OPEN_DELEGATE_WRITE) ) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE);
+		if( !reclaiming ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE, store == null ? "no state folder, so no delegations are kept"
+					: "no grace period is running (no delegation was kept, or it is over)");
+		}
+		if( found == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE, "no delegation of "+node+" is kept for client \""+text(c.name)
+				+"\" as "+c.principal+"; kept: "+describeReclaims());
+		}
+		if( claimed != Nfs4.OPEN_DELEGATE_READ && claimed != Nfs4.OPEN_DELEGATE_WRITE ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE, "the client says it held no delegation of "+node);
 		}
 		if( found.write != (claimed == Nfs4.OPEN_DELEGATE_WRITE) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_RECLAIM_BAD, "the delegation was "+(found.write ? "a write" : "a read")+" one");

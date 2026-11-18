@@ -1372,7 +1372,14 @@ public class Compound {
 		if( f.isDirectory() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_ISDIR);
 		}
-		StateManager.Reclaimed r = state.reclaim(owner.getClient(), node, claimed, System.currentTimeMillis());
+		StateManager.Reclaimed r;
+		try {
+			r = state.reclaim(owner.getClient(), node, claimed, System.currentTimeMillis());
+		} catch (Nfs4Exception e) {
+			server.logInfo("Client "+owner.getClient()+" asked to take back a delegation of "+node+" after a restart (it held type "+claimed
+				+"): refused with status "+e.getStatus()+": "+e.getMessage());
+			throw e;
+		}
 		OpenState s = state.open(owner, node, access, deny);
 		if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
 			openForWrite(node, f);
