@@ -69,6 +69,8 @@ expect_refused() {
 }
 
 cleanup() {
+	# removed on this machine too: a file given to another owner can't always be removed through the mount
+	rm -f "$FILE" 2>/dev/null
 	vm sudo rm -f "$MOUNT/$NAME" >/dev/null 2>&1
 	vm sudo umount "$MOUNT" >/dev/null 2>&1
 	vm sudo rmdir "$MOUNT" >/dev/null 2>&1
@@ -82,6 +84,8 @@ if [ "$(id -u)" != "0" ] && ! pgrep -u 0 -f "us.bringardner.parley.nfs.server.Nf
 	echo "  note: no server running as root was found by this script; it must be, or the operating system refuses the change"
 fi
 
+# a file left by an earlier run (owned by another user, so the mount may not let its owner touch it)
+rm -f "$FILE" 2>/dev/null
 vm sudo mkdir -p "$MOUNT" || { echo "can't make $MOUNT in the VM"; exit 1; }
 if ! vm sudo mount -t nfs4 -o vers=4.0,sec=sys "$MAC_IP:/$EXPORT_NAME" "$MOUNT" 2>&1; then
 	echo "can't mount $MAC_IP:/$EXPORT_NAME with sec=sys (is the server running, and does parley.nfs.sec include sys?)"
