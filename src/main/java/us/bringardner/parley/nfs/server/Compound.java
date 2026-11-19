@@ -995,8 +995,9 @@ public class Compound {
 			f.getFileSourceFactory().createSymbolicLink(f, text);
 		} catch (java.nio.file.FileAlreadyExistsException e) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_EXIST);
-		} catch (IOException e) {
-			// a file system that can't keep the text answers PERM, as for the other types (D24)
+		} catch (IOException | UnsupportedOperationException e) {
+			// a file system that can't keep the text answers PERM, as for the other types (D24); some factories
+			// refuse with an UnsupportedOperationException, others with an IOException
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "symbolic link "+path+": "+e.getMessage());
 		}
 		dir.changed();
