@@ -423,6 +423,20 @@ public class NfsServerTest {
 		ops = new Ops().putroot().op(Nfs4.OP_CREATE);
 		ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes("../outside")).writeString("up").writeIntArray(new int[0]).writeInt(0);
 		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		// what a Linux client asks of every name in a folder, a link to nothing included
+		for (String n : new String[] {"to-folder", "up"}) {
+			assertEquals(Nfs4.NFS4_OK, c.compound(new Ops().putroot().lookup(n)).status, "LOOKUP of " + n);
+			Result r = c.compound(new Ops().putroot().lookup(n).getattr(Nfs4.FATTR4_TYPE, Nfs4.FATTR4_CHANGE, Nfs4.FATTR4_SIZE,
+					Nfs4.FATTR4_FSID, Nfs4.FATTR4_FILEID, Nfs4.FATTR4_MODE, Nfs4.FATTR4_NUMLINKS, Nfs4.FATTR4_OWNER,
+					Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_RAWDEV, Nfs4.FATTR4_SPACE_USED, Nfs4.FATTR4_TIME_ACCESS,
+					Nfs4.FATTR4_TIME_METADATA, Nfs4.FATTR4_TIME_MODIFY, Nfs4.FATTR4_MOUNTED_ON_FILEID));
+			assertEquals(Nfs4.NFS4_OK, r.status, "GETATTR of " + n);
+			for (int bit : new int[] {Nfs4.FATTR4_TYPE, Nfs4.FATTR4_CHANGE, Nfs4.FATTR4_SIZE, Nfs4.FATTR4_FILEID, Nfs4.FATTR4_MODE,
+					Nfs4.FATTR4_NUMLINKS, Nfs4.FATTR4_OWNER, Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_SPACE_USED, Nfs4.FATTR4_TIME_ACCESS,
+					Nfs4.FATTR4_TIME_METADATA, Nfs4.FATTR4_TIME_MODIFY, Nfs4.FATTR4_TIME_CREATE, Nfs4.FATTR4_HIDDEN}) {
+				assertEquals(Nfs4.NFS4_OK, c.compound(new Ops().putroot().lookup(n).getattr(bit)).status, "attribute " + bit + " of " + n);
+			}
+		}
 		assertEquals("folder", Files.readSymbolicLink(tmp.resolve("to-folder")).toString());
 		assertEquals("../outside", Files.readSymbolicLink(tmp.resolve("up")).toString());
 
