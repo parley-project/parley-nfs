@@ -363,8 +363,9 @@ public class Attributes {
 		case Nfs4.FATTR4_OWNER: out.writeString(owner(src.file)); break;
 		case Nfs4.FATTR4_OWNER_GROUP: out.writeString(group(src.file)); break;
 		case Nfs4.FATTR4_RAWDEV: out.writeInt(0); out.writeInt(0); break;
-		case Nfs4.FATTR4_TIME_ACCESS: time(out, orModified(src, src.file.lastAccessTime())); break;
-		case Nfs4.FATTR4_TIME_CREATE: time(out, orModified(src, src.file.creationTime())); break;
+		// a link's own times can't be read through FileSource, and asking would follow it (and fail for a link to nothing)
+		case Nfs4.FATTR4_TIME_ACCESS: time(out, src.linkText() != null ? src.modified() : orModified(src, src.file.lastAccessTime())); break;
+		case Nfs4.FATTR4_TIME_CREATE: time(out, src.linkText() != null ? src.modified() : orModified(src, src.file.creationTime())); break;
 		case Nfs4.FATTR4_TIME_DELTA: time(out, 1); break;
 		case Nfs4.FATTR4_TIME_METADATA: time(out, src.modified()); break;
 		case Nfs4.FATTR4_TIME_MODIFY: time(out, src.modified()); break;
