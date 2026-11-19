@@ -11,9 +11,9 @@
 #             parley-nfs.properties in Parley's configuration folder, or the file parley.nfs.configFile names
 #
 # Settings (environment), each used only when set or given here a default:
-#   EXPORT_DIR   the folder to share                                   (default /Volumes/Data/nfs-test; ignored when you give
-#                an export setting with -D: parley.nfs.export, parley.nfs.exports or parley.nfs.export.<name>)
-#   EXPORT_NAME  its name; the client mounts server:/<name>             (default docs)
+#   EXPORT_DIR   a folder to share as the export EXPORT_NAME: only when set (and no export is given with -D); without it
+#                the exports come from the settings file (parley.nfs.exports, parley.nfs.export.<name>)
+#   EXPORT_NAME  its name; the client mounts server:/<name>             (default docs, with EXPORT_DIR)
 #   IDMAP        file of uid.<number>=<user name> lines                 (parley.nfs.idmap)
 #   STATE_DIR    folder that keeps identities, lists and delegations    (parley.nfs.stateDir)
 #   LOCKDIR      parley.files.lockDirectory
@@ -26,7 +26,6 @@
 #   tools/run-server.sh
 #   IDMAP=/Volumes/Data/nfs-idmap.properties tools/run-server.sh --sudo -Dparley.nfs.enforceModes=true
 
-: "${EXPORT_DIR:=/Volumes/Data/nfs-test}"
 : "${EXPORT_NAME:=docs}"
 : "${JAVA:=java}"
 
@@ -60,7 +59,7 @@ OPTS=()
 # the export defaults only apply when no export setting is given here (an export given here, one or several, is used as it is)
 EXPORTS_GIVEN=false
 for p in "${PROPS[@]}"; do case "$p" in -Dparley.nfs.export=*|-Dparley.nfs.exports=*|-Dparley.nfs.export.*) EXPORTS_GIVEN=true ;; esac; done
-if ! $EXPORTS_GIVEN; then
+if [ -n "$EXPORT_DIR" ] && ! $EXPORTS_GIVEN; then
 	OPTS+=("-Dparley.nfs.exports=$EXPORT_NAME" "-Dparley.nfs.export.$EXPORT_NAME=$EXPORT_DIR")
 fi
 [ -n "$IDMAP" ] && ! have parley.nfs.idmap && OPTS+=("-Dparley.nfs.idmap=$IDMAP")
@@ -71,7 +70,7 @@ if [ -n "$SUDO" ]; then
 	JAVA=$(command -v "$JAVA") || { echo "run-server.sh: java not found" >&2; exit 1; }
 fi
 
-$EXPORTS_GIVEN || echo "NFS server: export $EXPORT_NAME = $EXPORT_DIR${SUDO:+ (as root)}"
+[ -n "$EXPORT_DIR" ] && ! $EXPORTS_GIVEN && echo "NFS server: export $EXPORT_NAME = $EXPORT_DIR${SUDO:+ (as root)}"
 # settings go after the class name as program args, as in an Eclipse launch: the server lists them at start
 # and they win over the settings file and over the JVM's own -D options
 exec $SUDO "$JAVA" -cp "$CP" us.bringardner.parley.nfs.server.NfsServer "${OPTS[@]}" "${PROPS[@]}"
