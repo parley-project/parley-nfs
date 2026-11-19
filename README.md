@@ -123,6 +123,12 @@ unless the id map says so, so it acts as the anonymous user too. The id map is r
 starts; the registry's own user file is read again when it changes. A refused call is logged once
 for each answer (a minute, `parley.nfs.authCacheTime`) at INFO with the user and the reason.
 
+## Owners as numbers
+
+An owner or group is sent as the number the registry or the id map has for that name (D15, D48). When it has none and
+the file is on the local file system, the operating system's own uid or gid is sent (D75), so a client sees the real
+numbers whether or not an id map lists them. Other file systems, and Windows, still send name@domain.
+
 ## Permissions (the mode bits)
 
 By default the mode bits (owner, group, other) of a file are only reported, and the registry's `read` and
@@ -136,8 +142,8 @@ A new file is given to the caller who made it when the provider can take it (a l
 operating system has a user of that name and a server allowed to change owners, or a memory file system); when it can't, the file keeps the
 owner it got, which is said once in the log, and the modes are then checked against that owner. Only root may change the owner or
 group of a file, and only when the id map (or a registry user's `uid`) maps uid 0 to a registry user with write
-on the export; an unmapped root is the anonymous user and is refused. The server passes the name to the file system's own FileSource (a number is taken through the id map first, and one nobody has
-is NFS4ERR_BADOWNER), and a provider that has no such user or can't change owners refuses (NFS4ERR_PERM).
+on the export; an unmapped root is the anonymous user and is refused. The server passes the name to the file system's own FileSource (a number is taken through the id map first; one nobody maps goes to the
+provider as it is, which a local file takes as the operating system's uid or gid), and a provider that has no such user or can't change owners refuses (NFS4ERR_PERM).
 
 `tools/chown-test.sh` checks this with a Linux client (a Multipass VM): an ordinary user is refused, the mapped root changes
 the owner and group, and names or numbers nobody has are refused; `--unmapped` checks that root is refused without `uid.0`.

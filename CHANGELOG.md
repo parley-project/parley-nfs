@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-19: operating system ids, D75)
+
+- A local file's owner and group are sent as the operating system's uid and gid when the registry and the id map
+  don't name them (they were sent as name@domain, which a Linux client shows as nobody).
+- The mapped root's chown to a number the id map doesn't have goes to the provider as it is (a local file takes it as
+  the uid or gid), instead of NFS4ERR_BADOWNER.
+
 ### Added (2026-11-19: chown by the mapped root)
 
 - SETATTR of the owner or group is allowed for root (AUTH_SYS uid 0) when uid 0 is mapped to a registry user (the id

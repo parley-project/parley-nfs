@@ -776,7 +776,9 @@ public class AclNfsTest {
 		assertEquals("pat", f.getOwner().getName());
 		assertEquals(Nfs4.NFS4_OK, chown(admin, o.fh, Long.toString(BOB)), "a number goes through the id map");
 		assertEquals("bob", f.getOwner().getName());
-		assertEquals(Nfs4.NFS4ERR_BADOWNER, chown(admin, o.fh, "4242"), "a number nobody has");
+		// a number nobody maps goes to the provider as it is (a local file takes it as the OS uid, D75)
+		assertEquals(Nfs4.NFS4_OK, chown(admin, o.fh, "4242"), "a number nobody maps");
+		assertEquals("4242", f.getOwner().getName());
 	}
 
 	/** Decision D74: root that the id map doesn't map is the anonymous user and may not change an owner. */
