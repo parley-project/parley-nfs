@@ -602,7 +602,7 @@ public class Attributes {
 		return sec*1000+nsec/1000000;
 	}
 
-	/** Gives the file to the user of this name, a number being taken through the id map; the file system must have that user. */
+	/** Gives the file to the user of this name, a number being taken through the id map; the provider decides whether it has that user. */
 	private void changeOwner(String asked, FileSource f) throws IOException, Nfs4Exception {
 		String name = unqualify(asked);
 		if( numbers != null && !name.isEmpty() && name.chars().allMatch(Character::isDigit) ) {
@@ -617,28 +617,19 @@ public class Attributes {
 			}
 			name = mapped;
 		}
-		UserPrincipal p;
-		try {
-			p = java.nio.file.FileSystems.getDefault().getUserPrincipalLookupService().lookupPrincipalByName(name);
-		} catch (IOException | RuntimeException e) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_BADOWNER, "the file system has no user "+name);
-		}
+		// the provider knows how to turn a name into what it keeps (a local file, an operating system user)
+		UserPrincipal p = new us.bringardner.parley.files.FileSourceUser(0, name);
 		if( !f.setOwner(p) ) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system didn't take the owner "+name);
+			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system has no user "+name+" or can't change owners");
 		}
 	}
 
-	/** Gives the file to the group of this name (a number is not looked up); the file system must have that group. */
+	/** Gives the file to the group of this name (a number is not looked up); the provider decides whether it has that group. */
 	private void changeGroup(String asked, FileSource f) throws IOException, Nfs4Exception {
 		String name = unqualify(asked);
-		GroupPrincipal p;
-		try {
-			p = java.nio.file.FileSystems.getDefault().getUserPrincipalLookupService().lookupPrincipalByGroupName(name);
-		} catch (IOException | RuntimeException e) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_BADOWNER, "the file system has no group "+name);
-		}
+		GroupPrincipal p = new us.bringardner.parley.files.FileSourceGroup(0, name);
 		if( !f.setGroup(p) ) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system didn't take the group "+name);
+			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system has no group "+name+" or can't change groups");
 		}
 	}
 
