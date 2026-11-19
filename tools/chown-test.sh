@@ -121,10 +121,18 @@ else
 		skip "the group check: the VM has no group $TARGET_GROUP (set TARGET_GROUP to one both have)"
 	fi
 
-	echo "4. names and numbers nobody has"
+	echo "4. a name nobody has, and a number nobody maps (D75: a number goes to the operating system as a uid)"
 	expect_refused "sudo chown nosuchuser" "sudo chown nosuchuser '$MOUNT/$NAME'"
-	expect_refused "sudo chown 12345 (a number the id map doesn't have)" "sudo chown 12345 '$MOUNT/$NAME'"
-	[ "$(owner_here)" = "$TARGET_USER" ] && ok "the owner is still $TARGET_USER" || bad "the owner is now $(owner_here)"
+	if vm sudo chown 12345 "$MOUNT/$NAME" >/dev/null 2>&1; then
+		[ "$(owner_here)" = "12345" ] && ok "sudo chown 12345: the owner here is the uid 12345" \
+			|| bad "sudo chown 12345 said yes but the owner here is $(owner_here)"
+		vm sudo chown "$TARGET_USER" "$MOUNT/$NAME" >/dev/null 2>&1
+	else
+		bad "sudo chown 12345" "refused; a server running as root hands a number to the operating system as a uid"
+	fi
+	echo "5. a file's owner is shown as the operating system's uid when no id map names it"
+	own=$(vm stat -c %u "$MOUNT/$NAME" 2>/dev/null)
+	echo "        the VM sees uid $own for the owner $(owner_here) here"
 fi
 
 echo

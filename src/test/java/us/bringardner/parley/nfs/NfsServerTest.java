@@ -1254,6 +1254,34 @@ public class NfsServerTest {
 		}
 	}
 
+	/** Decision D75: a local file's owner and group, when no registry or id map names them, are the operating system's uid and gid. */
+	@Test
+	public void aLocalFileShowsItsOperatingSystemIds(@TempDir Path tmp) throws Exception {
+		Path file = tmp.resolve("f");
+		Files.write(file, bytes("x"));
+		int uid;
+		int gid;
+		try {
+			uid = (Integer) Files.getAttribute(file, "unix:uid");
+			gid = (Integer) Files.getAttribute(file, "unix:gid");
+		} catch (UnsupportedOperationException | IllegalArgumentException e) {
+			org.junit.jupiter.api.Assumptions.assumeTrue(false, "no unix view here: " + e);
+			return;
+		}
+		root = new us.bringardner.parley.files.fileproxy.FileProxyFactory().createFileSource(tmp.toString());
+		server = new NfsServer("test.nfs.local-ids", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+		clientid(c, "client-ids");
+		Result r = c.compound(new Ops().putroot().lookup("f").getattr(Nfs4.FATTR4_OWNER, Nfs4.FATTR4_OWNER_GROUP));
+		r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_LOOKUP).ok(Nfs4.OP_GETATTR);
+		r.in.readIntArray(8);
+		r.in.readInt();
+		assertEquals(Long.toString(uid & 0xFFFFFFFFL), r.in.readString(1024), "the owner as the operating system's uid");
+		assertEquals(Long.toString(gid & 0xFFFFFFFFL), r.in.readString(1024), "the group as its gid");
+	}
+
 	private static String owner(TestClient c, byte[] fh) throws IOException {
 		Result r = c.compound(new Ops().putfh(fh).getattr(Nfs4.FATTR4_OWNER));
 		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_GETATTR);

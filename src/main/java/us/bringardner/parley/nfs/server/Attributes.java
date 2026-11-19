@@ -28,10 +28,12 @@ import java.io.IOException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.nio.file.Files;
 import java.nio.file.attribute.GroupPrincipal;
 import java.nio.file.attribute.UserPrincipal;
 
 import us.bringardner.parley.files.FileSource;
+import us.bringardner.parley.files.fileproxy.FileProxy;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.rpc.XdrDecoder;
 import us.bringardner.parley.nfs.rpc.XdrEncoder;
@@ -435,10 +437,39 @@ public class Attributes {
 				return qualify(NOBODY);
 			}
 			Long uid = numbers == null ? null : numbers.uid(p.getName());
+			if( uid == null ) {
+				// not in the registry or the id map: a local file has a real uid (decision D75)
+				long[] os = osIds(f);
+				if( os != null ) {
+					return Long.toString(os[0]);
+				}
+			}
 			return uid != null ? Long.toString(uid) : qualify(p.getName());
 		} catch (IOException | RuntimeException e) {
 			return qualify(NOBODY);
 		}
+	}
+
+	/**
+	 * @return the operating system's uid and gid of a file on the local file system, null for any other file or
+	 * where the system has none (Windows); read at each call, so they are never stale (decision D75)
+	 */
+	static long[] osIds(FileSource f) {
+		if( !(f instanceof FileProxy) ) {
+			return null;
+		}
+		try {
+			java.util.Map<String, Object> m = Files.readAttributes(((FileProxy) f).getTarget().toPath(), "unix:uid,gid");
+			Object uid = m.get("uid");
+			Object gid = m.get("gid");
+			if( uid instanceof Integer && gid instanceof Integer ) {
+				// an id is unsigned: macOS's nobody is 4294967294, which Java shows as -2
+				return new long[] {((Integer) uid) & 0xFFFFFFFFL, ((Integer) gid) & 0xFFFFFFFFL};
+			}
+		} catch (IOException | RuntimeException e) {
+			// no unix view (Windows), or the file is gone: no id
+		}
+		return null;
 	}
 
 	/**
@@ -474,6 +505,12 @@ public class Attributes {
 				return qualify(NOBODY);
 			}
 			Long gid = numbers == null ? null : numbers.gid(p.getName());
+			if( gid == null ) {
+				long[] os = osIds(f);
+				if( os != null ) {
+					return Long.toString(os[1]);
+				}
+			}
 			return gid != null ? Long.toString(gid) : qualify(p.getName());
 		} catch (IOException | RuntimeException e) {
 			return qualify(NOBODY);
@@ -602,7 +639,7 @@ public class Attributes {
 		return sec*1000+nsec/1000000;
 	}
 
-	/** Gives the file to the user of this name, a number being taken through the id map; the provider decides whether it has that user. */
+	/** Gives the file to the user of this name, a number is taken through the id map, else given to the provider as it is; the provider decides whether it takes it. */
 	private void changeOwner(String asked, FileSource f) throws IOException, Nfs4Exception {
 		String name = unqualify(asked);
 		if( numbers != null && !name.isEmpty() && name.chars().allMatch(Character::isDigit) ) {
@@ -612,10 +649,11 @@ public class Attributes {
 			} catch (us.bringardner.parley.iam.UserRegistryUnavailableException e) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_DELAY, e.getMessage());
 			}
-			if( mapped == null ) {
-				throw new Nfs4Exception(Nfs4.NFS4ERR_BADOWNER, "no user has the number "+name);
+			if( mapped != null ) {
+				name = mapped;
 			}
-			name = mapped;
+			// else the number goes to the provider as it is: a local file takes it as the operating system's uid
+			// (decision D75)
 		}
 		// the provider knows how to turn a name into what it keeps (a local file, an operating system user)
 		UserPrincipal p = new us.bringardner.parley.files.FileSourceUser(0, name);
@@ -624,7 +662,7 @@ public class Attributes {
 		}
 	}
 
-	/** Gives the file to the group of this name (a number is not looked up); the provider decides whether it has that group. */
+	/** Gives the file to the group of this name (a number is given to the provider as it is, as a gid for a local file); the provider decides. */
 	private void changeGroup(String asked, FileSource f) throws IOException, Nfs4Exception {
 		String name = unqualify(asked);
 		GroupPrincipal p = new us.bringardner.parley.files.FileSourceGroup(0, name);
