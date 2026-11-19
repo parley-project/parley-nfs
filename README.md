@@ -139,6 +139,9 @@ group of a file, and only when the id map (or a registry user's `uid`) maps uid 
 on the export; an unmapped root is the anonymous user and is refused. The server passes the name to the file system's own FileSource (a number is taken through the id map first, and one nobody has
 is NFS4ERR_BADOWNER), and a provider that has no such user or can't change owners refuses (NFS4ERR_PERM).
 
+`tools/chown-test.sh` checks this with a Linux client (a Multipass VM): an ordinary user is refused, the mapped root changes
+the owner and group, and names or numbers nobody has are refused; `--unmapped` checks that root is refused without `uid.0`.
+
 ## Numbers for users and groups
 
 A user in the registry can carry a `uid` attribute and a group a `gid` attribute (in a FileUserRegistry users
