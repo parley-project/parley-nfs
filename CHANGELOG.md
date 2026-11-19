@@ -2,6 +2,12 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-18: ACCESS no longer depends on the server's user)
+
+- ACCESS for a file answers MODIFY, EXTEND and DELETE when any class (owner, group or other) has a write bit, the same
+  for every caller. Before, it asked whether the user the server runs as could write the file, which says nothing about
+  the caller (decision D71).
+
 ### Added (2026-11-18: tools for trying the server with real clients)
 
 - `tools/LockProbe.java` (another program that tries or holds a FileSource lock), `tools/lock-client.py` (fcntl locks
