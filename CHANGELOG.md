@@ -2,6 +2,11 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-19: the mapped root and modes, D76)
+
+- With `parley.nfs.enforceModes`, the mapped root (AUTH_SYS uid 0 mapped to a registry user with write on the export)
+  is no longer checked against mode bits; a file's own access control list and the registry still apply.
+
 ### Added (2026-11-19: operating system ids, D75)
 
 - A local file's owner and group are sent as the operating system's uid and gid when the registry and the id map

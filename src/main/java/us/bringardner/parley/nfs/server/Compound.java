@@ -398,8 +398,8 @@ public class Compound {
 	private void aclCheckDelete(Node parent, FileSource pf, Node child, FileSource cf) throws Nfs4Exception {
 		AclPolicy policy = server.getAclPolicy();
 		Export export = parent.getExport();
-		List<Ace> pa = policy.aclOf(export, parent, pf);
-		List<Ace> ca = policy.aclOf(export, child, cf);
+		List<Ace> pa = policy.aclOf(export, parent, pf, caller);
+		List<Ace> ca = policy.aclOf(export, child, cf, caller);
 		if( pa == null && ca == null ) {
 			return;
 		}
@@ -789,7 +789,7 @@ public class Compound {
 		}
 		Node node = current();
 		boolean own = server.getAclPolicy().aclOf(node.getExport(), node) != null;
-		List<Ace> acl = server.getAclPolicy().aclOf(node.getExport(), node, f);
+		List<Ace> acl = server.getAclPolicy().aclOf(node.getExport(), node, f, caller);
 		if( acl != null ) {
 			// a file with a list: what the list gives (decision D52)
 			int[][] map = {

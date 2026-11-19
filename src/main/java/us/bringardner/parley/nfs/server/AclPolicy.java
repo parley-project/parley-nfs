@@ -111,11 +111,13 @@ public class AclPolicy {
 
 	/**
 	 * @return the list that decides for this file: its own if it has one, else (when the modes are enforced)
-	 * the one its mode bits make, else null for no check
+	 * the one its mode bits make, else null for no check; the mapped root has no list made from the mode, as root
+	 * on a Unix file system is not held to mode bits (decision D76)
+	 * @throws Nfs4Exception NFS4ERR_DELAY if the registry is unavailable
 	 */
-	public List<Ace> aclOf(Export export, Node node, FileSource file) {
+	public List<Ace> aclOf(Export export, Node node, FileSource file, Caller caller) throws Nfs4Exception {
 		List<Ace> acl = aclOf(export, node);
-		if( acl != null || !enforceModes || file == null ) {
+		if( acl != null || !enforceModes || file == null || authorizer.isMappedRoot(caller) ) {
 			return acl;
 		}
 		try {
@@ -132,7 +134,7 @@ public class AclPolicy {
 	 */
 	public boolean permits(Export export, Node node, FileSource file, Caller caller, InetAddress client, int mask)
 			throws Nfs4Exception {
-		List<Ace> acl = aclOf(export, node, file);
+		List<Ace> acl = aclOf(export, node, file, caller);
 		if( acl == null ) {
 			return true;
 		}

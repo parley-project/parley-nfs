@@ -136,7 +136,9 @@ By default the mode bits (owner, group, other) of a file are only reported, and 
 for every file that has no access control list of its own: read, write, list, look up, create, remove and
 rename. The caller is known by the registry name (the same as for access control lists): the mode is turned
 into a list (owner, group, everyone) and the owner is the file's owner by name, the group the caller's registry
-groups. A file that has a list of its own is decided by that list alone. The registry still checks first.
+groups. A file that has a list of its own is decided by that list alone. The registry still checks first. The mapped root
+(AUTH_SYS uid 0 mapped to a registry user, see below) is not held to mode bits, as root on a Unix file system is not; a
+file's own list and the registry's read and write still apply to it.
 
 A new file is given to the caller who made it when the provider can take it (a local file whose
 operating system has a user of that name and a server allowed to change owners, or a memory file system); when it can't, the file keeps the
