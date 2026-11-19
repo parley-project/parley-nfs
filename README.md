@@ -53,7 +53,8 @@ handles"), and so are delegations when `parley.nfs.stateDir` is set (see "Delega
 java -cp ... us.bringardner.parley.nfs.server.NfsServer -Dparley.nfs.export=/srv/share
 ```
 
-`main` runs the server with parley-net's `ServerMain` (a service or a standalone process). Its
+`tools/run-server.sh` starts it in the foreground from a checkout (`--sudo` runs it as root, other settings as `-Dparley.nfs.name=value`; see the
+script's header). `main` runs the server with parley-net's `ServerMain` (a service or a standalone process). Its
 settings file is `parley-nfs.properties` in Parley's configuration folder, or the file
 `parley.nfs.configFile` names.
 
