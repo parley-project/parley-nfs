@@ -398,6 +398,30 @@ public class NfsServerTest {
 		assertEquals(0, v.remaining());
 	}
 
+	/** A file system whose factory refuses links with an UnsupportedOperationException gives PERM, not a failed call. */
+	@Test
+	public void aFactoryThatRefusesLinksGivesPerm() throws Exception {
+		mem = new MemoryFileSourceFactory() {
+			private static final long serialVersionUID = 1L;
+
+			@Override
+			public FileSource createSymbolicLink(FileSource newLink, String linkText) throws IOException {
+				throw new UnsupportedOperationException("no links here");
+			}
+		};
+		mem.connect(new Properties());
+		root = mem.createFileSource("/export");
+		assertTrue(root.mkdirs());
+		server = new NfsServer("test.nfs.no-links", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+		Ops ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+		ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes("target")).writeString("sym").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4ERR_PERM, c.compound(ops).status);
+		assertFalse(root.getChild("sym").exists());
+	}
+
 	/** The same on a local folder: removing a link to a folder takes the link and leaves the folder, and a link isn't opened. */
 	@Test
 	public void symbolicLinksOnLocalFiles(@TempDir Path tmp) throws Exception {
