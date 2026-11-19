@@ -69,9 +69,9 @@ expect_refused() {
 }
 
 cleanup() {
-	# removed on this machine too: a file given to another owner can't always be removed through the mount
+	echo "cleaning up (each step waits at most ${LIMIT})"
+	# removed on this machine: a file given to another owner can't always be removed through the mount
 	rm -f "$FILE" 2>/dev/null
-	vm sudo rm -f "$MOUNT/$NAME" >/dev/null 2>&1
 	vm sudo umount "$MOUNT" >/dev/null 2>&1
 	vm sudo rmdir "$MOUNT" >/dev/null 2>&1
 }
