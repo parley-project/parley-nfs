@@ -341,7 +341,7 @@ public class Compound {
 
 	private FileSource existing(Node node) throws Nfs4Exception, IOException {
 		FileSource f = node.getExport().resolve(node);
-		if( !f.exists() ) {
+		if( !Attributes.present(f) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE);
 		}
 		return f;
@@ -350,6 +350,10 @@ public class Compound {
 	/** @return the current folder; NFS4ERR_NOTDIR if the current file isn't one */
 	private FileSource currentDir() throws Nfs4Exception, IOException {
 		FileSource f = currentFile();
+		if( Attributes.isLink(f) ) {
+			// a link is read and followed by the client (RFC 7530 section 16.15.5)
+			throw new Nfs4Exception(Nfs4.NFS4ERR_SYMLINK);
+		}
 		if( !f.isDirectory() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTDIR);
 		}
@@ -359,6 +363,9 @@ public class Compound {
 	/** @return a regular file; NFS4ERR_ISDIR for a folder */
 	private FileSource currentRegular() throws Nfs4Exception, IOException {
 		FileSource f = currentFile();
+		if( Attributes.isLink(f) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_SYMLINK);
+		}
 		if( f.isDirectory() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_ISDIR);
 		}
@@ -535,7 +542,7 @@ public class Compound {
 		allowRead();
 		aclCheck(dir, lookupDir, Nfs4.ACE4_EXECUTE);
 		String path = Export.childPath(dir, name);
-		if( !export.resolve(path).exists() ) {
+		if( !Attributes.present(export.resolve(path)) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
 		current = export.getNodes().get(path);
@@ -604,7 +611,7 @@ public class Compound {
 		Node dir = current();
 		Export export = dir.getExport();
 		currentDir();
-		if( !export.resolve(Export.childPath(dir, name)).exists() ) {
+		if( !Attributes.present(export.resolve(Export.childPath(dir, name))) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
 		// the flavors the server takes, strongest first (decision D37)
@@ -643,7 +650,7 @@ public class Compound {
 	// ================================================================ attributes
 
 	private Attributes.Source source(Node node, FileSource f) throws IOException {
-		return new Attributes.Source(node.getExport(), node, f, f.isDirectory() ? null : files.length(node));
+		return new Attributes.Source(node.getExport(), node, f, Attributes.isLink(f) || f.isDirectory() ? null : files.length(node));
 	}
 
 	private void getattr() throws Nfs4Exception, IOException {
@@ -691,6 +698,14 @@ public class Compound {
 		Node node = current();
 		FileSource f = currentFile();
 		allowWrite();
+		if( Attributes.isLink(f) ) {
+			// a link has no size, and its mode, owner and times would be the target's: nothing is set (D72)
+			if( s.size != null ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "a symbolic link has no size to set");
+			}
+			out.writeIntArray(new int[0]);
+			return;
+		}
 		recallWriteDelegation(node);
 		aclsOn(node.getExport(), s);
 		int needed = 0;
@@ -891,16 +906,22 @@ public class Compound {
 	}
 
 	private void readlink() throws Nfs4Exception, IOException {
-		currentFile();
-		// symbolic links are followed (symlink_support is false): nothing is a link
-		throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "not a symbolic link");
+		FileSource f = currentFile();
+		allowRead();
+		String text = Attributes.linkText(f);
+		if( text == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "not a symbolic link");
+		}
+		// what the link says, as stored (decision D72)
+		out.writeOpaque(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 	}
 
 	private void create() throws Nfs4Exception, IOException {
 		int type = in.readInt();
+		byte[] linkdata = null;
 		switch (type) {
 		case Nfs4.NF4LNK:
-			in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT*4);
+			linkdata = in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT*4);
 			break;
 		case Nfs4.NF4BLK:
 		case Nfs4.NF4CHR:
@@ -918,8 +939,12 @@ public class Compound {
 		if( type == Nfs4.NF4REG ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BADTYPE);
 		}
+		if( type == Nfs4.NF4LNK ) {
+			createLink(dir, d, name, settings, new String(linkdata, java.nio.charset.StandardCharsets.UTF_8));
+			return;
+		}
 		if( type != Nfs4.NF4DIR ) {
-			// symbolic links, devices, sockets and fifos aren't served (decisions D24, D26):
+			// devices, sockets and fifos aren't served (decisions D24, D26):
 			// PERM, which a Linux client shows as "Operation not permitted" (NOTSUPP and BADTYPE are
 			// not Linux error numbers a program can name: "Unknown error 524")
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "can't create type "+type);
@@ -945,6 +970,40 @@ public class Compound {
 		int[] set = applyCreated(settings, null, f);
 		changeInfo(before, change(dir, d));
 		out.writeIntArray(set);
+		current = node;
+	}
+
+	/**
+	 * CREATE of a symbolic link (decision D72): it keeps the text it was given exactly. The mode, owner and times of
+	 * the request are not applied, since they would reach the target, so attrset is empty.
+	 */
+	private void createLink(Node dir, FileSource d, String name, Attributes.Settings settings, String text) throws Nfs4Exception, IOException {
+		Export export = dir.getExport();
+		if( text.isEmpty() || text.indexOf('\0') >= 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "a symbolic link needs text without a NUL");
+		}
+		allowWrite();
+		aclsOn(export, settings);
+		aclCheck(dir, d, Nfs4.ACE4_ADD_FILE);
+		String path = Export.childPath(dir, name);
+		FileSource f = export.resolve(path);
+		long before = change(dir, d);
+		if( Attributes.present(f) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_EXIST);
+		}
+		try {
+			f.getFileSourceFactory().createSymbolicLink(f, text);
+		} catch (java.nio.file.FileAlreadyExistsException e) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_EXIST);
+		} catch (IOException e) {
+			// a file system that can't keep the text answers PERM, as for the other types (D24)
+			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "symbolic link "+path+": "+e.getMessage());
+		}
+		dir.changed();
+		Node node = export.getNodes().get(path);
+		newAcl(export, dir, node, settings, false);
+		changeInfo(before, change(dir, d));
+		out.writeIntArray(new int[0]);
 		current = node;
 	}
 
@@ -1002,14 +1061,15 @@ public class Compound {
 		allowWrite();
 		String path = Export.childPath(dir, name);
 		FileSource f = export.resolve(path);
-		if( !f.exists() ) {
+		boolean link = Attributes.isLink(f);
+		if( !link && !f.exists() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
 		recallDelegations(export.getNodes().findPath(path), null, false, false);
 		if( export.getAcls() != null ) {
 			aclCheckDelete(dir, d, export.getNodes().get(path), f);
 		}
-		if( f.isDirectory() ) {
+		if( !link && f.isDirectory() ) {
 			String[] list = f.list();
 			if( list != null && list.length > 0 ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_NOTEMPTY);
@@ -1021,7 +1081,7 @@ public class Compound {
 			files.release(node);
 		}
 		if( !f.delete() ) {
-			throw new Nfs4Exception(f.exists() ? Nfs4.NFS4ERR_IO : Nfs4.NFS4ERR_NOENT, "delete "+path+" failed");
+			throw new Nfs4Exception(Attributes.present(f) ? Nfs4.NFS4ERR_IO : Nfs4.NFS4ERR_NOENT, "delete "+path+" failed");
 		}
 		if( export.getAcls() != null && node != null ) {
 			export.getAcls().clear(node.getFileid());
@@ -1054,7 +1114,7 @@ public class Compound {
 		String toPath = Export.childPath(toDir, newName);
 		FileSource from = export.resolve(fromPath);
 		FileSource to = export.resolve(toPath);
-		if( !from.exists() ) {
+		if( !Attributes.present(from) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
 		if( toPath.equals(fromPath) || toPath.startsWith(fromPath+"/") ) {
@@ -1070,19 +1130,19 @@ public class Compound {
 		recallDelegations(export.getNodes().findPath(toPath), null, false, false);
 		long fromBefore = change(fromDir, fd);
 		long toBefore = change(toDir, td);
-		boolean fromIsDir = from.isDirectory();
+		boolean fromIsDir = !Attributes.isLink(from) && from.isDirectory();
 		Long overwrittenId = null;
 		if( export.getAcls() != null ) {
 			aclCheckDelete(fromDir, fd, export.getNodes().get(fromPath), from);
 			aclCheck(toDir, td, fromIsDir ? Nfs4.ACE4_ADD_SUBDIRECTORY : Nfs4.ACE4_ADD_FILE);
-			if( to.exists() ) {
+			if( Attributes.present(to) ) {
 				Node overwritten = export.getNodes().get(toPath);
 				aclCheckDelete(toDir, td, overwritten, to);
 				overwrittenId = overwritten.getFileid();
 			}
 		}
-		if( to.exists() ) {
-			boolean toIsDir = to.isDirectory();
+		if( Attributes.present(to) ) {
+			boolean toIsDir = !Attributes.isLink(to) && to.isDirectory();
 			if( fromIsDir != toIsDir ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_EXIST);
 			}
@@ -1104,7 +1164,7 @@ public class Compound {
 		if( toNode != null ) {
 			files.release(toNode);
 		}
-		boolean ok = to.exists() ? from.renameTo(to, true) : from.renameTo(to);
+		boolean ok = Attributes.present(to) ? from.renameTo(to, true) : from.renameTo(to);
 		if( !ok ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_IO, "rename "+fromPath+" to "+toPath+" failed");
 		}
@@ -1432,6 +1492,10 @@ public class Compound {
 		FileSource f = export.resolve(path);
 		aclsOn(export, settings);
 		aclCheck(dir, d, Nfs4.ACE4_EXECUTE);
+		if( Attributes.isLink(f) ) {
+			// a link is read by the client and opened by its text (RFC 7530 section 16.16.5)
+			throw new Nfs4Exception(opentype == Nfs4.OPEN4_CREATE && how != Nfs4.UNCHECKED4 ? Nfs4.NFS4ERR_EXIST : Nfs4.NFS4ERR_SYMLINK);
+		}
 		if( f.exists() ) {
 			Node present = export.getNodes().get(path);
 			if( (access & Nfs4.OPEN4_SHARE_ACCESS_READ) != 0 && !f.isDirectory() ) {

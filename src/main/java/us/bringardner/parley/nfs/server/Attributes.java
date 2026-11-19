@@ -178,6 +178,25 @@ public class Attributes {
 
 	// ------------------------------------------------------------ GETATTR
 
+	/** @return what a symbolic link says, exactly as stored, or null when the file isn't one (decision D72) */
+	static String linkText(FileSource f) {
+		try {
+			return f.getLinkText();
+		} catch (IOException | RuntimeException e) {
+			return null;
+		}
+	}
+
+	/** @return true for a symbolic link, one that points at nothing included (which exists() doesn't see) */
+	static boolean isLink(FileSource f) {
+		return linkText(f) != null;
+	}
+
+	/** @return true if the file or a symbolic link of that name is there */
+	static boolean present(FileSource f) throws IOException {
+		return f.exists() || isLink(f);
+	}
+
 	/** What one file's attributes are read from, each read once. */
 	public static final class Source {
 		final Export export;
@@ -186,6 +205,8 @@ public class Attributes {
 		final Long openLength;
 		private Boolean dir;
 		private Long modified;
+		private String link;
+		private boolean linkRead;
 
 		/**
 		 * @param openLength the size from an open stream (written data the file hasn't seen yet), or null
@@ -197,9 +218,18 @@ public class Attributes {
 			this.openLength = openLength;
 		}
 
+		/** @return what the file says if it is a symbolic link (never followed), else null */
+		String linkText() {
+			if( !linkRead ) {
+				link = Attributes.linkText(file);
+				linkRead = true;
+			}
+			return link;
+		}
+
 		boolean isDirectory() throws IOException {
 			if( dir == null ) {
-				dir = file.isDirectory();
+				dir = linkText() == null && file.isDirectory();
 			}
 			return dir;
 		}
@@ -212,6 +242,9 @@ public class Attributes {
 		}
 
 		long length() throws IOException {
+			if( linkText() != null ) {
+				return linkText().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+			}
 			if( openLength != null ) {
 				return openLength;
 			}
@@ -280,12 +313,12 @@ public class Attributes {
 			out.writeIntArray(sup);
 			break;
 		}
-		case Nfs4.FATTR4_TYPE: out.writeInt(src.isDirectory() ? Nfs4.NF4DIR : Nfs4.NF4REG); break;
+		case Nfs4.FATTR4_TYPE: out.writeInt(src.linkText() != null ? Nfs4.NF4LNK : src.isDirectory() ? Nfs4.NF4DIR : Nfs4.NF4REG); break;
 		case Nfs4.FATTR4_FH_EXPIRE_TYPE: out.writeInt(Nfs4.FH4_PERSISTENT); break;
 		case Nfs4.FATTR4_CHANGE: out.writeLong(change(src)); break;
 		case Nfs4.FATTR4_SIZE: out.writeLong(src.length()); break;
 		case Nfs4.FATTR4_LINK_SUPPORT: out.writeBoolean(false); break;
-		case Nfs4.FATTR4_SYMLINK_SUPPORT: out.writeBoolean(false); break;
+		case Nfs4.FATTR4_SYMLINK_SUPPORT: out.writeBoolean(true); break;
 		case Nfs4.FATTR4_NAMED_ATTR: out.writeBoolean(false); break;
 		case Nfs4.FATTR4_FSID:
 			out.writeLong(src.export.getFsidMajor());
@@ -365,6 +398,10 @@ public class Attributes {
 	static int mode(Source src) {
 		FileSource f = src.file;
 		int m = 0;
+		if( src.linkText() != null ) {
+			// a symbolic link has no mode of its own; what counts is the target's
+			return 0777;
+		}
 		try {
 			if( f.canOwnerRead() ) m |= Nfs4.MODE4_RUSR;
 			if( f.canOwnerWrite() ) m |= Nfs4.MODE4_WUSR;

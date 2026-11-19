@@ -28,10 +28,17 @@ Supported:
 Not yet (answered with NFS4ERR_NOTSUPP):
 
 1. Named attributes (OPENATTR).
-2. Hard links, symbolic links (followed, not shown as links), devices, sockets and fifos. A FileSource
-   can't make them, so a client gets errors it can name: `ln` says "Invalid cross-device link"
-   (NFS4ERR_XDEV) and `ln -s`, `mkfifo` and `mknod` say "Operation not permitted" (NFS4ERR_PERM).
+2. Hard links, devices, sockets and fifos. A FileSource can't make them, so a client gets errors it can name:
+   `ln` says "Invalid cross-device link" (NFS4ERR_XDEV) and `mkfifo` and `mknod` say "Operation not permitted"
+   (NFS4ERR_PERM). Symbolic links are served (see below).
    NFS4ERR_NOTSUPP and NFS4ERR_BADTYPE have no Linux error text ("Unknown error 524").
+
+Symbolic links keep the text they were made with: `ln -s ../x/y link` stores `../x/y`, and `readlink` gives it back,
+for a link to nothing too. The server never follows a link itself (the client does, with the text, in its own
+view): a link has the type, a size of the length of its text and the mode 0777, a LOOKUP or OPEN through one is
+NFS4ERR_SYMLINK, and REMOVE takes the link and not what it points to. It needs a FileSource whose factory keeps the
+text (`createSymbolicLink(link, text)` and `getLinkText()`: the local and memory ones do); another one answers
+NFS4ERR_PERM as before. The mode, owner and times of a link can't be set.
 
 `df` shows the space of the export's FileSource (total, free and usable by the server); a FileSource
 that can't tell shows 0. File counts (`df -i`) aren't reported.
@@ -128,8 +135,8 @@ A user whose registry principal has the attribute `nfs.root` (a path inside the 
 `nfs.root=/home/tony`) sees that folder as the root of the export: PUTROOTFH gives it, LOOKUPP stops there, and a
 file handle outside it is NFS4ERR_STALE. A user without the attribute sees the whole export. With several
 exports the same path is looked for inside each, and an export without it can't be entered (NFS4ERR_NOENT). A
-value with `..` leaves the user nothing (NFS4ERR_ACCESS). Symbolic links the FileSource follows can still lead
-out of the folder, and the registry's read and write permission still applies to the whole export.
+value with `..` leaves the user nothing (NFS4ERR_ACCESS). Symbolic links the FileSource has on disk are the
+client's to follow, not the server's, so they don't lead the server out of the folder; the registry's read and write permission still applies to the whole export.
 
 ## Access control lists
 
@@ -250,5 +257,5 @@ its ticket, or until the client destroys it.
 server has also been tried with a Linux kernel mount (`tools/nfs-mount-test.sh`, run in the client; `tools/mirror-lock-test.sh` checks the mirror of locks and `tools/reclaim-test.sh` the reclaim of a delegation after a restart, with a Multipass VM) and libnfs (`nfs-ls`, `nfs-cat`, `nfs-cp`, `nfs-stat` with `?version=4`).
 
 It has also been run against pynfs's NFSv4.0 server tests (`nfs4.0/testserver.py ... all`). What still
-fails there is objects the server doesn't serve (hard links, symbolic links, devices, sockets, fifos), and checks the server leaves to the user registry:
+fails there is objects the server doesn't serve (hard links, devices, sockets, fifos), and checks the server leaves to the user registry:
 UNIX mode bits (OPEN20, WRT19) and changing a file's owner (SATT18).

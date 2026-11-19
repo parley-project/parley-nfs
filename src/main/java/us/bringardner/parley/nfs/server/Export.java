@@ -311,7 +311,7 @@ public class Export implements ProtectedResource {
 			String kept = nodes.storedPath(fileid);
 			if( kept != null ) {
 				try {
-					if( !resolve(kept).exists() ) {
+					if( !Attributes.present(resolve(kept)) ) {
 						nodes.forgetStored(fileid);
 						throw new Nfs4Exception(Nfs4.NFS4ERR_STALE);
 					}
@@ -327,7 +327,7 @@ public class Export implements ProtectedResource {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_BADHANDLE);
 			}
 			try {
-				if( !resolve(path).exists() ) {
+				if( !Attributes.present(resolve(path)) ) {
 					throw new Nfs4Exception(Nfs4.NFS4ERR_STALE);
 				}
 			} catch (IOException e) {
