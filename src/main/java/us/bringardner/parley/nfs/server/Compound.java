@@ -743,7 +743,9 @@ public class Compound {
 				allowed |= Nfs4.ACCESS4_EXECUTE;
 			}
 		}
-		if( permitted(true) && (dir || f.canWrite()) ) {
+		// decision D71: the answer is the same for every caller. f.canWrite() asks about the user the SERVER runs as,
+		// which says nothing about the caller, so the test is whether any class (owner, group, other) has a write bit.
+		if( permitted(true) && (dir || f.canOwnerWrite() || f.canGroupWrite() || f.canOtherWrite()) ) {
 			allowed |= Nfs4.ACCESS4_MODIFY | Nfs4.ACCESS4_EXTEND | Nfs4.ACCESS4_DELETE;
 		}
 		Node node = current();

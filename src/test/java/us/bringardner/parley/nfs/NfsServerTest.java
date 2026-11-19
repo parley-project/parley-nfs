@@ -647,6 +647,42 @@ public class NfsServerTest {
 		assertEquals(Nfs4.ACCESS4_READ | Nfs4.ACCESS4_LOOKUP, r.in.readInt());
 	}
 
+	/**
+	 * ACCESS for a file depends on the write bits of the file (any class), not on the user the server runs as
+	 * (decision D71).
+	 */
+	@Test
+	public void accessFollowsTheWriteBitsNotTheServerUser(@TempDir Path tmp) throws Exception {
+		Files.write(tmp.resolve("ro"), bytes("x"));
+		Files.write(tmp.resolve("rw"), bytes("x"));
+		Files.setPosixFilePermissions(tmp.resolve("ro"), java.nio.file.attribute.PosixFilePermissions.fromString("r--r--r--"));
+		Files.setPosixFilePermissions(tmp.resolve("rw"), java.nio.file.attribute.PosixFilePermissions.fromString("r--r--rw-"));
+		root = new us.bringardner.parley.files.fileproxy.FileProxyFactory().createFileSource(tmp.toString());
+		server = new NfsServer("test.nfs.access-bits", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+		int write = Nfs4.ACCESS4_MODIFY | Nfs4.ACCESS4_EXTEND;
+
+		// FileProxy answers canOwnerWrite() with canWrite(), which is always true for root, so the no-write case
+		// can be checked only when the tests do not run as root
+		if( !"root".equals(System.getProperty("user.name")) ) {
+			Ops ops = new Ops().putroot().lookup("ro").op(Nfs4.OP_ACCESS);
+		ops.args().writeInt(Nfs4.ACCESS4_READ | write);
+		Result r0 = c.compound(ops);
+		r0.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_LOOKUP).ok(Nfs4.OP_ACCESS);
+		assertEquals(Nfs4.ACCESS4_READ | write, r0.in.readInt());
+		assertEquals(Nfs4.ACCESS4_READ, r0.in.readInt());
+		}
+
+		Ops ops = new Ops().putroot().lookup("rw").op(Nfs4.OP_ACCESS);
+		ops.args().writeInt(Nfs4.ACCESS4_READ | write);
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_LOOKUP).ok(Nfs4.OP_ACCESS);
+		assertEquals(Nfs4.ACCESS4_READ | write, r.in.readInt());
+		assertEquals(Nfs4.ACCESS4_READ | write, r.in.readInt());
+	}
+
 	/** Problems pynfs (the Linux NFS server tests) found. */
 	@Test
 	public void pynfsFindings() throws Exception {
