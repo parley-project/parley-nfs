@@ -133,8 +133,10 @@ groups. A file that has a list of its own is decided by that list alone. The reg
 
 A new file is given to the caller who made it when the file system can take it (a local file system whose
 operating system user has that name, and a server allowed to change owners); when it can't, the file keeps the
-owner it got, which is said once in the log, and the modes are then checked against that owner. Changing the
-owner of a file is still refused.
+owner it got, which is said once in the log, and the modes are then checked against that owner. Only root may change the owner or
+group of a file, and only when the id map (or a registry user's `uid`) maps uid 0 to a registry user with write
+on the export; an unmapped root is the anonymous user and is refused. The name must be a user of the file system
+the export is on (a number is taken through the id map), and a provider that can't change owners refuses (NFS4ERR_PERM).
 
 ## Numbers for users and groups
 

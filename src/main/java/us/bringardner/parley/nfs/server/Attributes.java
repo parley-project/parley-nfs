@@ -602,17 +602,71 @@ public class Attributes {
 		return sec*1000+nsec/1000000;
 	}
 
+	/** Gives the file to the user of this name, a number being taken through the id map; the file system must have that user. */
+	private void changeOwner(String asked, FileSource f) throws IOException, Nfs4Exception {
+		String name = unqualify(asked);
+		if( numbers != null && !name.isEmpty() && name.chars().allMatch(Character::isDigit) ) {
+			String mapped;
+			try {
+				mapped = numbers.user(Long.parseLong(name));
+			} catch (us.bringardner.parley.iam.UserRegistryUnavailableException e) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_DELAY, e.getMessage());
+			}
+			if( mapped == null ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_BADOWNER, "no user has the number "+name);
+			}
+			name = mapped;
+		}
+		UserPrincipal p;
+		try {
+			p = java.nio.file.FileSystems.getDefault().getUserPrincipalLookupService().lookupPrincipalByName(name);
+		} catch (IOException | RuntimeException e) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BADOWNER, "the file system has no user "+name);
+		}
+		if( !f.setOwner(p) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system didn't take the owner "+name);
+		}
+	}
+
+	/** Gives the file to the group of this name (a number is not looked up); the file system must have that group. */
+	private void changeGroup(String asked, FileSource f) throws IOException, Nfs4Exception {
+		String name = unqualify(asked);
+		GroupPrincipal p;
+		try {
+			p = java.nio.file.FileSystems.getDefault().getUserPrincipalLookupService().lookupPrincipalByGroupName(name);
+		} catch (IOException | RuntimeException e) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BADOWNER, "the file system has no group "+name);
+		}
+		if( !f.setGroup(p) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system didn't take the group "+name);
+		}
+	}
+
 	/**
 	 * Apply settings other than size (the caller sets the size, through the open stream).
 	 * @throws Nfs4Exception NFS4ERR_PERM for an owner or group change (the FileSource keeps its
 	 * owner), NFS4ERR_IO if the FileSource refuses a change
 	 */
 	public void apply(Settings s, FileSource f) throws IOException, Nfs4Exception {
+		apply(s, f, false);
+	}
+
+	/**
+	 * @param mayChown true when the caller may change the owner and group of a file (decision D74: only the
+	 * root the id map maps to a registry user); otherwise a change is NFS4ERR_PERM
+	 */
+	public void apply(Settings s, FileSource f, boolean mayChown) throws IOException, Nfs4Exception {
 		if( s.owner != null && !isOwner(s.owner, f) ) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "changing the owner isn't supported");
+			if( !mayChown ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "changing the owner isn't supported");
+			}
+			changeOwner(s.owner, f);
 		}
 		if( s.group != null && !unqualify(s.group).equals(unqualify(group(f))) ) {
-			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "changing the group isn't supported");
+			if( !mayChown ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "changing the group isn't supported");
+			}
+			changeGroup(s.group, f);
 		}
 		if( s.mode != null ) {
 			int m = s.mode;

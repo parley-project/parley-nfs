@@ -90,6 +90,9 @@ public class AclNfsTest {
 	/** what the server said at INFO */
 	private final List<String> infos = new java.util.concurrent.CopyOnWriteArrayList<String>();
 
+	/** The registry user that uid 0 is mapped to, null to leave root unmapped. */
+	private String rootName;
+
 	private void property(String name, String value) {
 		System.setProperty(name, value);
 		properties.add(name);
@@ -98,7 +101,8 @@ public class AclNfsTest {
 	/** tony, pat (in staff), bob and carol (with uid attribute 3000) may read and write the export. */
 	private void start(Path tmp, boolean withStateFolder) throws Exception {
 		Path idmap = tmp.resolve("idmap.properties");
-		Files.write(idmap, ("uid."+TONY+"=tony\nuid."+PAT+"=pat\nuid."+BOB+"=bob\nuid."+CAROL+"=carol\nuid.1004=eve\n")
+		Files.write(idmap, ("uid."+TONY+"=tony\nuid."+PAT+"=pat\nuid."+BOB+"=bob\nuid."+CAROL+"=carol\nuid.1004=eve\n"
+				+(rootName == null ? "" : "uid.0="+rootName+"\n"))
 				.getBytes(StandardCharsets.UTF_8));
 		property("test.acl.idmap", idmap.toString());
 		property("test.acl.domain", "example.org");
@@ -113,7 +117,7 @@ public class AclNfsTest {
 			export = new Export("test", root, false);
 			registry = new BasicUserRegistry(1000);
 			ParleyPrincipal staff = registry.createGroup("staff");
-			for (String name : new String[] {"tony", "pat", "bob", "carol"}) {
+			for (String name : rootName == null ? new String[] {"tony", "pat", "bob", "carol"} : new String[] {"tony", "pat", "bob", "carol", rootName}) {
 				ParleyPrincipal u = registry.createUser(name);
 				registry.grant(u, new BasicParleyPermission(StandardPermissions.READ, export.getId()));
 				registry.grant(u, new BasicParleyPermission(StandardPermissions.WRITE, export.getId()));
@@ -731,6 +735,61 @@ public class AclNfsTest {
 		assertEquals(Nfs4.NFS4_OK, o.status);
 		mode(root.getChild("f"), 0600);
 		assertEquals(Nfs4.NFS4_OK, read(pat, o.fh));
+	}
+
+	private static int chown(TestClient c, byte[] fh, String name) throws IOException {
+		Ops ops = new Ops().putfh(fh).op(Nfs4.OP_SETATTR);
+		ops.args().writeInt(0).writeFixedOpaque(new byte[12])
+			.writeIntArray(Attributes.bitmap(Nfs4.FATTR4_OWNER)).writeOpaque(new XdrEncoder().writeString(name).toByteArray());
+		Result r = c.compound(ops);
+		r.ok(Nfs4.OP_PUTFH);
+		return r.next(Nfs4.OP_SETATTR);
+	}
+
+	/** Decision D74: only the root that is mapped to a registry user may change an owner. */
+	@Test
+	public void onlyTheMappedRootMayChangeAnOwner(@TempDir Path tmp) throws Exception {
+		rootName = "rootuser";
+		property("test.acl.enforceModes", "true");
+		start(tmp, false);
+		mode(root, 0777);
+		TestClient tony = as(TONY);
+		TestClient admin = as(0);
+		long tonyId = clientid(tony, "tony");
+		clientid(admin, "admin");
+		byte[] rootFh = rootFh(tony);
+		Opened o = open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "f");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		FileSource f = root.getChild("f");
+		assertTrue(f.setOwner(new FileSourceUser(TONY, "tony")));
+		mode(f, 0600);
+		// with the modes enforced the owner has no WRITE_OWNER, so the refusal is ACCESS; without them it is PERM
+		int own = chown(tony, o.fh, "pat");
+		assertTrue(own == Nfs4.NFS4ERR_PERM || own == Nfs4.NFS4ERR_ACCESS, "the owner may not give a file away: "+own);
+		int other = chown(as(PAT), o.fh, "pat");
+		assertTrue(other == Nfs4.NFS4ERR_PERM || other == Nfs4.NFS4ERR_ACCESS, "nor may another user: "+other);
+		int unknown = chown(admin, o.fh, "nosuchuser");
+		assertEquals(Nfs4.NFS4ERR_BADOWNER, unknown, "root gets as far as the file system, which has no such user");
+		int known = chown(admin, o.fh, "nobody");
+		assertTrue(known == Nfs4.NFS4ERR_PERM || known == Nfs4.NFS4ERR_BADOWNER,
+				"the memory file system can't take an operating system user: "+known);
+		assertEquals("tony", f.getOwner().getName());
+		// the mode of the file and a list that gives root nothing don't stop root before the file system is asked
+		assertEquals(Nfs4.NFS4ERR_BADOWNER, chown(admin, o.fh, "nosuchuser"));
+	}
+
+	/** Decision D74: root that the id map doesn't map is the anonymous user and may not change an owner. */
+	@Test
+	public void anUnmappedRootMayNotChangeAnOwner(@TempDir Path tmp) throws Exception {
+		start(tmp, false);
+		TestClient tony = as(TONY);
+		TestClient admin = as(0);
+		long tonyId = clientid(tony, "tony");
+		byte[] rootFh = rootFh(tony);
+		Opened o = open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "f");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		int status = chown(admin, o.fh, "nosuchuser");
+		assertTrue(status == Nfs4.NFS4ERR_PERM || status == Nfs4.NFS4ERR_ACCESS, "root is only the anonymous user here: "+status);
 	}
 
 	/** Decision D73: a new file is tried as the caller's; when that can't be done it is said once. */

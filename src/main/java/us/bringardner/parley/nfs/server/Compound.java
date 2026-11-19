@@ -740,7 +740,8 @@ public class Compound {
 		if( s.mode != null || s.atime != null || s.mtime != null ) {
 			needed |= Nfs4.ACE4_WRITE_ATTRIBUTES;
 		}
-		if( s.owner != null || s.group != null ) {
+		if( (s.owner != null || s.group != null) && !server.getAuthorizer().isMappedRoot(caller) ) {
+			// the mapped root may change owners whatever a list says (decision D74)
 			needed |= Nfs4.ACE4_WRITE_OWNER;
 		}
 		if( s.size != null ) {
@@ -755,7 +756,7 @@ public class Compound {
 			}
 			checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_WRITE);
 		}
-		attributes.apply(s, f);
+		attributes.apply(s, f, server.getAuthorizer().isMappedRoot(caller));
 		if( s.size != null ) {
 			files.setLength(node, f, s.size);
 		}
