@@ -109,7 +109,7 @@ if [ -z "$want_uid" ]; then
 	echo "the VM has no user $TARGET_USER (set TARGET_USER)"; exit 1
 fi
 
-echo "2. an ordinary user may not change the owner (the client refuses it before it reaches the server)"
+echo "2. an ordinary user may not change the owner (the server refuses it: SETATTR with NFS4ERR_ACCESS, shown in its log)"
 expect_refused "chown $TARGET_USER as the VM's user" "chown $TARGET_USER '$MOUNT/$NAME'"
 [ "$(uid_here)" = "$before_uid" ] && ok "the owner is still uid $before_uid" || bad "the owner is now uid $(uid_here)"
 
