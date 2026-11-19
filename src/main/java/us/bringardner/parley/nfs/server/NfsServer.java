@@ -71,6 +71,8 @@ import us.bringardner.parley.net.server.ServerMain;
  * <li>{@code leaseTime}: default 90s</li>
  * <li>{@code mirrorLocks}: true to hold the clients' byte-range locks as FileSource locks too, so another
  *     Parley program that locks the file sees them (and a lock it holds is refused to the clients), default false (D68)</li>
+ * <li>{@code enforceModes}: true to check the mode bits (owner, group, other) of every file that has no
+ *     access control list, by the caller's registry name, for read, write, list, create, delete and rename (D73); needs a user registry; default false</li>
  * <li>{@code delegations}: true to give clients read delegations (needs a callback address that works), default false; none are given while mirrorLocks is on</li>
  * <li>{@code ioSize}: the most bytes one READ returns or one WRITE takes, default 1 MiB</li>
  * <li>{@code workerThreads}: threads that run requests (file access blocks), default {@value #DEFAULT_WORKER_THREADS}</li>
@@ -110,6 +112,7 @@ public class NfsServer extends NioServer {
 	public static final String PROPERTY_DELEGATIONS = "delegations";
 	public static final String PROPERTY_WRITE_DELEGATIONS = "writeDelegations";
 	public static final String PROPERTY_MIRROR_LOCKS = "mirrorLocks";
+	public static final String PROPERTY_ENFORCE_MODES = "enforceModes";
 	/** The most nodes kept in memory per export (decision D42). */
 	public static final String PROPERTY_MAX_NODES = "maxNodes";
 	public static final String PROPERTY_SEC = "sec";
@@ -314,6 +317,10 @@ public class NfsServer extends NioServer {
 				message -> logInfo(message));
 		aclPolicy = new AclPolicy(authorizer, attributes, getUserRegistry(),
 				getDuration(propertyName(PROPERTY_AUTH_CACHE_TIME), DEFAULT_AUTH_CACHE_TIME));
+		if( getBooleanProperty(propertyName(PROPERTY_ENFORCE_MODES), false) ) {
+			aclPolicy.setEnforceModes(true);
+			logInfo("Server "+getName()+": the mode bits of files are checked by the caller's name ("+propertyName(PROPERTY_ENFORCE_MODES)+"=true)");
+		}
 		authNoneAllowed = !authorizer.isChecking() || anonymous != null;
 		prepareSecurity();
 		if( !authorizer.isChecking() ) {
@@ -732,6 +739,16 @@ public class NfsServer extends NioServer {
 	/** @return the duplicate request cache, or null when {@value #PROPERTY_REPLAY_CACHE_SIZE} is 0 */
 	public ReplayCache getReplayCache() {
 		return replayCache;
+	}
+
+	private final java.util.concurrent.atomic.AtomicBoolean ownerNoticeGiven = new java.util.concurrent.atomic.AtomicBoolean();
+
+	/** Says once that a new file couldn't be given to the caller who made it (decision D73). */
+	void ownerOnCreateRefused(String why) {
+		if( ownerNoticeGiven.compareAndSet(false, true) ) {
+			logInfo("Server "+getName()+": a new file keeps the owner the file system gave it, because it can't be set to the caller ("
+					+why+"); the mode bits of it are then checked against that owner. Said once.");
+		}
 	}
 
 	public AclPolicy getAclPolicy() {

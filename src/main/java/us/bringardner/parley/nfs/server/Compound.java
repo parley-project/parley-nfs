@@ -398,8 +398,8 @@ public class Compound {
 	private void aclCheckDelete(Node parent, FileSource pf, Node child, FileSource cf) throws Nfs4Exception {
 		AclPolicy policy = server.getAclPolicy();
 		Export export = parent.getExport();
-		List<Ace> pa = policy.aclOf(export, parent);
-		List<Ace> ca = policy.aclOf(export, child);
+		List<Ace> pa = policy.aclOf(export, parent, pf);
+		List<Ace> ca = policy.aclOf(export, child, cf);
 		if( pa == null && ca == null ) {
 			return;
 		}
@@ -410,6 +410,31 @@ public class Compound {
 			return;
 		}
 		throw new Nfs4Exception(Nfs4.NFS4ERR_ACCESS, "the access control list refuses "+caller+" removing "+child);
+	}
+
+	/**
+	 * With the modes enforced a new file should belong to the caller who made it, or its mode bits would be
+	 * checked against whatever user the server runs as (decision D73). It is tried, and said once if it can't be done.
+	 */
+	private void ownCreated(FileSource f) {
+		if( !server.getAclPolicy().isEnforceModes() ) {
+			return;
+		}
+		try {
+			String name = server.getAuthorizer().identity(caller, client).getName();
+			if( name == null ) {
+				return;
+			}
+			java.nio.file.attribute.UserPrincipal p = java.nio.file.FileSystems.getDefault()
+					.getUserPrincipalLookupService().lookupPrincipalByName(name);
+			if( !f.setOwner(p) ) {
+				server.ownerOnCreateRefused("the file system said no");
+			}
+		} catch (Nfs4Exception e) {
+			// the registry is busy: the owner stays as it is
+		} catch (IOException | RuntimeException e) {
+			server.ownerOnCreateRefused(e.toString());
+		}
 	}
 
 	/** A new file or folder gets the list the client sent, else what its folder passes down (D53). */
@@ -764,7 +789,8 @@ public class Compound {
 			allowed |= Nfs4.ACCESS4_MODIFY | Nfs4.ACCESS4_EXTEND | Nfs4.ACCESS4_DELETE;
 		}
 		Node node = current();
-		List<Ace> acl = server.getAclPolicy().aclOf(node.getExport(), node);
+		boolean own = server.getAclPolicy().aclOf(node.getExport(), node) != null;
+		List<Ace> acl = server.getAclPolicy().aclOf(node.getExport(), node, f);
 		if( acl != null ) {
 			// a file with a list: what the list gives (decision D52)
 			int[][] map = {
@@ -775,6 +801,10 @@ public class Compound {
 				{Nfs4.ACCESS4_DELETE, Nfs4.ACE4_DELETE_CHILD},
 				{Nfs4.ACCESS4_EXECUTE, Nfs4.ACE4_EXECUTE}};
 			for (int[] m : map) {
+				if( m[0] == Nfs4.ACCESS4_DELETE && !own && !dir ) {
+					// the modes of a file don't say who may delete it, its folder does (RFC 7530 6.2.1)
+					continue;
+				}
 				if( (allowed & m[0]) != 0 && !server.getAclPolicy().permits(acl, f, caller, client, m[1]) ) {
 					allowed &= ~m[0];
 				}
@@ -967,6 +997,7 @@ public class Compound {
 		dir.changed();
 		Node node = export.getNodes().get(path);
 		newAcl(export, dir, node, settings, true);
+		ownCreated(f);
 		int[] set = applyCreated(settings, null, f);
 		changeInfo(before, change(dir, d));
 		out.writeIntArray(set);
@@ -1003,6 +1034,7 @@ public class Compound {
 		dir.changed();
 		Node node = export.getNodes().get(path);
 		newAcl(export, dir, node, settings, false);
+		ownCreated(f);
 		changeInfo(before, change(dir, d));
 		out.writeIntArray(new int[0]);
 		current = node;
@@ -1067,7 +1099,7 @@ public class Compound {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
 		recallDelegations(export.getNodes().findPath(path), null, false, false);
-		if( export.getAcls() != null ) {
+		if( server.getAclPolicy().active(export) ) {
 			aclCheckDelete(dir, d, export.getNodes().get(path), f);
 		}
 		if( !link && f.isDirectory() ) {
@@ -1133,7 +1165,7 @@ public class Compound {
 		long toBefore = change(toDir, td);
 		boolean fromIsDir = !Attributes.isLink(from) && from.isDirectory();
 		Long overwrittenId = null;
-		if( export.getAcls() != null ) {
+		if( server.getAclPolicy().active(export) ) {
 			aclCheckDelete(fromDir, fd, export.getNodes().get(fromPath), from);
 			aclCheck(toDir, td, fromIsDir ? Nfs4.ACE4_ADD_SUBDIRECTORY : Nfs4.ACE4_ADD_FILE);
 			if( Attributes.present(to) ) {
@@ -1523,6 +1555,7 @@ public class Compound {
 					server.setExclusiveCreate(path, exclusive);
 					dir.changed();
 					newAcl(export, dir, export.getNodes().get(path), null, false);
+					ownCreated(f);
 				}
 			} else {
 				if( exists && how == Nfs4.GUARDED4 ) {
@@ -1533,6 +1566,7 @@ public class Compound {
 					dir.changed();
 					Node made = export.getNodes().get(path);
 					newAcl(export, dir, made, settings, false);
+					ownCreated(f);
 					if( (access & Nfs4.OPEN4_SHARE_ACCESS_WRITE) != 0 ) {
 						// before a mode without write is set (D16)
 						openForWrite(made, f);

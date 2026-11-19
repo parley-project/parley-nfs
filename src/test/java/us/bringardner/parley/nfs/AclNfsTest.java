@@ -46,6 +46,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import us.bringardner.parley.files.FileSource;
+import us.bringardner.parley.files.FileSourceUser;
 import us.bringardner.parley.files.memory.MemoryFileSourceFactory;
 import us.bringardner.parley.iam.ParleyPrincipal;
 import us.bringardner.parley.iam.permission.BasicParleyPermission;
@@ -660,6 +661,93 @@ public class AclNfsTest {
 		assertTrue(Acls.allows(new ArrayList<Ace>(), 0, a -> true));
 		assertFalse(Acls.allows(Arrays.asList(Ace.allow(Nfs4.ACE4_INHERIT_ONLY_ACE | Nfs4.ACE4_FILE_INHERIT_ACE, READ, Ace.EVERYONE)),
 				READ, a -> true), "inherit-only entries don't apply");
+	}
+
+	/** Sets the nine bits of a file or folder from a mode such as 0640. */
+	private static void mode(FileSource f, int m) throws IOException {
+		assertTrue(f.setOwnerReadable((m & 0400) != 0) & f.setOwnerWritable((m & 0200) != 0) & f.setOwnerExecutable((m & 0100) != 0)
+				& f.setGroupReadable((m & 040) != 0) & f.setGroupWritable((m & 020) != 0) & f.setGroupExecutable((m & 010) != 0)
+				& f.setOtherReadable((m & 04) != 0) & f.setOtherWritable((m & 02) != 0) & f.setOtherExecutable((m & 01) != 0));
+	}
+
+	/** Decision D73: with enforceModes the mode bits decide, by the caller's name, for a file that has no list. */
+	@Test
+	public void enforcedModesDecideForFilesWithoutAList(@TempDir Path tmp) throws Exception {
+		property("test.acl.enforceModes", "true");
+		start(tmp, false);
+		FileSourceUser tonyUser = new FileSourceUser(TONY, "tony");
+		mode(root, 0777);
+		TestClient tony = as(TONY);
+		TestClient pat = as(PAT);
+		TestClient bob = as(BOB);
+		long tonyId = clientid(tony, "tony");
+		long patId = clientid(pat, "pat");
+		long bobId = clientid(bob, "bob");
+		byte[] rootFh = rootFh(tony);
+
+		Opened o = open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "f");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		assertEquals(Nfs4.NFS4_OK, write(tony, o.fh, o, bytes("hi")));
+		FileSource f = root.getChild("f");
+		assertTrue(f.setOwner(tonyUser));
+		mode(f, 0600);
+		assertEquals(Nfs4.NFS4_OK, read(tony, o.fh), "the owner reads");
+		assertEquals(Nfs4.NFS4ERR_ACCESS, read(pat, o.fh), "another user may not read a file that is 0600");
+		assertEquals(Nfs4.NFS4ERR_ACCESS, open(pat, rootFh, patId, Nfs4.OPEN4_SHARE_ACCESS_READ, false, "f").status);
+		assertEquals(Nfs4.NFS4ERR_ACCESS, open(bob, rootFh, bobId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, false, "f").status);
+		mode(f, 0644);
+		assertEquals(Nfs4.NFS4_OK, read(pat, o.fh), "the other bits now allow reading");
+		assertEquals(Nfs4.NFS4ERR_ACCESS, open(bob, rootFh, bobId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, false, "f").status,
+				"but not writing");
+		assertEquals(Nfs4.NFS4_OK, open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, false, "f").status);
+
+		// a folder that others may list but not change
+		byte[] dir = mkdir(tony, rootFh, "d");
+		FileSource d = root.getChild("d");
+		assertTrue(d.setOwner(tonyUser));
+		mode(d, 0755);
+		assertEquals(Nfs4.NFS4_OK, open(tony, dir, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "a").status);
+		assertEquals(Nfs4.NFS4ERR_ACCESS, mkdirStatus(pat, dir, "x"), "no write bit for others on the folder");
+		assertEquals(Nfs4.NFS4ERR_ACCESS, remove(pat, dir, "a"));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, rename(pat, dir, "a", dir, "b"));
+		assertTrue(root.getChild("d").getChild("a").exists());
+		assertEquals(Nfs4.NFS4_OK, rename(tony, dir, "a", dir, "b"));
+		assertEquals(Nfs4.NFS4_OK, remove(tony, dir, "b"));
+		mode(d, 0700);
+		assertEquals(Nfs4.NFS4ERR_ACCESS, lookupStatus(pat, dir, "anything"), "no execute bit for others");
+	}
+
+	/** The default is the old behavior: the modes are not checked (nothing changes until the setting is on). */
+	@Test
+	public void modesAreNotCheckedByDefault(@TempDir Path tmp) throws Exception {
+		start(tmp, false);
+		mode(root, 0777);
+		TestClient tony = as(TONY);
+		TestClient pat = as(PAT);
+		long tonyId = clientid(tony, "tony");
+		clientid(pat, "pat");
+		byte[] rootFh = rootFh(tony);
+		Opened o = open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "f");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		mode(root.getChild("f"), 0600);
+		assertEquals(Nfs4.NFS4_OK, read(pat, o.fh));
+	}
+
+	/** Decision D73: a new file is tried as the caller's; when that can't be done it is said once. */
+	@Test
+	public void theOwnerOfANewFileIsTriedAndRefusalIsSaidOnce(@TempDir Path tmp) throws Exception {
+		property("test.acl.enforceModes", "true");
+		start(tmp, false);
+		mode(root, 0777);
+		TestClient tony = as(TONY);
+		long tonyId = clientid(tony, "tony");
+		byte[] rootFh = rootFh(tony);
+		assertTrue(infos.stream().anyMatch(m -> m.contains("mode bits of files are checked")), infos.toString());
+		assertEquals(Nfs4.NFS4_OK, open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "one").status);
+		mkdir(tony, rootFh, "two");
+		assertEquals(Nfs4.NFS4_OK, open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "three").status);
+		// the memory file system can't take an operating system user as owner, so each of these was refused
+		assertEquals(1, infos.stream().filter(m -> m.contains("keeps the owner the file system gave it")).count(), infos.toString());
 	}
 
 	@Test
