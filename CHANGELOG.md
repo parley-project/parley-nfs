@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-19: chown by the mapped root)
+
+- SETATTR of the owner or group is allowed for root (AUTH_SYS uid 0) when uid 0 is mapped to a registry user (the id
+  map's uid.0=name or a user's uid attribute) who may write the export; anyone else is refused as before, and so is an
+  unmapped root (decision D74). The new owner must be a user of the file system, else NFS4ERR_BADOWNER; a provider
+  that can't change owners answers NFS4ERR_PERM. A list or the modes don't stop that root.
+
 ### Added (2026-11-19: parley.nfs.enforceModes)
 
 - `parley.nfs.enforceModes` (default false): true to check the mode bits of a file that has no access control list,

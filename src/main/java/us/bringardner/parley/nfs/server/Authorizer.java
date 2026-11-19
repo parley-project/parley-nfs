@@ -160,6 +160,22 @@ public class Authorizer {
 		}
 	}
 
+	/**
+	 * @return true for root (AUTH_SYS uid 0) when the id map or the registry maps uid 0 to a user; an unmapped root
+	 * acts as the anonymous user and is not root here (decision D74)
+	 * @throws Nfs4Exception NFS4ERR_DELAY if the registry is unavailable
+	 */
+	public boolean isMappedRoot(Caller caller) throws Nfs4Exception {
+		if( caller.getFlavor() != Rpc.AUTH_SYS || caller.getUid() != 0 || numbers == null ) {
+			return false;
+		}
+		try {
+			return numbers.user(0) != null;
+		} catch (UserRegistryUnavailableException e) {
+			throw new Nfs4Exception(us.bringardner.parley.nfs.protocol.Nfs4.NFS4ERR_DELAY, e.getMessage());
+		}
+	}
+
 	/** The registry user a caller is: the Kerberos user, the id map's user for the uid, else the anonymous user; null for none. */
 	private String userName(Caller caller) throws UserRegistryUnavailableException {
 		boolean gss = caller.getFlavor() == Rpc.RPCSEC_GSS;
