@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-19: symbolic links)
+
+- Symbolic links are created (CREATE of type NF4LNK) and read (READLINK) with the exact text they were made with,
+  as the client sends it; a link has its own type, the size of its text and mode 0777; LOOKUP or OPEN through one is
+  NFS4ERR_SYMLINK; REMOVE takes the link, not its target (decision D72). Needs parley-files with
+  `createSymbolicLink(FileSource, String)` and `getLinkText()`. SETATTR of a link sets nothing.
+
 ### Changed (2026-11-18: ACCESS no longer depends on the server's user)
 
 - ACCESS for a file answers MODIFY, EXTEND and DELETE when any class (owner, group or other) has a write bit, the same

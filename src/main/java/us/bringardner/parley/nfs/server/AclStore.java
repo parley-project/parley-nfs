@@ -195,7 +195,7 @@ public final class AclStore {
 		int dropped = 0;
 		for (Map.Entry<Long, Entry> e : new ArrayList<Map.Entry<Long, Entry>>(entries.entrySet())) {
 			try {
-				if( !export.resolve(e.getValue().path).exists() ) {
+				if( !Attributes.present(export.resolve(e.getValue().path)) ) {
 					clear(e.getKey());
 					dropped++;
 				}

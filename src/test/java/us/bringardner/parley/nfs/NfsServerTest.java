@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -397,6 +398,50 @@ public class NfsServerTest {
 		assertEquals(0, v.remaining());
 	}
 
+	/** The same on a local folder: removing a link to a folder takes the link and leaves the folder, and a link isn't opened. */
+	@Test
+	public void symbolicLinksOnLocalFiles(@TempDir Path tmp) throws Exception {
+		Path probe = tmp.resolve("probe");
+		try {
+			Files.createSymbolicLink(probe, tmp);
+		} catch (IOException | UnsupportedOperationException e) {
+			org.junit.jupiter.api.Assumptions.assumeTrue(false, "no symbolic links here: " + e);
+		}
+		Files.delete(probe);
+		Files.createDirectories(tmp.resolve("folder"));
+		Files.write(tmp.resolve("folder").resolve("keep.txt"), bytes("keep"));
+		root = new us.bringardner.parley.files.fileproxy.FileProxyFactory().createFileSource(tmp.toString());
+		server = new NfsServer("test.nfs.local-links", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+		long id = clientid(c, "client-links");
+
+		Ops ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+		ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes("folder")).writeString("to-folder").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+		ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes("../outside")).writeString("up").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertEquals("folder", Files.readSymbolicLink(tmp.resolve("to-folder")).toString());
+		assertEquals("../outside", Files.readSymbolicLink(tmp.resolve("up")).toString());
+
+		// a folder is listed under its own name only, and a link isn't opened, even one to a folder
+		assertEquals(Nfs4.NFS4ERR_SYMLINK, open(c, 1, Nfs4.OPEN4_SHARE_ACCESS_READ, Nfs4.OPEN4_SHARE_DENY_NONE, id, "o", false, "to-folder").status);
+		assertEquals(Nfs4.NFS4ERR_SYMLINK, open(c, 1, Nfs4.OPEN4_SHARE_ACCESS_READ, Nfs4.OPEN4_SHARE_DENY_NONE, id, "o", false, "up").status);
+
+		// REMOVE of the link to a folder that has files: the link goes, the folder and its file stay
+		ops = new Ops().putroot().op(Nfs4.OP_REMOVE);
+		ops.args().writeString("to-folder");
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertFalse(Files.isSymbolicLink(tmp.resolve("to-folder")));
+		assertTrue(Files.exists(tmp.resolve("folder").resolve("keep.txt")));
+		ops = new Ops().putroot().op(Nfs4.OP_REMOVE);
+		ops.args().writeString("up");
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertFalse(Files.isSymbolicLink(tmp.resolve("up")));
+	}
+
 	/** What the server doesn't serve (links, devices, sockets, fifos) is refused with errors a Linux client can name (decision D24). */
 	@Test
 	public void unsupportedObjectsGiveNamedErrors() throws Exception {
@@ -406,14 +451,76 @@ public class NfsServerTest {
 		assertEquals(Nfs4.NFS4ERR_XDEV, c.compound(ops).status, "hard links");
 
 		ops = new Ops().putroot().op(Nfs4.OP_CREATE);
-		ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes("target")).writeString("sym").writeIntArray(new int[0]).writeInt(0);
-		assertEquals(Nfs4.NFS4ERR_PERM, c.compound(ops).status, "symbolic links");
-
-		ops = new Ops().putroot().op(Nfs4.OP_CREATE);
 		ops.args().writeInt(Nfs4.NF4FIFO).writeString("pipe").writeIntArray(new int[0]).writeInt(0);
 		assertEquals(Nfs4.NFS4ERR_PERM, c.compound(ops).status, "fifos");
-		assertFalse(root.getChild("sym").exists());
 		assertFalse(root.getChild("pipe").exists());
+	}
+
+	/**
+	 * Symbolic links keep the text they were made with (decision D72): CREATE, READLINK, the type and size, LOOKUP,
+	 * a link to nothing, no open or lookup through one, and REMOVE of the link and not of what it points to.
+	 */
+	@Test
+	public void symbolicLinksKeepTheirText() throws Exception {
+		TestClient c = start("test.nfs.symlinks", false);
+		assertTrue(root.getChild("real").mkdirs());
+		assertTrue(root.getChild("real").getChild("in").createNewFile());
+
+		for (String text : new String[] {"real", "../up/and/down", "/an/absolute/path", "no/such/place"}) {
+			String name = "l" + Math.abs(text.hashCode());
+			Ops ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+			ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes(text)).writeString(name).writeIntArray(new int[0]).writeInt(0);
+			ops.getfh();
+			Result r = c.compound(ops);
+			r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_CREATE);
+			r.in.readBoolean();
+			r.in.readLong();
+			r.in.readLong();
+			assertEquals(0, r.in.readIntArray(8).length);
+			r.ok(Nfs4.OP_GETFH);
+			byte[] fh = r.in.readOpaque(128);
+			assertEquals(text, root.getChild(name).getLinkText());
+
+			// READLINK gives the text back as it was
+			r = c.compound(new Ops().putfh(fh).op(Nfs4.OP_READLINK));
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_READLINK);
+			assertEquals(text, new String(r.in.readOpaque(4096), java.nio.charset.StandardCharsets.UTF_8));
+
+			// the type is a link and the size is the length of the text, even for a link to nothing
+			r = c.compound(new Ops().putfh(fh).getattr(Nfs4.FATTR4_TYPE, Nfs4.FATTR4_SIZE));
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_GETATTR);
+			r.in.readIntArray(8);
+			XdrDecoder v = new XdrDecoder(r.in.readOpaque(4096));
+			assertEquals(Nfs4.NF4LNK, v.readInt(), text);
+			assertEquals((long) bytes(text).length, v.readLong(), text);
+
+			// LOOKUP finds it (a link to nothing too), and nothing can be looked up in it
+			r = c.compound(new Ops().putroot().lookup(name).op(Nfs4.OP_READLINK));
+			r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_LOOKUP).ok(Nfs4.OP_READLINK);
+			ops = new Ops().putfh(fh).lookup("in");
+			assertEquals(Nfs4.NFS4ERR_SYMLINK, c.compound(ops).status, text);
+		}
+
+		// a name that is taken
+		Ops ops = new Ops().putroot().op(Nfs4.OP_CREATE);
+		ops.args().writeInt(Nfs4.NF4LNK).writeOpaque(bytes("other")).writeString("real").writeIntArray(new int[0]).writeInt(0);
+		assertEquals(Nfs4.NFS4ERR_EXIST, c.compound(ops).status);
+		// READLINK of what isn't a link
+		assertEquals(Nfs4.NFS4ERR_INVAL, c.compound(new Ops().putroot().lookup("real").op(Nfs4.OP_READLINK)).status);
+
+		// REMOVE takes the link out and leaves the folder it points to
+		String link = "l" + Math.abs("real".hashCode());
+		ops = new Ops().putroot().op(Nfs4.OP_REMOVE);
+		ops.args().writeString(link);
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertFalse(root.getChild(link).getLinkText() != null);
+		assertTrue(root.getChild("real").getChild("in").exists());
+		// and a link to nothing
+		String dangling = "l" + Math.abs("no/such/place".hashCode());
+		ops = new Ops().putroot().op(Nfs4.OP_REMOVE);
+		ops.args().writeString(dangling);
+		assertEquals(Nfs4.NFS4_OK, c.compound(ops).status);
+		assertNull(root.getChild(dangling).getLinkText());
 	}
 
 	@Test
