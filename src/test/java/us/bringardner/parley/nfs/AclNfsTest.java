@@ -781,6 +781,41 @@ public class AclNfsTest {
 		assertEquals("4242", f.getOwner().getName());
 	}
 
+	/** Decision D76: the mapped root is not held to mode bits (as on a Unix file system), everyone else still is. */
+	@Test
+	public void theMappedRootIsNotHeldToModes(@TempDir Path tmp) throws Exception {
+		rootName = "rootuser";
+		property("test.acl.enforceModes", "true");
+		start(tmp, false);
+		mode(root, 0777);
+		FileSourceUser tonyUser = new FileSourceUser(TONY, "tony");
+		TestClient tony = as(TONY);
+		TestClient pat = as(PAT);
+		TestClient admin = as(0);
+		long tonyId = clientid(tony, "tony");
+		clientid(pat, "pat");
+		clientid(admin, "admin");
+		byte[] rootFh = rootFh(tony);
+		Opened o = open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "f");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		FileSource f = root.getChild("f");
+		assertTrue(f.setOwner(tonyUser));
+		mode(f, 0600);
+		byte[] dir = mkdir(tony, rootFh, "d");
+		FileSource d = root.getChild("d");
+		assertTrue(d.setOwner(tonyUser));
+		mode(d, 0700);
+
+		assertEquals(Nfs4.NFS4ERR_ACCESS, read(pat, o.fh), "another user is held to the mode");
+		assertEquals(Nfs4.NFS4ERR_ACCESS, lookupStatus(pat, dir, "x"), "and to the folder's mode");
+		assertEquals(Nfs4.NFS4_OK, read(admin, o.fh), "the mapped root reads a file that is 0600");
+		assertEquals(Nfs4.NFS4_OK, open(admin, rootFh, clientid(admin, "admin2"), Nfs4.OPEN4_SHARE_ACCESS_WRITE, false, "f").status,
+				"and opens it for writing");
+		assertEquals(Nfs4.NFS4_OK, mkdirStatus(admin, dir, "made-by-root"), "and makes a folder in one that is 0700");
+		assertEquals(Nfs4.NFS4ERR_ACCESS, mkdirStatus(pat, dir, "x"));
+		assertEquals(Nfs4.NFS4_OK, remove(admin, rootFh, "f"), "and removes a file it doesn't own");
+	}
+
 	/** Decision D74: root that the id map doesn't map is the anonymous user and may not change an owner. */
 	@Test
 	public void anUnmappedRootMayNotChangeAnOwner(@TempDir Path tmp) throws Exception {
