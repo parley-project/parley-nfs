@@ -17,10 +17,12 @@
 #   VM            the Multipass VM                                  (default nfs-test)
 #   MAC_IP        the server's address as the VM sees it            (default 192.168.252.1)
 #   MOUNT         where the VM mounts it                            (default /mnt/sys-chown)
-#   TARGET_USER   a user this machine has, to give the file to      (default nobody)
-#   TARGET_GROUP  a group this machine has, and the VM has too      (default staff on a Mac; the VM must know it by name,
-#                 so the group check is skipped when the VM doesn't)
 #   CLIENT_EXEC   how a command runs in the VM                      (default multipass exec $VM --)
+#   TARGET_USER   a user the VM has, to give the file to            (default nobody)
+#   TARGET_GROUP  a group the VM has                                (default staff; the group check is skipped without it)
+#
+# With sec=sys a Linux client sends the NUMBER of the user (the VM's uid for TARGET_USER), not its name, so what this
+# machine must show afterwards is that same number; this machine needs no user of that name (D75).
 
 : "${EXPORT_DIR:=/Volumes/Data/nfs-test}"
 : "${EXPORT_NAME:=docs}"
@@ -39,18 +41,23 @@ FILE=$EXPORT_DIR/$NAME
 passed=0
 failed=0
 skipped=0
+LIMIT=${LIMIT:-30}                               # seconds a command in the VM may take
 
-vm() { $CLIENT_EXEC "$@"; }
+# a command in the VM, shown first, and cut off after LIMIT seconds so that nothing waits for ever
+vm() {
+	echo "        \$ $*" >&2
+	$CLIENT_EXEC timeout "$LIMIT" "$@"
+}
 
-# the owner and group of the file as this machine's operating system sees them
-owner_here() { stat -f %Su "$FILE" 2>/dev/null || stat -c %U "$FILE"; }
-group_here() { stat -f %Sg "$FILE" 2>/dev/null || stat -c %G "$FILE"; }
+# the uid and gid of the file as this machine's operating system has them
+uid_here() { stat -c %u "$FILE" 2>/dev/null || stat -f %u "$FILE"; }
+gid_here() { stat -c %g "$FILE" 2>/dev/null || stat -f %g "$FILE"; }
 
 ok()   { passed=$((passed+1)); echo "  PASS  $1"; }
-bad()  { failed=$((failed+1)); echo "  FAIL  $1"; [ -n "$2" ] && echo "        $2"; }
+bad()  { failed=$((failed+1)); echo "  FAIL  $1"; [ -n "$2" ] && echo "        $2"; return 0; }
 skip() { skipped=$((skipped+1)); echo "  SKIP  $1"; }
 
-# expect_refused "what" "command in the VM" : the command must fail; its message is shown
+# expect_refused "what" command... : the command must fail in the VM; its message is shown
 expect_refused() {
 	local what=$1; shift
 	local out
@@ -69,7 +76,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "chown test: $MAC_IP:/$EXPORT_NAME mounted with sec=sys at $MOUNT in $VM; server side $EXPORT_DIR"
-$UNMAPPED && echo "(--unmapped: the id map has no uid.0 line, so root is expected to be refused)"
+$UNMAPPED && echo "(--unmapped: the registry has no user for uid 0, so root is expected to be refused)"
 
 if [ "$(id -u)" != "0" ] && ! pgrep -u 0 -f "us.bringardner.parley.nfs.server.NfsServer" >/dev/null 2>&1; then
 	echo "  note: no server running as root was found by this script; it must be, or the operating system refuses the change"
@@ -88,51 +95,54 @@ else
 	bad "touch as the VM's user" "the mapped user may not write the export, or the folder isn't writable"
 	exit 1
 fi
-before=$(owner_here)
-echo "        owner here: $before, group $(group_here)"
+before_uid=$(uid_here)
+before_gid=$(gid_here)
+echo "        owner here: uid $before_uid, gid $before_gid"
+
+want_uid=$(vm id -u "$TARGET_USER" 2>/dev/null)
+want_gid=$(vm getent group "$TARGET_GROUP" 2>/dev/null | cut -d: -f3)
+if [ -z "$want_uid" ]; then
+	echo "the VM has no user $TARGET_USER (set TARGET_USER)"; exit 1
+fi
 
 echo "2. an ordinary user may not change the owner (the client refuses it before it reaches the server)"
 expect_refused "chown $TARGET_USER as the VM's user" "chown $TARGET_USER '$MOUNT/$NAME'"
-[ "$(owner_here)" = "$before" ] && ok "the owner is still $before" || bad "the owner changed to $(owner_here)"
+[ "$(uid_here)" = "$before_uid" ] && ok "the owner is still uid $before_uid" || bad "the owner is now uid $(uid_here)"
 
 echo "3. root"
 if $UNMAPPED; then
 	expect_refused "sudo chown $TARGET_USER with uid 0 not mapped" "sudo chown $TARGET_USER '$MOUNT/$NAME'"
-	[ "$(owner_here)" = "$before" ] && ok "the owner is still $before" || bad "the owner changed to $(owner_here)"
+	[ "$(uid_here)" = "$before_uid" ] && ok "the owner is still uid $before_uid" || bad "the owner is now uid $(uid_here)"
 else
 	if out=$(vm sudo chown "$TARGET_USER" "$MOUNT/$NAME" 2>&1); then
-		if [ "$(owner_here)" = "$TARGET_USER" ]; then
-			ok "sudo chown $TARGET_USER: the owner here is now $TARGET_USER"
+		if [ "$(uid_here)" = "$want_uid" ]; then
+			ok "sudo chown $TARGET_USER: the owner here is now uid $want_uid, the VM's uid for $TARGET_USER"
 		else
-			bad "sudo chown $TARGET_USER said yes but the owner here is $(owner_here)"
+			bad "sudo chown $TARGET_USER said yes" "the owner here is uid $(uid_here), expected $want_uid"
 		fi
 	else
-		bad "sudo chown $TARGET_USER" "$out; check the server log: is uid.0 in the id map, does that user have write on the export, is the server running as root, does this machine have a user $TARGET_USER?"
+		bad "sudo chown $TARGET_USER" "$out; check the server log: is uid 0 mapped to a registry user with write on the export, and is the server running as root?"
 	fi
 
-	if vm getent group "$TARGET_GROUP" >/dev/null 2>&1; then
+	if [ -n "$want_gid" ]; then
 		if out=$(vm sudo chown ":$TARGET_GROUP" "$MOUNT/$NAME" 2>&1); then
-			[ "$(group_here)" = "$TARGET_GROUP" ] && ok "sudo chown :$TARGET_GROUP: the group here is now $TARGET_GROUP" \
-				|| bad "sudo chown :$TARGET_GROUP said yes but the group here is $(group_here)"
+			[ "$(gid_here)" = "$want_gid" ] && ok "sudo chown :$TARGET_GROUP: the group here is now gid $want_gid" \
+				|| bad "sudo chown :$TARGET_GROUP said yes" "the group here is gid $(gid_here), expected $want_gid"
 		else
 			bad "sudo chown :$TARGET_GROUP" "$out"
 		fi
 	else
-		skip "the group check: the VM has no group $TARGET_GROUP (set TARGET_GROUP to one both have)"
+		skip "the group check: the VM has no group $TARGET_GROUP (set TARGET_GROUP)"
 	fi
 
 	echo "4. a name nobody has, and a number nobody maps (D75: a number goes to the operating system as a uid)"
 	expect_refused "sudo chown nosuchuser" "sudo chown nosuchuser '$MOUNT/$NAME'"
 	if vm sudo chown 12345 "$MOUNT/$NAME" >/dev/null 2>&1; then
-		[ "$(owner_here)" = "12345" ] && ok "sudo chown 12345: the owner here is the uid 12345" \
-			|| bad "sudo chown 12345 said yes but the owner here is $(owner_here)"
-		vm sudo chown "$TARGET_USER" "$MOUNT/$NAME" >/dev/null 2>&1
+		[ "$(uid_here)" = "12345" ] && ok "sudo chown 12345: the owner here is uid 12345" \
+			|| bad "sudo chown 12345 said yes" "the owner here is uid $(uid_here)"
 	else
 		bad "sudo chown 12345" "refused; a server running as root hands a number to the operating system as a uid"
 	fi
-	echo "5. a file's owner is shown as the operating system's uid when no id map names it"
-	own=$(vm stat -c %u "$MOUNT/$NAME" 2>/dev/null)
-	echo "        the VM sees uid $own for the owner $(owner_here) here"
 fi
 
 echo
