@@ -280,6 +280,14 @@ but with nothing to map: the id map isn't used, and the anonymous user never sta
 Kerberos principal. SECINFO lists the flavors taken, strongest first. A context lasts as long as
 its ticket, or until the client destroys it.
 
+## A client
+
+`us.bringardner.parley.nfs.client.NfsClient` is a generic NFSv4.0 client in this module (D77): AUTH_SYS, one connection,
+one mounted path. `info`, `exists`, `list`, `mkdir`, `remove`, `read`, `readAll` and `write` take paths below the mount.
+It sends no callback address, so the server gives it no delegations, and it renews its lease while open. Not yet
+built: Kerberos, locks, recovery after a server restart, rename, links and attribute changes. A FileSource over it
+is a separate module.
+
 ## Testing
 
 `mvn test` runs the protocol tests against a memory file system with a small test client. The
