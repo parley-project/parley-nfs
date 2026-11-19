@@ -28,3 +28,4 @@ parley.nfs.maxNodes
 parley.nfs.delegations
 parley.nfs.writeDelegations
 parley.nfs.mirrorLocks
+parley.nfs.enforceModes

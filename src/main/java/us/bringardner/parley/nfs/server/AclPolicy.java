@@ -73,6 +73,7 @@ public class AclPolicy {
 	private final UserRegistry registry;
 	private final long cacheMillis;
 	private final Map<String, Names> numbers = new ConcurrentHashMap<String, Names>();
+	private volatile boolean enforceModes;
 
 	/**
 	 * @param registry the user registry, null for none (numbers and names are then compared as given)
@@ -85,10 +86,44 @@ public class AclPolicy {
 		this.cacheMillis = cacheMillis;
 	}
 
+	/**
+	 * @param enforce true to check the mode bits of a file that has no list of its own (decision D73): the
+	 * mode is turned into a list and the caller is checked against it by name, like any other list
+	 */
+	public void setEnforceModes(boolean enforce) {
+		this.enforceModes = enforce;
+	}
+
+	public boolean isEnforceModes() {
+		return enforceModes;
+	}
+
+	/** @return true if this export checks anything beyond the registry: it has lists or the modes are enforced */
+	public boolean active(Export export) {
+		return enforceModes || export.getAcls() != null;
+	}
+
 	/** @return the file's list, null when it has none or ACLs are off */
 	public List<Ace> aclOf(Export export, Node node) {
 		AclStore store = export.getAcls();
 		return store == null ? null : store.get(node.getFileid());
+	}
+
+	/**
+	 * @return the list that decides for this file: its own if it has one, else (when the modes are enforced)
+	 * the one its mode bits make, else null for no check
+	 */
+	public List<Ace> aclOf(Export export, Node node, FileSource file) {
+		List<Ace> acl = aclOf(export, node);
+		if( acl != null || !enforceModes || file == null ) {
+			return acl;
+		}
+		try {
+			boolean dir = !Attributes.isLink(file) && file.isDirectory();
+			return Acls.fromMode(Attributes.mode(new Attributes.Source(export, node, file, null)), dir);
+		} catch (IOException | RuntimeException e) {
+			return null;
+		}
 	}
 
 	/**
@@ -97,7 +132,7 @@ public class AclPolicy {
 	 */
 	public boolean permits(Export export, Node node, FileSource file, Caller caller, InetAddress client, int mask)
 			throws Nfs4Exception {
-		List<Ace> acl = aclOf(export, node);
+		List<Ace> acl = aclOf(export, node, file);
 		if( acl == null ) {
 			return true;
 		}

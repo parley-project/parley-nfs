@@ -79,6 +79,7 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.delegations` | false | true to give read delegations (see "Delegations"); none are given while `mirrorLocks` is on |
 | `parley.nfs.writeDelegations` | false | true (with `delegations`) to give write delegations too |
 | `parley.nfs.mirrorLocks` | false | true to hold the clients' byte-range locks as FileSource locks too (see "Locks") |
+| `parley.nfs.enforceModes` | false | true to check the mode bits of files that have no access control list, by the caller's registry name (see "Permissions") |
 | `parley.nfs.maxNodes` | 100000 | The most files per export kept in memory; those nobody has asked for lately go first |
 | `parley.nfs.replayCacheSize` | 1024 | How many replies of COMPOUNDs that changed something are kept for a client that sends the call again; 0 for none |
 
@@ -120,6 +121,20 @@ and without an anonymous user that is refused ("access denied by server"). Root 
 unless the id map says so, so it acts as the anonymous user too. The id map is read when the server
 starts; the registry's own user file is read again when it changes. A refused call is logged once
 for each answer (a minute, `parley.nfs.authCacheTime`) at INFO with the user and the reason.
+
+## Permissions (the mode bits)
+
+By default the mode bits (owner, group, other) of a file are only reported, and the registry's `read` and
+`write` on the export are the only check. Set `parley.nfs.enforceModes=true` and the server checks them too,
+for every file that has no access control list of its own: read, write, list, look up, create, remove and
+rename. The caller is known by the registry name (the same as for access control lists): the mode is turned
+into a list (owner, group, everyone) and the owner is the file's owner by name, the group the caller's registry
+groups. A file that has a list of its own is decided by that list alone. The registry still checks first.
+
+A new file is given to the caller who made it when the file system can take it (a local file system whose
+operating system user has that name, and a server allowed to change owners); when it can't, the file keeps the
+owner it got, which is said once in the log, and the modes are then checked against that owner. Changing the
+owner of a file is still refused.
 
 ## Numbers for users and groups
 

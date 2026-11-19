@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-19: parley.nfs.enforceModes)
+
+- `parley.nfs.enforceModes` (default false): true to check the mode bits of a file that has no access control list,
+  by the caller's registry name, for read, write, list, look up, create, remove and rename; ACCESS then answers for
+  the caller. A new file is given to the caller who made it when the file system can; otherwise it is said once in
+  the log (decision D73). Nothing changes while the setting is off.
+
 ### Added (2026-11-19: symbolic links)
 
 - Symbolic links are created (CREATE of type NF4LNK) and read (READLINK) with the exact text they were made with,
