@@ -6,8 +6,9 @@
 
 - SETATTR of the owner or group is allowed for root (AUTH_SYS uid 0) when uid 0 is mapped to a registry user (the id
   map's uid.0=name or a user's uid attribute) who may write the export; anyone else is refused as before, and so is an
-  unmapped root (decision D74). The new owner must be a user of the file system, else NFS4ERR_BADOWNER; a provider
-  that can't change owners answers NFS4ERR_PERM. A list or the modes don't stop that root.
+  unmapped root (decision D74). The name goes to the FileSource (a FileSourceUser or FileSourceGroup, as owner-on-create does too), so each provider
+  decides: a number nobody has is NFS4ERR_BADOWNER, a provider with no such user or that can't change owners
+  answers NFS4ERR_PERM. A list or the modes don't stop that root.
 
 ### Added (2026-11-19: parley.nfs.enforceModes)
 

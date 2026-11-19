@@ -425,9 +425,7 @@ public class Compound {
 			if( name == null ) {
 				return;
 			}
-			java.nio.file.attribute.UserPrincipal p = java.nio.file.FileSystems.getDefault()
-					.getUserPrincipalLookupService().lookupPrincipalByName(name);
-			if( !f.setOwner(p) ) {
+			if( !f.setOwner(new us.bringardner.parley.files.FileSourceUser(0, name)) ) {
 				server.ownerOnCreateRefused("the file system said no");
 			}
 		} catch (Nfs4Exception e) {

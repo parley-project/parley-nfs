@@ -92,6 +92,8 @@ public class AclNfsTest {
 
 	/** The registry user that uid 0 is mapped to, null to leave root unmapped. */
 	private String rootName;
+	/** A local folder to export instead of the memory file system. */
+	private Path localFolder;
 
 	private void property(String name, String value) {
 		System.setProperty(name, value);
@@ -112,8 +114,9 @@ public class AclNfsTest {
 		if( mem == null ) {
 			mem = new MemoryFileSourceFactory();
 			mem.connect(new Properties());
-			root = mem.createFileSource("/export");
-			assertTrue(root.mkdirs());
+			root = localFolder == null ? mem.createFileSource("/export")
+					: us.bringardner.parley.files.FileSourceFactory.getDefaultFactory().createFileSource(localFolder.toString());
+			assertTrue(root.mkdirs() || root.exists());
 			export = new Export("test", root, false);
 			registry = new BasicUserRegistry(1000);
 			ParleyPrincipal staff = registry.createGroup("staff");
@@ -768,14 +771,12 @@ public class AclNfsTest {
 		assertTrue(own == Nfs4.NFS4ERR_PERM || own == Nfs4.NFS4ERR_ACCESS, "the owner may not give a file away: "+own);
 		int other = chown(as(PAT), o.fh, "pat");
 		assertTrue(other == Nfs4.NFS4ERR_PERM || other == Nfs4.NFS4ERR_ACCESS, "nor may another user: "+other);
-		int unknown = chown(admin, o.fh, "nosuchuser");
-		assertEquals(Nfs4.NFS4ERR_BADOWNER, unknown, "root gets as far as the file system, which has no such user");
-		int known = chown(admin, o.fh, "nobody");
-		assertTrue(known == Nfs4.NFS4ERR_PERM || known == Nfs4.NFS4ERR_BADOWNER,
-				"the memory file system can't take an operating system user: "+known);
-		assertEquals("tony", f.getOwner().getName());
-		// the mode of the file and a list that gives root nothing don't stop root before the file system is asked
-		assertEquals(Nfs4.NFS4ERR_BADOWNER, chown(admin, o.fh, "nosuchuser"));
+		// root is let through whatever the mode and the lists say; the memory file system takes any name
+		assertEquals(Nfs4.NFS4_OK, chown(admin, o.fh, "pat@example.org"));
+		assertEquals("pat", f.getOwner().getName());
+		assertEquals(Nfs4.NFS4_OK, chown(admin, o.fh, Long.toString(BOB)), "a number goes through the id map");
+		assertEquals("bob", f.getOwner().getName());
+		assertEquals(Nfs4.NFS4ERR_BADOWNER, chown(admin, o.fh, "4242"), "a number nobody has");
 	}
 
 	/** Decision D74: root that the id map doesn't map is the anonymous user and may not change an owner. */
@@ -792,20 +793,38 @@ public class AclNfsTest {
 		assertTrue(status == Nfs4.NFS4ERR_PERM || status == Nfs4.NFS4ERR_ACCESS, "root is only the anonymous user here: "+status);
 	}
 
-	/** Decision D73: a new file is tried as the caller's; when that can't be done it is said once. */
+	/** Decision D73: a new file is given to the caller who made it, when the file system can. */
 	@Test
-	public void theOwnerOfANewFileIsTriedAndRefusalIsSaidOnce(@TempDir Path tmp) throws Exception {
+	public void aNewFileBelongsToItsCaller(@TempDir Path tmp) throws Exception {
 		property("test.acl.enforceModes", "true");
 		start(tmp, false);
 		mode(root, 0777);
-		TestClient tony = as(TONY);
-		long tonyId = clientid(tony, "tony");
-		byte[] rootFh = rootFh(tony);
+		TestClient pat = as(PAT);
+		long patId = clientid(pat, "pat");
+		byte[] rootFh = rootFh(pat);
 		assertTrue(infos.stream().anyMatch(m -> m.contains("mode bits of files are checked")), infos.toString());
-		assertEquals(Nfs4.NFS4_OK, open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "one").status);
-		mkdir(tony, rootFh, "two");
-		assertEquals(Nfs4.NFS4_OK, open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "three").status);
-		// the memory file system can't take an operating system user as owner, so each of these was refused
+		assertEquals(Nfs4.NFS4_OK, open(pat, rootFh, patId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "one").status);
+		mkdir(pat, rootFh, "two");
+		assertEquals("pat", root.getChild("one").getOwner().getName());
+		assertEquals("pat", root.getChild("two").getOwner().getName());
+		assertTrue(infos.stream().noneMatch(m -> m.contains("keeps the owner")), infos.toString());
+	}
+
+	/** Decision D73: when the owner can't be set it is said once. */
+	@Test
+	public void aRefusedOwnerIsSaidOnce(@TempDir Path tmp) throws Exception {
+		// a local export: the operating system has no user of this name, so FileProxy refuses
+		rootName = "zz-no-such-os-user";
+		localFolder = Files.createDirectory(tmp.resolve("export"));
+		property("test.acl.enforceModes", "true");
+		start(tmp, false);
+		mode(root, 0777);
+		TestClient admin = as(0);
+		long id = clientid(admin, "admin");
+		byte[] rootFh = rootFh(admin);
+		assertEquals(Nfs4.NFS4_OK, open(admin, rootFh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "one").status);
+		mkdir(admin, rootFh, "two");
+		assertEquals(Nfs4.NFS4_OK, open(admin, rootFh, id, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "three").status);
 		assertEquals(1, infos.stream().filter(m -> m.contains("keeps the owner the file system gave it")).count(), infos.toString());
 	}
 
