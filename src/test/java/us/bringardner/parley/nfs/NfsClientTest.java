@@ -48,6 +48,7 @@ import us.bringardner.parley.iam.ParleyPrincipal;
 import us.bringardner.parley.iam.permission.BasicParleyPermission;
 import us.bringardner.parley.iam.permission.StandardPermissions;
 import us.bringardner.parley.iam.registry.BasicUserRegistry;
+import us.bringardner.parley.files.FileSourceUser;
 import us.bringardner.parley.files.memory.MemoryFileSourceFactory;
 import us.bringardner.parley.nfs.client.NfsClient;
 import us.bringardner.parley.nfs.client.NfsException;
@@ -236,7 +237,15 @@ public class NfsClientTest {
 		System.setProperty(prefix+".domain", "example.org");
 		System.setProperty(prefix+".enforceModes", "true");
 		try {
-			mem = new MemoryFileSourceFactory();
+			// the store is the superuser's, as a real NFS server's is: the server decides who may do what (D79)
+			mem = new MemoryFileSourceFactory() {
+				private static final long serialVersionUID = 1L;
+
+				@Override
+				public FileSourceUser whoAmI() {
+					return new FileSourceUser(0, "root", 0, "wheel");
+				}
+			};
 			mem.connect(new Properties());
 			root = mem.createFileSource("/export");
 			assertTrue(root.mkdirs());
@@ -269,7 +278,7 @@ public class NfsClientTest {
 
 			// the owner uses what it made
 			assertEquals("mine", new String(tony.readAll("d/f"), StandardCharsets.UTF_8));
-			tony.write("d/f", 4, bytes("!"));   // the memory file system only appends
+			tony.write("d/f", 0, bytes("mine!"));   // the owner overwrites its own file
 			// another user may look and read, not change
 			assertEquals("mine!", new String(pat.readAll("d/f"), StandardCharsets.UTF_8));
 			assertEquals(1, pat.list("d").size());

@@ -112,7 +112,15 @@ public class AclNfsTest {
 			property("test.acl.stateDir", tmp.resolve("state").toString());
 		}
 		if( mem == null ) {
-			mem = new MemoryFileSourceFactory();
+			// the store is the superuser's, as a real NFS server's is: only the superuser gives a file away (D79)
+			mem = new MemoryFileSourceFactory() {
+				private static final long serialVersionUID = 1L;
+
+				@Override
+				public FileSourceUser whoAmI() {
+					return new FileSourceUser(0, "root", 0, "wheel");
+				}
+			};
 			mem.connect(new Properties());
 			root = localFolder == null ? mem.createFileSource("/export")
 					: us.bringardner.parley.files.FileSourceFactory.getDefaultFactory().createFileSource(localFolder.toString());
