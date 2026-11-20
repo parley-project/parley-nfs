@@ -73,7 +73,8 @@ public class NfsClient implements Closeable {
 	private static final int FILE_MODE = 0644;
 
 	private static final int[] FILE_ATTRS = bitmap(Nfs4.FATTR4_TYPE, Nfs4.FATTR4_SIZE, Nfs4.FATTR4_FILEID,
-			Nfs4.FATTR4_MODE, Nfs4.FATTR4_TIME_MODIFY);
+			Nfs4.FATTR4_MODE, Nfs4.FATTR4_TIME_MODIFY, Nfs4.FATTR4_OWNER, Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_NUMLINKS,
+			Nfs4.FATTR4_TIME_ACCESS, Nfs4.FATTR4_TIME_METADATA, Nfs4.FATTR4_TIME_CREATE);
 	private static final byte[] NO_STATE = new byte[12];
 	private static final int RETRIES = 10;
 	private static final long RETRY_WAIT = 500;
@@ -110,6 +111,8 @@ public class NfsClient implements Closeable {
 	private String sharedOwner;
 	private int sharedSeq;
 	private int ownerCount;
+	/** counts the connections: what is opened on one is not valid on the next */
+	private int generation;
 	/** the largest file whose bytes a read delegation lets the client keep */
 	static final int MAX_CACHED = 4 << 20;
 	private final List<NfsLock> locks = new ArrayList<NfsLock>();
@@ -193,6 +196,7 @@ public class NfsClient implements Closeable {
 				delegations.clear();
 			}
 			rotateOwner();
+			generation++;
 			if( callbacks != null ) {
 				callbacks.setServer(s.getInetAddress());
 			}
@@ -588,29 +592,197 @@ public class NfsClient implements Closeable {
 		dropCached();
 		Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true);
 		try {
-			int done = 0;
-			while( done < data.length || data.length == 0 && done == 0 ) {
-				int n = Math.min(CHUNK, data.length-done);
-				Compound c = new Compound().putfh(o.fh);
-				XdrEncoder a = c.op(Nfs4.OP_WRITE).args;
-				a.writeInt(o.seqid).writeFixedOpaque(o.other);
-				a.writeLong(offset+done).writeInt(Nfs4.FILE_SYNC4).writeOpaque(data, done, n);
-				Reply r = call(c, "write "+path);
-				r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_WRITE);
-				int count = r.in.readInt();
-				if( count <= 0 && n > 0 ) {
-					throw new IOException("write "+path+": the server wrote nothing");
-				}
-				done += count;
-				if( n == 0 ) {
-					break;
-				}
-			}
+			writeOpen(o, path, offset, data, 0, data.length);
 		} finally {
 			closeOpen(o);
 		}
 	}
 
+	private void writeOpen(Opened o, String path, long offset, byte[] data, int off, int len) throws IOException {
+		int done = 0;
+		while( done < len || len == 0 && done == 0 ) {
+			int n = Math.min(CHUNK, len-done);
+			Compound c = new Compound().putfh(o.fh);
+			XdrEncoder a = c.op(Nfs4.OP_WRITE).args;
+			a.writeInt(o.seqid).writeFixedOpaque(o.other);
+			a.writeLong(offset+done).writeInt(Nfs4.FILE_SYNC4).writeOpaque(data, off+done, n);
+			Reply r = call(c, "write "+path);
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_WRITE);
+			int count = r.in.readInt();
+			if( count <= 0 && n > 0 ) {
+				throw new IOException("write "+path+": the server wrote nothing");
+			}
+			done += count;
+			if( n == 0 ) {
+				break;
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------ more of a file (D87)
+
+	/**
+	 * What the server lets this client's user do to a path.
+	 * @param mask ACCESS4_ bits asked about (Nfs4.ACCESS4_READ ...)
+	 * @return the bits the server allows (a path that isn't there is NfsException isNotFound)
+	 */
+	public synchronized int access(String path, int mask) throws IOException {
+		return run(true, () -> {
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_ACCESS).args.writeInt(mask);
+			Reply r = call(c, "access "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_ACCESS);
+			r.in.readInt();
+			return r.in.readInt();
+		});
+	}
+
+	/** @return the text of a symbolic link */
+	public synchronized String readLink(String path) throws IOException {
+		return run(true, () -> {
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_READLINK);
+			Reply r = call(c, "readlink "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_READLINK);
+			return r.in.readString(Nfs4.NFS4_OPAQUE_LIMIT*8);
+		});
+	}
+
+	/** Make a symbolic link at path that holds this text (the folder that holds it must exist). */
+	public synchronized void symlink(String path, String text) throws IOException {
+		run(false, () -> {
+			Path p = split(path);
+			Compound c = new Compound();
+			lookupParent(c, p);
+			c.op(Nfs4.OP_CREATE).args.writeInt(Nfs4.NF4LNK).writeString(text).writeString(p.name).writeInt(0).writeInt(0);
+			Reply r = call(c, "symlink "+path);
+			skipLookup(r, p.parents);
+			r.ok(Nfs4.OP_CREATE);
+			return null;
+		});
+	}
+
+	/** Change attributes of a file or folder (only those set in the argument). */
+	public synchronized void setAttributes(String path, NfsSetAttributes attrs) throws IOException {
+		if( attrs.isEmpty() ) {
+			return;
+		}
+		run(true, () -> {
+			Compound c = new Compound();
+			lookup(c, path);
+			XdrEncoder a = c.op(Nfs4.OP_SETATTR).args;
+			a.writeInt(0).writeFixedOpaque(NO_STATE);
+			byte[] values = attrs.values();
+			int[] map = attrs.bitmap();
+			int n = map[1] != 0 ? 2 : 1;
+			a.writeIntArray(java.util.Arrays.copyOf(map, n)).writeOpaque(values);
+			Reply r = call(c, "setattr "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_SETATTR);
+			return null;
+		});
+	}
+
+	/**
+	 * Keep a file open for reads and writes at offsets.
+	 * @param write true to open it for writing too (then it must be writable); false for reading
+	 * @param create true to make a file that isn't there (with write)
+	 */
+	public synchronized NfsOpenFile openFile(String path, boolean write, boolean create) throws IOException {
+		NfsOpenFile f = new NfsOpenFile(this, path, write);
+		run(false, () -> {
+			f.state = openState(path, write, create);
+			return null;
+		});
+		return f;
+	}
+
+	private OpenState openState(String path, boolean write, boolean create) throws IOException {
+		OpenState st = new OpenState();
+		st.opened = open(path, write ? Nfs4.OPEN4_SHARE_ACCESS_BOTH : Nfs4.OPEN4_SHARE_ACCESS_READ, create, false);
+		st.generation = generation;
+		return st;
+	}
+
+	/** After the connection was made again the open is gone: open the file again by its path. */
+	private OpenState current(NfsOpenFile f) throws IOException {
+		if( f.closed ) {
+			throw new IOException("the file is closed: "+f.getPath());
+		}
+		if( f.state == null || f.state.generation != generation ) {
+			f.state = openState(f.getPath(), f.isWritable(), false);
+		}
+		return f.state;
+	}
+
+	synchronized byte[] readFrom(NfsOpenFile f, long offset, int count) throws IOException {
+		return run(true, () -> {
+			OpenState st = current(f);
+			java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream(Math.min(count, CHUNK));
+			while( all.size() < count ) {
+				byte[] b = readOpen(st.opened, offset+all.size(), count-all.size());
+				if( b.length == 0 ) {
+					break;
+				}
+				all.write(b);
+			}
+			return all.toByteArray();
+		});
+	}
+
+	synchronized void writeTo(NfsOpenFile f, long offset, byte[] data, int off, int len) throws IOException {
+		dropCached();
+		run(true, () -> {
+			writeOpen(current(f).opened, f.getPath(), offset, data, off, len);
+			return null;
+		});
+	}
+
+	synchronized long sizeOf(NfsOpenFile f) throws IOException {
+		return run(true, () -> {
+			Compound c = new Compound().putfh(current(f).opened.fh);
+			c.op(Nfs4.OP_GETATTR).args.writeIntArray(bitmap(Nfs4.FATTR4_SIZE));
+			Reply r = call(c, "size "+f.getPath());
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_GETATTR);
+			return attributes(null, null, r.in).getSize();
+		});
+	}
+
+	synchronized void truncateOf(NfsOpenFile f, long size) throws IOException {
+		dropCached();
+		run(true, () -> {
+			Opened o = current(f).opened;
+			Compound c = new Compound().putfh(o.fh);
+			XdrEncoder a = c.op(Nfs4.OP_SETATTR).args;
+			a.writeInt(o.seqid).writeFixedOpaque(o.other);
+			a.writeIntArray(bitmap(Nfs4.FATTR4_SIZE)).writeInt(8).writeLong(size);
+			call(c, "truncate "+f.getPath()).ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_SETATTR);
+			return null;
+		});
+	}
+
+	synchronized void closeFile(NfsOpenFile f) throws IOException {
+		if( f.closed ) {
+			return;
+		}
+		f.closed = true;
+		OpenState st = f.state;
+		f.state = null;
+		if( st != null && st.generation == generation && !this.closed ) {
+			try {
+				closeOpen(st.opened);
+			} catch (IOException e) {
+				// the connection or the state is gone, so the open is too
+				if( !isConnectionLost(e) && !(e instanceof NfsException && isStateGone(((NfsException) e).getStatus())) ) {
+					throw e;
+				}
+			}
+		}
+	}
 
 	// ------------------------------------------------------------------ locks (D85)
 
@@ -811,6 +983,12 @@ public class NfsClient implements Closeable {
 	}
 
 	// ------------------------------------------------------------------ opens
+
+	/** An open of a file: its state in the server. */
+	static final class OpenState {
+		Opened opened;
+		int generation;
+	}
 
 	private static final class Opened {
 		byte[] fh;
@@ -1197,6 +1375,12 @@ public class NfsClient implements Closeable {
 		long fileId = -1;
 		int mode = -1;
 		long time = -1;
+		String owner = null;
+		String group = null;
+		long atime = -1;
+		long ctime = -1;
+		long btime = -1;
+		int links = -1;
 		for (int w = 0; w < map.length; w++) {
 			for (int b = 0; b < 32; b++) {
 				if( (map[w] & (1 << b)) == 0 ) {
@@ -1207,17 +1391,26 @@ public class NfsClient implements Closeable {
 				case Nfs4.FATTR4_SIZE: size = a.readLong(); break;
 				case Nfs4.FATTR4_FILEID: fileId = a.readLong(); break;
 				case Nfs4.FATTR4_MODE: mode = a.readInt(); break;
-				case Nfs4.FATTR4_TIME_MODIFY:
-					long sec = a.readLong();
-					long nsec = a.readUnsignedInt();
-					time = sec*1000+nsec/1000000;
-					break;
+				case Nfs4.FATTR4_TIME_MODIFY: time = readTime(a); break;
+				case Nfs4.FATTR4_TIME_ACCESS: atime = readTime(a); break;
+				case Nfs4.FATTR4_TIME_METADATA: ctime = readTime(a); break;
+				case Nfs4.FATTR4_TIME_CREATE: btime = readTime(a); break;
+				case Nfs4.FATTR4_OWNER: owner = a.readString(Nfs4.NFS4_OPAQUE_LIMIT); break;
+				case Nfs4.FATTR4_OWNER_GROUP: group = a.readString(Nfs4.NFS4_OPAQUE_LIMIT); break;
+				case Nfs4.FATTR4_NUMLINKS: links = (int) a.readUnsignedInt(); break;
 				default:
 					throw new IOException("the server sent attribute "+(w*32+b)+" that was not asked for");
 				}
 			}
 		}
-		return new NfsFileInfo(name, fh, type, size, fileId, mode, time);
+		return new NfsFileInfo(name, fh, type, size, fileId, mode, time, owner, group, atime, ctime, btime, links);
+	}
+
+	/** nfstime4: seconds and nanoseconds, as milliseconds */
+	private static long readTime(XdrDecoder a) throws IOException {
+		long sec = a.readLong();
+		long nsec = a.readUnsignedInt();
+		return sec*1000+nsec/1000000;
 	}
 
 	private static int[] bitmap(int... bits) {

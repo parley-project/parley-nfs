@@ -2,6 +2,17 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-20: what a FileSource needs of the client, T10, D87)
+
+- `NfsFileInfo` also has the owner, the group (as the server names them: "name@domain" or a number), the access, change
+  and creation times (-1 when the server has none) and the number of links.
+- `setAttributes(path, NfsSetAttributes)` changes the permission bits, owner, group, access time and modify time (SETATTR);
+  `access(path, mask)` asks what the user may do (ACCESS); `readLink(path)` and `symlink(path, text)`.
+- `openFile(path, write, create)` returns an `NfsOpenFile` that stays open: `read(offset, count)`, `write(offset, ...)`,
+  `size()`, `truncate(size)` and `close()`, without an open and close for each call. After a lost connection or a restart
+  the file is opened again by its path (the state of the open is gone).
+- Tests: `NfsClientFilesTest`.
+
 ### Added (2026-11-20: the client takes read delegations, T9b)
 
 - `new NfsClient(host, port, mount, uid, gid, timeoutMillis, true)` (or the Kerberos form with the flag) runs a callback
