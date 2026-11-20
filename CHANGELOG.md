@@ -2,11 +2,22 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-20: the client recovers, T7)
+
+- `NfsClient` gets its connection and client id back after the server restarts, the connection is lost or the lease
+  runs out. The client holds nothing between operations (each one opens and closes), so there is nothing to reclaim:
+  recovery is a new connection, SETCLIENTID and the mount. The renewal thread does it as soon as a renewal fails, and
+  an operation does it when it meets a lost connection or an answer that the client id or state is gone. After that
+  the operation is run once more if it is safe to repeat (reads, listings, write at an offset, truncate), and after a
+  server's rejection (the operation was not done) any operation is. A lost connection during a make-a-folder, remove or
+  rename throws the connection error (it is not known if it was done), with the connection made again for the next call.
+  A lost server is logged once as a warning, and a reconnect as an info line (System.Logger).
+
 ### Added (2026-11-20: client rename and truncate)
 
 - `NfsClient.rename(from, to)` (a file at the new name is replaced; the folder for the new name must exist) and
   `NfsClient.truncate(path, size)` (shorter drops the end, longer adds zeros; the file must exist). Still not in the
-  client: Kerberos, delegations and callbacks, locks, recovery after a server restart, links, other attribute changes.
+  client: Kerberos, delegations and callbacks, locks, links, other attribute changes.
 
 ### Added (2026-11-20: the client against a real server)
 
@@ -18,7 +29,7 @@
 - `us.bringardner.parley.nfs.client.NfsClient`: a generic NFSv4.0 client (AUTH_SYS) that mounts a path of a server and
   gets information about a file, lists a folder, reads, writes, makes folders and removes, and renews its lease. It uses
   the `rpc` package of this module and knows nothing of FileSource (a FileSource over it is a separate module).
-  Not yet: Kerberos, delegations and callbacks, locks, recovery after a server restart, links, attribute changes.
+  Not yet: Kerberos, delegations and callbacks, locks, links, attribute changes.
 
 ### Added (2026-11-19: the mapped root and modes, D76)
 

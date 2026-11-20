@@ -76,9 +76,17 @@ public class NfsClient implements Closeable {
 	private static final int RETRIES = 10;
 	private static final long RETRY_WAIT = 500;
 
-	private final Socket socket;
-	private final DataInputStream in;
-	private final OutputStream out;
+	private static final System.Logger LOG = System.getLogger(NfsClient.class.getName());
+
+	// the connection is replaced when it is lost (reconnect)
+	private volatile Socket socket;
+	private volatile DataInputStream in;
+	private volatile OutputStream out;
+	private final String host;
+	private final int port;
+	private final String mountPath;
+	private final int timeoutMillis;
+	private boolean reportedLost;
 	private final String machineName;
 	private final long uid;
 	private final long gid;
@@ -113,19 +121,107 @@ public class NfsClient implements Closeable {
 		byte[] r = new byte[6];
 		new SecureRandom().nextBytes(r);
 		this.ownerPrefix = "parley-"+machineName+"-"+Long.toHexString(ByteBuffer.wrap(new byte[] {0, 0, r[0], r[1], r[2], r[3], r[4], r[5]}).getLong());
-		socket = new Socket();
+		this.host = host;
+		this.port = port;
+		this.mountPath = mount;
+		this.timeoutMillis = timeoutMillis;
 		try {
-			socket.connect(new InetSocketAddress(host, port), timeoutMillis);
-			socket.setSoTimeout(timeoutMillis);
-			in = new DataInputStream(socket.getInputStream());
-			out = socket.getOutputStream();
-			setClientId();
-			mount(mount);
+			connect();
 			startRenewing();
 		} catch (IOException | RuntimeException e) {
 			close();
 			throw e;
 		}
+	}
+
+	/** Connect, get a client id and mount: the whole state this client has, so it is all that recovery needs. */
+	private void connect() throws IOException {
+		Socket s = new Socket();
+		try {
+			s.connect(new InetSocketAddress(host, port), timeoutMillis);
+			s.setSoTimeout(timeoutMillis);
+			socket = s;
+			in = new DataInputStream(s.getInputStream());
+			out = s.getOutputStream();
+			setClientId();
+			mount(mountPath);
+		} catch (IOException | RuntimeException e) {
+			try {
+				s.close();
+			} catch (IOException ignore) {
+				// the first failure is the one to report
+			}
+			throw e;
+		}
+	}
+
+	/**
+	 * A new connection and a new client id, after the connection was lost, the server restarted or the lease ran
+	 * out. Nothing is reclaimed: every operation of this client opens what it needs and closes it again, so no
+	 * open, lock or delegation is held between operations.
+	 */
+	private synchronized void reconnect() throws IOException {
+		if( closed ) {
+			throw new IOException("the client is closed");
+		}
+		Socket old = socket;
+		if( old != null ) {
+			try {
+				old.close();
+			} catch (IOException ignore) {
+				// it is being replaced
+			}
+		}
+		connect();
+		reportedLost = false;
+		LOG.log(System.Logger.Level.INFO, "NFS client reconnected to "+host+":"+port);
+	}
+
+	/** One operation of this client, which can be run again. */
+	@FunctionalInterface
+	private interface Operation<T> {
+		T run() throws IOException;
+	}
+
+	/**
+	 * Run an operation; if the server says the client id or the state is gone (it restarted, the lease ran out) or the
+	 * connection is lost, reconnect and run it once more. The server's own rejection (stale or expired client id or
+	 * state, a stale handle) means the operation was not done, so any operation is repeated. A lost connection leaves
+	 * it unknown whether the operation was done: only one that is safe to repeat (safe is true: reads, and a write or
+	 * truncate to given bytes or size) is run again; the others (make a folder, remove, rename) throw the connection's
+	 * IOException, after the connection is made again for the caller's next call.
+	 */
+	private <T> T run(boolean safe, Operation<T> op) throws IOException {
+		try {
+			return op.run();
+		} catch (IOException e) {
+			boolean rejected = e instanceof NfsException && isStateGone(((NfsException) e).getStatus());
+			boolean lost = isConnectionLost(e);
+			if( closed || !(rejected || lost) ) {
+				throw e;
+			}
+			try {
+				reconnect();
+			} catch (IOException again) {
+				e.addSuppressed(again);
+				throw e;
+			}
+			if( lost && !safe ) {
+				// the connection is back for the caller's next call, but this one may or may not have been done
+				throw e;
+			}
+			return op.run();
+		}
+	}
+
+	/** The connection failed (reset, closed by the server, no answer in time), as against an operation the server refused. */
+	private static boolean isConnectionLost(IOException e) {
+		return e instanceof java.net.SocketException || e instanceof java.io.EOFException || e instanceof java.net.SocketTimeoutException;
+	}
+
+	private static boolean isStateGone(int status) {
+		return status == Nfs4.NFS4ERR_STALE_CLIENTID || status == Nfs4.NFS4ERR_EXPIRED || status == Nfs4.NFS4ERR_STALE_STATEID
+				|| status == Nfs4.NFS4ERR_BAD_STATEID || status == Nfs4.NFS4ERR_STALE || status == Nfs4.NFS4ERR_FHEXPIRED;
 	}
 
 	/** @return the lease time in seconds the server gave */
@@ -145,7 +241,10 @@ public class NfsClient implements Closeable {
 				Thread.currentThread().interrupt();
 			}
 		}
-		socket.close();
+		Socket s = socket;
+		if( s != null ) {
+			s.close();
+		}
 	}
 
 	// ------------------------------------------------------------------ files
@@ -156,6 +255,10 @@ public class NfsClient implements Closeable {
 	 * @throws NfsException with isNotFound() when it doesn't exist
 	 */
 	public synchronized NfsFileInfo info(String path) throws IOException {
+		return run(true, () -> infoOnce(path));
+	}
+
+	private NfsFileInfo infoOnce(String path) throws IOException {
 		Compound c = new Compound();
 		lookup(c, path);
 		c.op(Nfs4.OP_GETFH);
@@ -186,6 +289,10 @@ public class NfsClient implements Closeable {
 	 * @return its entries, without handles (info(path) gives one), in the server's order
 	 */
 	public synchronized List<NfsFileInfo> list(String path) throws IOException {
+		return run(true, () -> listOnce(path));
+	}
+
+	private List<NfsFileInfo> listOnce(String path) throws IOException {
 		byte[] fh = info(path).getHandle();
 		List<NfsFileInfo> ret = new ArrayList<NfsFileInfo>();
 		long cookie = 0;
@@ -210,6 +317,13 @@ public class NfsClient implements Closeable {
 
 	/** Make a folder (the one that holds it must exist). */
 	public synchronized void mkdir(String path) throws IOException {
+		run(false, () -> {
+			mkdirOnce(path);
+			return null;
+		});
+	}
+
+	private void mkdirOnce(String path) throws IOException {
 		Path p = split(path);
 		Compound c = new Compound();
 		lookupParent(c, p);
@@ -221,6 +335,13 @@ public class NfsClient implements Closeable {
 
 	/** Remove a file or an empty folder. */
 	public synchronized void remove(String path) throws IOException {
+		run(false, () -> {
+			removeOnce(path);
+			return null;
+		});
+	}
+
+	private void removeOnce(String path) throws IOException {
 		Path p = split(path);
 		Compound c = new Compound();
 		lookupParent(c, p);
@@ -235,6 +356,13 @@ public class NfsClient implements Closeable {
 	 * when it is empty); the folder that is to hold the new name must exist.
 	 */
 	public synchronized void rename(String from, String to) throws IOException {
+		run(false, () -> {
+			renameOnce(from, to);
+			return null;
+		});
+	}
+
+	private void renameOnce(String from, String to) throws IOException {
 		Path src = split(from);
 		Path dst = split(to);
 		Compound c = new Compound();
@@ -254,6 +382,13 @@ public class NfsClient implements Closeable {
 	 * It is opened for writing for this, so the server can tell who changes it.
 	 */
 	public synchronized void truncate(String path, long size) throws IOException {
+		run(true, () -> {
+			truncateOnce(path, size);
+			return null;
+		});
+	}
+
+	private void truncateOnce(String path, long size) throws IOException {
 		if( size < 0 ) {
 			throw new IllegalArgumentException("a size can't be negative: "+size);
 		}
@@ -275,6 +410,10 @@ public class NfsClient implements Closeable {
 	 * @return the bytes (fewer, even none, at the end of the file)
 	 */
 	public synchronized byte[] read(String path, long offset, int count) throws IOException {
+		return run(true, () -> readOnce(path, offset, count));
+	}
+
+	private byte[] readOnce(String path, long offset, int count) throws IOException {
 		Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
 		try {
 			return readOpen(o, offset, count);
@@ -285,6 +424,10 @@ public class NfsClient implements Closeable {
 
 	/** @return the whole file */
 	public synchronized byte[] readAll(String path) throws IOException {
+		return run(true, () -> readAllOnce(path));
+	}
+
+	private byte[] readAllOnce(String path) throws IOException {
 		Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
 		try {
 			java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream();
@@ -307,6 +450,13 @@ public class NfsClient implements Closeable {
 	 * server when this returns. What is already in the file beyond the bytes written stays.
 	 */
 	public synchronized void write(String path, long offset, byte[] data) throws IOException {
+		run(true, () -> {
+			writeOnce(path, offset, data);
+			return null;
+		});
+	}
+
+	private void writeOnce(String path, long offset, byte[] data) throws IOException {
 		Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true);
 		try {
 			int done = 0;
@@ -582,7 +732,16 @@ public class NfsClient implements Closeable {
 			c.op(Nfs4.OP_RENEW).args.writeLong(clientId);
 			call(c, "renew").ok(Nfs4.OP_RENEW);
 		} catch (IOException | RuntimeException e) {
-			// the next call of the client reports a connection that is gone
+			// the lease or the connection is gone: get them back now, so the next call finds a client that works
+			try {
+				reconnect();
+			} catch (IOException | RuntimeException again) {
+				if( !reportedLost ) {
+					reportedLost = true;
+					LOG.log(System.Logger.Level.WARNING, "NFS client lost its server "+host+":"+port+" ("+e+"); trying again every "
+							+Math.max(1, leaseSeconds/2)+" seconds");
+				}
+			}
 		}
 	}
 
