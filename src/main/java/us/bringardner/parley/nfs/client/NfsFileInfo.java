@@ -39,8 +39,25 @@ public final class NfsFileInfo {
 	private final long fileId;
 	private final int mode;
 	private final long modifyTime;
+	private final String owner;
+	private final String group;
+	private final long accessTime;
+	private final long changeTime;
+	private final long createTime;
+	private final int links;
 
 	NfsFileInfo(String name, byte[] handle, int type, long size, long fileId, int mode, long modifyTime) {
+		this(name, handle, type, size, fileId, mode, modifyTime, null, null, -1, -1, -1, -1);
+	}
+
+	NfsFileInfo(String name, byte[] handle, int type, long size, long fileId, int mode, long modifyTime,
+			String owner, String group, long accessTime, long changeTime, long createTime, int links) {
+		this.owner = owner;
+		this.group = group;
+		this.accessTime = accessTime;
+		this.changeTime = changeTime;
+		this.createTime = createTime;
+		this.links = links;
 		this.name = name;
 		this.handle = handle;
 		this.type = type;
@@ -93,6 +110,36 @@ public final class NfsFileInfo {
 	/** @return the modify time in milliseconds since 1970, -1 when not sent */
 	public long getModifyTime() {
 		return modifyTime;
+	}
+
+	/** @return the owner as the server names it ("name@domain" or a number), null when not sent */
+	public String getOwner() {
+		return owner;
+	}
+
+	/** @return the group as the server names it, null when not sent */
+	public String getGroup() {
+		return group;
+	}
+
+	/** @return the access time in milliseconds since 1970, -1 when not sent */
+	public long getAccessTime() {
+		return accessTime;
+	}
+
+	/** @return the time the file's attributes last changed (ctime), in milliseconds, -1 when not sent */
+	public long getChangeTime() {
+		return changeTime;
+	}
+
+	/** @return the creation time in milliseconds, -1 when the server has none */
+	public long getCreateTime() {
+		return createTime;
+	}
+
+	/** @return the number of hard links, -1 when not sent */
+	public int getLinks() {
+		return links;
 	}
 
 	@Override
