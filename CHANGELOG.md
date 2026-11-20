@@ -2,6 +2,26 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-20: the client takes read delegations, T9b)
+
+- `new NfsClient(host, port, mount, uid, gid, timeoutMillis, true)` (or the Kerberos form with the flag) runs a callback
+  server (`ClientCallbacks`: CB_NULL and CB_COMPOUND with CB_RECALL) and gives the server its address, so that a server
+  that gives delegations can. The server calls from its own address only. Without the flag the client offers no callback,
+  as before, and gets no delegation.
+- A read delegation lets `readAll` keep the file's bytes (files up to 4 MiB): the next `readAll` asks the server only for
+  the file's handle, to be sure the name still leads to the same file, and reads nothing. The bytes are dropped when
+  the server recalls the delegation (CB_RECALL, answered at once; DELEGRETURN follows from another thread, or from
+  the operation that is waiting on the server), when this client changes anything (write, truncate, remove, rename),
+  and when the connection is made again. `getDelegationCount()` says how many are held. They are returned when the
+  client is closed. A write delegation is returned with the close of the open that got it: the client doesn't write behind one.
+- The file operations share one open-owner (an open-owner's first open is confirmed and gets no delegation, so one for each
+  operation never got any). After a failed open or close the owner is replaced, as its seqid is not known.
+- Fixed: an OPEN the server answered DELAY or GRACE was sent again with the same seqid, which the server replays: the
+  answer was DELAY every time until the retries ran out. It is now made again with the next seqid (RFC 7530 section 9.1.7).
+- Tests: `NfsClientDelegationTest` (no flag, no server setting, keeping, own write, another client's write recalls and is
+  then done, close returns, restart). A real Linux server can only call back a client it can reach, so the live
+  test has no delegation case.
+
 ### Added (2026-11-20: the client takes byte range locks, T9)
 
 - `NfsClient.lock(path, offset, length, write)` takes a byte range lock (LOCK; `NfsLock.TO_END` for the rest of the

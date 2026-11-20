@@ -1,0 +1,190 @@
+package us.bringardner.parley.nfs.client;
+
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import us.bringardner.parley.nfs.protocol.Nfs4;
+import us.bringardner.parley.nfs.rpc.XdrDecoder;
+import us.bringardner.parley.nfs.rpc.XdrEncoder;
+
+/**
+ * The callback server of a client (RFC 7530 section 16, decision D86): the server connects to it to check that it can
+ * call, and to recall a delegation (CB_RECALL). It answers CB_NULL and CB_COMPOUND with CB_RECALL and nothing else.
+ */
+final class ClientCallbacks implements AutoCloseable {
+
+	/** The program number the client gives the server (any number in the range for programs of an application). */
+	static final int PROGRAM = 0x40000000;
+
+	/** What the client does when the server recalls a delegation. */
+	interface Listener {
+		/** @return the NFS4 status to answer: NFS4_OK, or NFS4ERR_BAD_STATEID for a delegation the client does not hold */
+		int recall(byte[] stateidOther, byte[] fh);
+	}
+
+	private static final int CB_GETATTR = 3;
+	private static final System.Logger LOG = System.getLogger(ClientCallbacks.class.getName());
+
+	private final ServerSocket socket;
+	private final Thread thread;
+	private final Listener listener;
+	private final List<Socket> open = Collections.synchronizedList(new ArrayList<Socket>());
+	private volatile InetAddress server;
+	private volatile boolean closed;
+
+	ClientCallbacks(Listener listener) throws IOException {
+		this.listener = listener;
+		socket = new ServerSocket(0);
+		thread = new Thread(this::run, "parley-nfs-client-callbacks");
+		thread.setDaemon(true);
+		thread.start();
+	}
+
+	/** Only the server's own calls are answered. */
+	void setServer(InetAddress server) {
+		this.server = server;
+	}
+
+	int getPort() {
+		return socket.getLocalPort();
+	}
+
+	/**
+	 * @param local the address of this machine the server is connected to
+	 * @return the universal address of the callback socket ("h1.h2.h3.h4.p1.p2"), or null for an address that isn't IPv4
+	 */
+	String universalAddress(InetAddress local) {
+		if( !(local instanceof java.net.Inet4Address) ) {
+			return null;
+		}
+		int p = getPort();
+		return local.getHostAddress()+"."+(p >> 8)+"."+(p & 255);
+	}
+
+	private void run() {
+		while( !closed ) {
+			try {
+				Socket s = socket.accept();
+				InetAddress from = s.getInetAddress();
+				InetAddress expected = server;
+				if( expected != null && !from.equals(expected) && !from.isLoopbackAddress() ) {
+					LOG.log(System.Logger.Level.WARNING, "NFS client callback from "+from+" refused: the server is "+expected);
+					s.close();
+					continue;
+				}
+				open.add(s);
+				Thread t = new Thread(() -> serve(s), "parley-nfs-client-callbacks-conn");
+				t.setDaemon(true);
+				t.start();
+			} catch (IOException e) {
+				return;
+			}
+		}
+	}
+
+	private void serve(Socket s) {
+		try (Socket c = s) {
+			DataInputStream in = new DataInputStream(c.getInputStream());
+			OutputStream out = c.getOutputStream();
+			while( true ) {
+				int header = in.readInt();
+				byte[] record = new byte[header & 0x7fffffff];
+				in.readFully(record);
+				XdrEncoder r = answer(new XdrDecoder(record));
+				r.setInt(0, 0x80000000 | (r.size()-4));
+				out.write(r.array(), 0, r.size());
+				out.flush();
+			}
+		} catch (IOException | RuntimeException e) {
+			// the connection ended, or the call was not one
+		} finally {
+			open.remove(s);
+		}
+	}
+
+	private XdrEncoder answer(XdrDecoder d) throws IOException {
+		int xid = d.readInt();
+		d.readInt();
+		d.readInt();
+		int program = d.readInt();
+		int version = d.readInt();
+		int proc = d.readInt();
+		d.readInt();
+		d.readOpaque(400);
+		d.readInt();
+		d.readOpaque(400);
+		// a reply: the xid, REPLY, accepted, no verifier
+		XdrEncoder r = new XdrEncoder();
+		r.writeInt(0).writeInt(xid).writeInt(1).writeInt(0).writeInt(0).writeOpaque(new byte[0]);
+		if( program != PROGRAM ) {
+			return r.writeInt(1);
+		}
+		if( version != Nfs4.NFS4_CALLBACK_VERSION ) {
+			return r.writeInt(2).writeInt(Nfs4.NFS4_CALLBACK_VERSION).writeInt(Nfs4.NFS4_CALLBACK_VERSION);
+		}
+		if( proc == Nfs4.CB_NULL ) {
+			return r.writeInt(0);
+		}
+		if( proc != Nfs4.CB_COMPOUND ) {
+			return r.writeInt(3);
+		}
+		r.writeInt(0);
+		d.readString(1024);
+		d.readInt();
+		d.readInt();
+		int count = d.readInt();
+		XdrEncoder results = new XdrEncoder();
+		int status = Nfs4.NFS4_OK;
+		int done = 0;
+		for (int i = 0; i < count && status == Nfs4.NFS4_OK; i++) {
+			int op = d.readInt();
+			if( op == Nfs4.OP_CB_RECALL ) {
+				d.readInt();
+				byte[] other = d.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+				d.readBoolean();
+				byte[] fh = d.readOpaque(Nfs4.NFS4_FHSIZE);
+				status = listener.recall(other, fh);
+				results.writeInt(op).writeInt(status);
+			} else {
+				// the other callbacks (CB_GETATTR is for write delegations, which this client returns at once) are not offered
+				boolean getattr = op == CB_GETATTR;
+				status = getattr ? Nfs4.NFS4ERR_NOTSUPP : Nfs4.NFS4ERR_OP_ILLEGAL;
+				results.writeInt(getattr ? op : Nfs4.OP_ILLEGAL).writeInt(status);
+			}
+			done++;
+		}
+		r.writeInt(status).writeString("").writeInt(done).write(results);
+		return r;
+	}
+
+	@Override
+	public void close() {
+		closed = true;
+		try {
+			socket.close();
+		} catch (IOException e) {
+			// it is closed
+		}
+		synchronized (open) {
+			for (Socket s : new ArrayList<Socket>(open)) {
+				try {
+					s.close();
+				} catch (IOException e) {
+					// it is closed
+				}
+			}
+		}
+		try {
+			thread.join(5000);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
+	}
+}
