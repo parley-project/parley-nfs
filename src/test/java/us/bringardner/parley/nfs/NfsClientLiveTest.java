@@ -139,6 +139,29 @@ public class NfsClientLiveTest {
 	}
 
 	@Test
+	public void renameAndTruncate() throws Exception {
+		client.mkdir(work + "/x");
+		client.write(work + "/x/a.txt", 0, bytes("0123456789"));
+
+		client.truncate(work + "/x/a.txt", 4);
+		assertEquals("0123", new String(client.readAll(work + "/x/a.txt"), StandardCharsets.UTF_8));
+		client.truncate(work + "/x/a.txt", 6);
+		assertEquals(6, client.info(work + "/x/a.txt").getSize());
+
+		client.rename(work + "/x/a.txt", work + "/x/b.txt");
+		assertFalse(client.exists(work + "/x/a.txt"));
+		assertEquals(6, client.info(work + "/x/b.txt").getSize());
+		client.mkdir(work + "/y");
+		client.rename(work + "/x/b.txt", work + "/y/c.txt");
+		assertTrue(client.exists(work + "/y/c.txt"));
+		client.rename(work + "/y", work + "/z");
+		assertTrue(client.exists(work + "/z/c.txt"));
+
+		assertTrue(assertThrows(NfsException.class, () -> client.rename(work + "/nothing", work + "/else")).isNotFound());
+		assertTrue(assertThrows(NfsException.class, () -> client.truncate(work + "/nothing", 1)).isNotFound());
+	}
+
+	@Test
 	public void aMissingFileIsNotFound() throws Exception {
 		assertTrue(assertThrows(NfsException.class, () -> client.info(work + "/nothing")).isNotFound());
 		assertTrue(assertThrows(NfsException.class, () -> client.readAll(work + "/nothing")).isNotFound());
