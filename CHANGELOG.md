@@ -2,6 +2,11 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-20: the client against a real server)
+
+- `NfsClientLiveTest` runs the client against any NFS server (skipped unless `-Dnfs.live.host` is set), and
+  `tools/client-live-test.sh` sets up the Linux kernel's server in a Multipass VM and runs it.
+
 ### Added (2026-11-19: a client, D77)
 
 - `us.bringardner.parley.nfs.client.NfsClient`: a generic NFSv4.0 client (AUTH_SYS) that mounts a path of a server and
