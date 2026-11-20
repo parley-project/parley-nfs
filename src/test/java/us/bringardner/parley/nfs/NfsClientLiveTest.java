@@ -51,7 +51,10 @@ import us.bringardner.parley.nfs.client.NfsFileInfo;
  * sets one up and runs this). Skipped unless nfs.live.host is set.
  * <p>
  * System properties: nfs.live.host (required), nfs.live.port (2049), nfs.live.mount (/), nfs.live.uid (1000) and
- * nfs.live.gid (1000), the user the client says it is (AUTH_SYS), who must be able to write the export.
+ * nfs.live.gid (1000), the user the client says it is (AUTH_SYS), who must be able to write the export, and
+ * nfs.live.count (400), how many files the long listing makes. Every file is several round trips, so over the internet
+ * (about 100 ms each) the 400 take minutes; a smaller count is quicker, but a short listing fits in one READDIR reply and
+ * no longer shows that a long one is read in parts, so keep the default where that matters.
  * Everything happens in a folder of its own, which is removed at the end.
  */
 public class NfsClientLiveTest {
@@ -158,7 +161,7 @@ public class NfsClientLiveTest {
 	/** A listing too long for one READDIR reply. */
 	@Test
 	public void aLongListing() throws Exception {
-		int count = 400;
+		int count = Integer.getInteger("nfs.live.count", 400);
 		client.mkdir(work + "/many");
 		for (int i = 0; i < count; i++) {
 			client.write(work + "/many/a-fairly-long-file-name-number-" + i + ".txt", 0, bytes("" + i));
