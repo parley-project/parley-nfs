@@ -11,6 +11,8 @@
 - `openFile(path, write, create)` returns an `NfsOpenFile` that stays open: `read(offset, count)`, `write(offset, ...)`,
   `size()`, `truncate(size)` and `close()`, without an open and close for each call. After a lost connection or a restart
   the file is opened again by its path (the state of the open is gone).
+- `createNew(path)` makes a file that isn't there yet and says whether it did: the server decides when callers race for
+  the name (OPEN with GUARDED4), so exactly one gets `true`.
 - Tests: `NfsClientFilesTest`.
 
 ### Added (2026-11-20: the client takes read delegations, T9b)
