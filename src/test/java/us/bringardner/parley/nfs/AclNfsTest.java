@@ -89,6 +89,7 @@ public class AclNfsTest {
 	private final List<String> properties = new ArrayList<String>();
 	/** what the server said at INFO */
 	private final List<String> infos = new java.util.concurrent.CopyOnWriteArrayList<String>();
+	private final List<String> warnings = new java.util.concurrent.CopyOnWriteArrayList<String>();
 
 	/** The registry user that uid 0 is mapped to, null to leave root unmapped. */
 	private String rootName;
@@ -141,7 +142,14 @@ public class AclNfsTest {
 			}
 		}
 		infos.clear();
+		warnings.clear();
 		server = new NfsServer("test.acl", 0) {
+			@Override
+			public void logWarn(String message) {
+				warnings.add(message);
+				super.logWarn(message);
+			}
+
 			@Override
 			public void logInfo(String message) {
 				infos.add(message);
@@ -390,8 +398,17 @@ public class AclNfsTest {
 		assertEquals(Nfs4.NFS4ERR_ATTRNOTSUPP, setAcl(c, rootFh, Arrays.asList(Ace.allow(0, READ, Ace.EVERYONE))));
 		assertEquals(1, infos.stream().filter(m -> m.contains("tried to set an access control list")).count(),
 				"said once: "+infos);
-		assertTrue(infos.stream().anyMatch(m -> m.contains("no test.acl.stateDir") && m.contains("access control lists can't be set")),
-				"the start says what the missing folder costs: "+infos);
+		assertEquals(1, warnings.stream().filter(m -> m.contains("no test.acl.stateDir")).count(), "the start warns: "+warnings);
+		String w = warnings.stream().filter(m -> m.contains("no test.acl.stateDir")).findFirst().get();
+		assertTrue(w.contains("renamed") && w.contains("119 bytes") && w.contains("access control lists can't be set"),
+				"and says what the missing folder costs: "+w);
+	}
+
+	/** With a state folder there is nothing to warn of. */
+	@Test
+	public void aStateFolderIsNotWarnedAbout(@TempDir Path tmp) throws Exception {
+		start(tmp, true);
+		assertTrue(warnings.stream().noneMatch(m -> m.contains("stateDir")), warnings.toString());
 	}
 
 	/** A state folder setting that names a file is refused at start, and the message says why. */

@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-20: a start with no state folder warns)
+
+- A server started with no `parley.nfs.stateDir` logs a warning (it was an info line) that says what it costs: the
+  handle of a file that was renamed, or whose path is longer than 119 bytes, is stale after a restart; access control
+  lists can't be set; delegations aren't kept (when they are on). It says so that this is fine for a test or a short
+  job and that a server meant to keep running needs the folder. Nothing else changes; the setting is still opt-in (D41).
+
 ### Fixed (2026-11-20: an idle node dropped that could not come back, T11)
 
 - Without a state folder, the node table dropped an idle node whose id was not its path's hash (a renamed file), when
