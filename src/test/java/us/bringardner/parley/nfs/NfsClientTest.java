@@ -149,6 +149,67 @@ public class NfsClientTest {
 	}
 
 	@Test
+	public void renameAndMove() throws Exception {
+		startMemory("test.nfs.client.rename");
+		NfsClient c = client("/");
+		c.mkdir("a");
+		c.mkdir("b");
+		c.write("a/one.txt", 0, bytes("one"));
+		c.write("two.txt", 0, bytes("two"));
+
+		c.rename("a/one.txt", "a/uno.txt");
+		assertFalse(c.exists("a/one.txt"));
+		assertEquals("one", new String(c.readAll("a/uno.txt"), StandardCharsets.UTF_8));
+		assertTrue(root.getChild("a").getChild("uno.txt").exists(), "the file system has it too");
+
+		c.rename("a/uno.txt", "b/moved.txt");
+		assertFalse(c.exists("a/uno.txt"));
+		assertEquals("one", new String(c.readAll("b/moved.txt"), StandardCharsets.UTF_8));
+
+		// a file at the new name is replaced
+		c.rename("two.txt", "b/moved.txt");
+		assertFalse(c.exists("two.txt"));
+		assertEquals("two", new String(c.readAll("b/moved.txt"), StandardCharsets.UTF_8));
+
+		// a folder keeps what is in it
+		c.rename("b", "c");
+		assertFalse(c.exists("b"));
+		assertTrue(c.info("c").isDirectory());
+		assertEquals("two", new String(c.readAll("c/moved.txt"), StandardCharsets.UTF_8));
+
+		NfsException e = assertThrows(NfsException.class, () -> c.rename("nothing", "something"));
+		assertTrue(e.isNotFound());
+		NfsException into = assertThrows(NfsException.class, () -> c.rename("c/moved.txt", "nowhere/x.txt"));
+		assertTrue(into.isNotFound(), "the folder for the new name must exist");
+		assertEquals("two", new String(c.readAll("c/moved.txt"), StandardCharsets.UTF_8), "a failed rename leaves the file");
+	}
+
+	@Test
+	public void truncateShortensAndLengthens() throws Exception {
+		startMemory("test.nfs.client.truncate");
+		NfsClient c = client("/");
+		c.write("f.txt", 0, bytes("0123456789"));
+
+		c.truncate("f.txt", 4);
+		assertEquals(4, c.info("f.txt").getSize());
+		assertEquals("0123", new String(c.readAll("f.txt"), StandardCharsets.UTF_8));
+		assertEquals(4, root.getChild("f.txt").length());
+
+		c.truncate("f.txt", 6);
+		assertEquals(6, c.info("f.txt").getSize());
+		assertArrayEquals(new byte[] {'0', '1', '2', '3', 0, 0}, c.readAll("f.txt"), "what is added is zeros");
+
+		c.truncate("f.txt", 0);
+		assertEquals(0, c.info("f.txt").getSize());
+		assertEquals(0, c.readAll("f.txt").length);
+
+		NfsException e = assertThrows(NfsException.class, () -> c.truncate("missing.txt", 1));
+		assertTrue(e.isNotFound());
+		assertFalse(c.exists("missing.txt"), "a truncate does not make the file");
+		assertThrows(IllegalArgumentException.class, () -> c.truncate("f.txt", -1));
+	}
+
+	@Test
 	public void filesAndFolders() throws Exception {
 		startMemory("test.nfs.client.basic");
 		NfsClient c = client("/");

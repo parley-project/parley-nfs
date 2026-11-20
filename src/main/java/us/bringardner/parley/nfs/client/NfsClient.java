@@ -231,6 +231,46 @@ public class NfsClient implements Closeable {
 	}
 
 	/**
+	 * Rename or move a file or folder. A file already at the new name is replaced (a folder is replaced only
+	 * when it is empty); the folder that is to hold the new name must exist.
+	 */
+	public synchronized void rename(String from, String to) throws IOException {
+		Path src = split(from);
+		Path dst = split(to);
+		Compound c = new Compound();
+		lookupParent(c, src);
+		c.op(Nfs4.OP_SAVEFH);
+		lookupParent(c, dst);
+		c.op(Nfs4.OP_RENAME).args.writeString(src.name).writeString(dst.name);
+		Reply r = call(c, "rename "+from+" to "+to);
+		skipLookup(r, src.parents);
+		r.ok(Nfs4.OP_SAVEFH);
+		skipLookup(r, dst.parents);
+		r.ok(Nfs4.OP_RENAME);
+	}
+
+	/**
+	 * Make a file exactly size bytes: shorter drops the end, longer adds zeros. The file must exist.
+	 * It is opened for writing for this, so the server can tell who changes it.
+	 */
+	public synchronized void truncate(String path, long size) throws IOException {
+		if( size < 0 ) {
+			throw new IllegalArgumentException("a size can't be negative: "+size);
+		}
+		Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_WRITE, false);
+		try {
+			Compound c = new Compound().putfh(o.fh);
+			XdrEncoder a = c.op(Nfs4.OP_SETATTR).args;
+			a.writeInt(o.seqid).writeFixedOpaque(o.other);
+			a.writeIntArray(bitmap(Nfs4.FATTR4_SIZE)).writeInt(8).writeLong(size);
+			Reply r = call(c, "truncate "+path);
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_SETATTR);
+		} finally {
+			closeOpen(o);
+		}
+	}
+
+	/**
 	 * Read up to count bytes of a file.
 	 * @return the bytes (fewer, even none, at the end of the file)
 	 */

@@ -2,6 +2,12 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-20: client rename and truncate)
+
+- `NfsClient.rename(from, to)` (a file at the new name is replaced; the folder for the new name must exist) and
+  `NfsClient.truncate(path, size)` (shorter drops the end, longer adds zeros; the file must exist). Still not in the
+  client: Kerberos, delegations and callbacks, locks, recovery after a server restart, links, other attribute changes.
+
 ### Added (2026-11-20: the client against a real server)
 
 - `NfsClientLiveTest` runs the client against any NFS server (skipped unless `-Dnfs.live.host` is set), and
@@ -12,7 +18,7 @@
 - `us.bringardner.parley.nfs.client.NfsClient`: a generic NFSv4.0 client (AUTH_SYS) that mounts a path of a server and
   gets information about a file, lists a folder, reads, writes, makes folders and removes, and renews its lease. It uses
   the `rpc` package of this module and knows nothing of FileSource (a FileSource over it is a separate module).
-  Not yet: Kerberos, delegations and callbacks, locks, recovery after a server restart, rename, links, attribute changes.
+  Not yet: Kerberos, delegations and callbacks, locks, recovery after a server restart, links, attribute changes.
 
 ### Added (2026-11-19: the mapped root and modes, D76)
 
