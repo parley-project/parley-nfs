@@ -824,6 +824,49 @@ public class AclNfsTest {
 		assertEquals(Nfs4.NFS4_OK, remove(admin, rootFh, "f"), "and removes a file it doesn't own");
 	}
 
+	/**
+	 * Decision D76 left this untested: the mapped root is not held to mode bits, but a stored access control list
+	 * (D54) still decides for it, like for anyone, and the list of a file gives it nothing the list doesn't.
+	 */
+	@Test
+	public void aStoredListDecidesForTheMappedRootToo(@TempDir Path tmp) throws Exception {
+		rootName = "rootuser";
+		property("test.acl.enforceModes", "true");
+		start(tmp, true);
+		mode(root, 0777);
+		TestClient tony = as(TONY);
+		TestClient pat = as(PAT);
+		TestClient admin = as(0);
+		long tonyId = clientid(tony, "tony");
+		clientid(pat, "pat");
+		clientid(admin, "admin");
+		byte[] rootFh = rootFh(tony);
+		Opened o = open(tony, rootFh, tonyId, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, "f");
+		assertEquals(Nfs4.NFS4_OK, o.status);
+		FileSource f = root.getChild("f");
+		assertTrue(f.setOwner(new FileSourceUser(TONY, "tony")));
+		mode(f, 0600);
+		assertEquals(Nfs4.NFS4_OK, read(admin, o.fh), "no list: the mapped root is not held to the mode");
+
+		// a list that names only tony: it decides alone, for the root that is mapped as for everyone else
+		assertEquals(Nfs4.NFS4_OK, setAcl(tony, o.fh, Arrays.asList(Ace.allow(0, READ|Nfs4.ACE4_WRITE_ACL, "tony"))));
+		assertEquals(Nfs4.NFS4_OK, read(tony, o.fh));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, read(pat, o.fh));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, read(admin, o.fh), "the list gives the mapped root nothing");
+
+		// a list that names the root gives it what it says, whatever the mode is
+		assertEquals(Nfs4.NFS4_OK, setAcl(tony, o.fh, Arrays.asList(Ace.allow(0, READ|Nfs4.ACE4_WRITE_ACL, "tony"),
+				Ace.allow(0, READ, "rootuser"))));
+		assertEquals(Nfs4.NFS4_OK, read(admin, o.fh));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, read(pat, o.fh));
+
+		// and a deny in front of an allow for everyone holds for it too
+		assertEquals(Nfs4.NFS4_OK, setAcl(tony, o.fh, Arrays.asList(Ace.deny(0, READ, "rootuser"), Ace.allow(0, READ, Ace.EVERYONE),
+				Ace.allow(0, Nfs4.ACE4_WRITE_ACL, "tony"))));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, read(admin, o.fh));
+		assertEquals(Nfs4.NFS4_OK, read(pat, o.fh));
+	}
+
 	/** Decision D74: root that the id map doesn't map is the anonymous user and may not change an owner. */
 	@Test
 	public void anUnmappedRootMayNotChangeAnOwner(@TempDir Path tmp) throws Exception {
