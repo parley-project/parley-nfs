@@ -44,6 +44,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import us.bringardner.parley.files.FileSource;
+import us.bringardner.parley.iam.ParleyPrincipal;
+import us.bringardner.parley.iam.permission.BasicParleyPermission;
+import us.bringardner.parley.iam.permission.StandardPermissions;
+import us.bringardner.parley.iam.registry.BasicUserRegistry;
 import us.bringardner.parley.files.memory.MemoryFileSourceFactory;
 import us.bringardner.parley.nfs.client.NfsClient;
 import us.bringardner.parley.nfs.client.NfsException;
@@ -216,6 +220,73 @@ public class NfsClientTest {
 		assertTrue(info.getMode() >= 0);
 		c.remove("sub/g.txt");
 		assertFalse(Files.exists(tmp.resolve("sub").resolve("g.txt")));
+	}
+
+	/**
+	 * The client and the server with enforceModes on (D73): what the client creates has the mode it asked for, and
+	 * another user is held to it. A server that checks modes is what a Linux server does, and what showed that a
+	 * create with no mode leaves a folder nobody can use.
+	 */
+	@Test
+	public void withModesEnforced(@TempDir Path tmp) throws Exception {
+		String prefix = "test.nfs.client.modes";
+		Path idmap = tmp.resolve("idmap.properties");
+		Files.write(idmap, "uid.1000=tony\nuid.1001=pat\n".getBytes(StandardCharsets.UTF_8));
+		System.setProperty(prefix+".idmap", idmap.toString());
+		System.setProperty(prefix+".domain", "example.org");
+		System.setProperty(prefix+".enforceModes", "true");
+		try {
+			mem = new MemoryFileSourceFactory();
+			mem.connect(new Properties());
+			root = mem.createFileSource("/export");
+			assertTrue(root.mkdirs());
+			assertTrue(root.setWritable(true, false));   // anyone may make things at the top: 0777
+			assertTrue(root.setExecutable(true, false));
+			assertTrue(root.setReadable(true, false));
+			Export export = new Export("test", root, false);
+			BasicUserRegistry registry = new BasicUserRegistry(1000);
+			for (String name : new String[] {"tony", "pat"}) {
+				ParleyPrincipal u = registry.createUser(name);
+				registry.grant(u, new BasicParleyPermission(StandardPermissions.READ, export.getId()));
+				registry.grant(u, new BasicParleyPermission(StandardPermissions.WRITE, export.getId()));
+			}
+			server = new NfsServer(prefix, 0);
+			server.setExport(export);
+			server.setUserRegistry(registry);
+			server.startAndWait(10000);
+
+			NfsClient tony = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1000, 1000, 10000);
+			clients.add(tony);
+			NfsClient pat = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1001, 1001, 10000);
+			clients.add(pat);
+
+			tony.mkdir("d");
+			tony.write("d/f", 0, bytes("mine"));
+			FileSource d = root.getChild("d");
+			FileSource f = d.getChild("f");
+			assertTrue(d.canOwnerWrite() && d.canOtherRead() && d.canOtherExecute() && !d.canOtherWrite(), "a folder is made 0755");
+			assertTrue(f.canOwnerWrite() && f.canOtherRead() && !f.canOtherWrite() && !f.canOwnerExecute(), "a file is made 0644");
+
+			// the owner uses what it made
+			assertEquals("mine", new String(tony.readAll("d/f"), StandardCharsets.UTF_8));
+			tony.write("d/f", 4, bytes("!"));   // the memory file system only appends
+			// another user may look and read, not change
+			assertEquals("mine!", new String(pat.readAll("d/f"), StandardCharsets.UTF_8));
+			assertEquals(1, pat.list("d").size());
+			NfsException e = assertThrows(NfsException.class, () -> pat.write("d/f", 5, bytes("no")));
+			assertEquals(Nfs4.NFS4ERR_ACCESS, e.getStatus());
+			e = assertThrows(NfsException.class, () -> pat.mkdir("d/x"));
+			assertEquals(Nfs4.NFS4ERR_ACCESS, e.getStatus());
+			e = assertThrows(NfsException.class, () -> pat.remove("d/f"));
+			assertEquals(Nfs4.NFS4ERR_ACCESS, e.getStatus());
+			assertEquals("mine!", new String(tony.readAll("d/f"), StandardCharsets.UTF_8));
+			tony.remove("d/f");
+			tony.remove("d");
+		} finally {
+			System.clearProperty(prefix+".idmap");
+			System.clearProperty(prefix+".domain");
+			System.clearProperty(prefix+".enforceModes");
+		}
 	}
 
 	/** A closed client is closed, and closing twice is harmless. */
