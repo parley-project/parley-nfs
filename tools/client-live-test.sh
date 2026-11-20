@@ -24,7 +24,14 @@
 : "${MVN:=mvn}"
 EXPORTS_FILE=/etc/exports.d/parley-client-test.exports
 
-vm() { echo "        \$ $*" >&2; multipass exec "$VM" -- "$@"; }
+LIMIT=${LIMIT:-60}                               # seconds a command in the VM may take (installing the server: INSTALL_LIMIT)
+: "${INSTALL_LIMIT:=600}"
+
+# a command in the VM, shown first, and cut off after LIMIT seconds so that nothing waits for ever
+vm() {
+	echo "        \$ $*" >&2
+	multipass exec "$VM" -- timeout "$LIMIT" "$@"
+}
 
 if [ "$1" = "--remove" ]; then
 	vm sudo rm -f "$EXPORTS_FILE" && vm sudo exportfs -ra
@@ -33,7 +40,16 @@ if [ "$1" = "--remove" ]; then
 fi
 
 echo "== the server in $VM"
-vm which exportfs >/dev/null 2>&1 || vm sudo apt-get install -y nfs-kernel-server || { echo "could not install nfs-kernel-server"; exit 1; }
+state=$(multipass info "$VM" 2>&1 | awk '/^State/ {print $2}')
+echo "        $VM is: ${state:-unknown}"
+if [ "$state" != "Running" ]; then
+	echo "        \$ multipass start $VM"
+	multipass start "$VM" || { echo "could not start $VM"; exit 1; }
+fi
+if ! multipass exec "$VM" -- timeout "$LIMIT" which exportfs >/dev/null 2>&1; then
+	echo "        installing nfs-kernel-server (up to ${INSTALL_LIMIT}s)"
+	LIMIT=$INSTALL_LIMIT vm sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server || { echo "could not install nfs-kernel-server"; exit 1; }
+fi
 vm sudo mkdir -p "$FOLDER" || exit 1
 vm sudo chown "$CLIENT_UID:$CLIENT_UID" "$FOLDER" || exit 1
 vm sudo mkdir -p /etc/exports.d
