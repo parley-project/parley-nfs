@@ -46,6 +46,8 @@ import us.bringardner.parley.nfs.client.NfsClient;
 import us.bringardner.parley.nfs.client.NfsException;
 import us.bringardner.parley.nfs.client.NfsFileInfo;
 import us.bringardner.parley.nfs.client.NfsKerberos;
+import us.bringardner.parley.nfs.client.NfsLock;
+import us.bringardner.parley.nfs.client.NfsLockDeniedException;
 
 /**
  * The generic client (D77) against a real NFS server, such as the Linux kernel's in a VM (tools/client-live-test.sh
@@ -213,5 +215,24 @@ public class NfsClientLiveTest {
 		}
 		assertEquals(count, names.size());
 		assertEquals(count, new java.util.HashSet<String>(names).size(), "no name twice");
+	}
+
+	@Test
+	public void byteRangeLocks() throws Exception {
+		String file = work + "/locked.txt";
+		client.write(file, 0, bytes("0123456789"));
+		NfsClient other = new NfsClient(System.getProperty("nfs.live.host"), Integer.getInteger("nfs.live.port", 2049),
+				System.getProperty("nfs.live.mount", "/"), Long.getLong("nfs.live.uid", 1000L), Long.getLong("nfs.live.gid", 1000L), 20000);
+		try {
+			NfsLock mine = client.lock(file, 0, 5, true);
+			assertTrue(mine.isHeld());
+			assertThrows(NfsLockDeniedException.class, () -> other.lock(file, 2, 2, false));
+			assertTrue(other.testLock(file, 0, 5, false) != null);
+			other.lock(file, 5, 5, true).unlock();
+			mine.unlock();
+			other.lock(file, 0, 5, true).unlock();
+		} finally {
+			other.close();
+		}
 	}
 }
