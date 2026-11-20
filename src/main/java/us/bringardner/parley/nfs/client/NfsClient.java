@@ -34,6 +34,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -99,6 +101,17 @@ public class NfsClient implements Closeable {
 	private volatile boolean closed;
 	private ScheduledExecutorService renewer;
 	private final NfsKerberos kerberos;
+	// delegations (D86): the callback server, what is held, and the one open-owner the file operations share
+	private final ClientCallbacks callbacks;
+	private final Map<String, Delegation> delegations = new HashMap<String, Delegation>();
+	private java.util.concurrent.ExecutorService returner;
+	/** delegations the server recalled, not yet given back */
+	private final List<Delegation> pendingReturns = new ArrayList<Delegation>();
+	private String sharedOwner;
+	private int sharedSeq;
+	private int ownerCount;
+	/** the largest file whose bytes a read delegation lets the client keep */
+	static final int MAX_CACHED = 4 << 20;
 	private final List<NfsLock> locks = new ArrayList<NfsLock>();
 	private volatile java.util.function.Consumer<NfsLock> lockLostHandler;
 	private int lockCount;
@@ -114,7 +127,17 @@ public class NfsClient implements Closeable {
 	 * @param timeoutMillis how long to wait for an answer
 	 */
 	public NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis) throws IOException {
-		this(host, port, mount, uid, gid, timeoutMillis, null);
+		this(host, port, mount, uid, gid, timeoutMillis, null, false);
+	}
+
+	/**
+	 * Connect, and take read delegations (D86): the server gives one when no one else is using the file, and the
+	 * client then keeps the bytes it read, till the server recalls the delegation because another client wants the file.
+	 * The client runs a callback server for the recalls, which the server must be able to connect to.
+	 * @param delegations true to offer the server a callback address
+	 */
+	public NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, boolean delegations) throws IOException {
+		this(host, port, mount, uid, gid, timeoutMillis, null, delegations);
 	}
 
 	/**
@@ -122,11 +145,17 @@ public class NfsClient implements Closeable {
 	 * @param kerberos who the user is and how the calls are protected; the caller closes it after this client
 	 */
 	public NfsClient(String host, int port, String mount, int timeoutMillis, NfsKerberos kerberos) throws IOException {
-		this(host, port, mount, 0, 0, timeoutMillis, java.util.Objects.requireNonNull(kerberos, "kerberos"));
+		this(host, port, mount, 0, 0, timeoutMillis, java.util.Objects.requireNonNull(kerberos, "kerberos"), false);
 	}
 
-	private NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, NfsKerberos kerberos) throws IOException {
+	/** Connect with Kerberos and take read delegations, as {@link #NfsClient(String, int, String, long, long, int, boolean)} says. */
+	public NfsClient(String host, int port, String mount, int timeoutMillis, NfsKerberos kerberos, boolean delegations) throws IOException {
+		this(host, port, mount, 0, 0, timeoutMillis, java.util.Objects.requireNonNull(kerberos, "kerberos"), delegations);
+	}
+
+	private NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, NfsKerberos kerberos, boolean wantDelegations) throws IOException {
 		this.kerberos = kerberos;
+		this.callbacks = wantDelegations ? new ClientCallbacks(this::recalled) : null;
 		this.uid = uid;
 		this.gid = gid;
 		String name = "parley-nfs-client";
@@ -159,6 +188,14 @@ public class NfsClient implements Closeable {
 			s.connect(new InetSocketAddress(host, port), timeoutMillis);
 			s.setSoTimeout(timeoutMillis);
 			socket = s;
+			// a new client id has none of the state of the one before
+			synchronized (delegations) {
+				delegations.clear();
+			}
+			rotateOwner();
+			if( callbacks != null ) {
+				callbacks.setServer(s.getInetAddress());
+			}
 			in = new DataInputStream(s.getInputStream());
 			out = s.getOutputStream();
 			if( kerberos != null ) {
@@ -264,6 +301,16 @@ public class NfsClient implements Closeable {
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 			}
+		}
+		synchronized (this) {
+			returnAllDelegations();
+		}
+		if( callbacks != null ) {
+			callbacks.close();
+		}
+		java.util.concurrent.ExecutorService rt = returner;
+		if( rt != null ) {
+			rt.shutdownNow();
 		}
 		NfsKerberos.Session g = session;
 		if( g != null ) {
@@ -372,6 +419,7 @@ public class NfsClient implements Closeable {
 	}
 
 	private void removeOnce(String path) throws IOException {
+		dropCached();
 		Path p = split(path);
 		Compound c = new Compound();
 		lookupParent(c, p);
@@ -393,6 +441,7 @@ public class NfsClient implements Closeable {
 	}
 
 	private void renameOnce(String from, String to) throws IOException {
+		dropCached();
 		Path src = split(from);
 		Path dst = split(to);
 		Compound c = new Compound();
@@ -419,6 +468,7 @@ public class NfsClient implements Closeable {
 	}
 
 	private void truncateOnce(String path, long size) throws IOException {
+		dropCached();
 		if( size < 0 ) {
 			throw new IllegalArgumentException("a size can't be negative: "+size);
 		}
@@ -458,6 +508,10 @@ public class NfsClient implements Closeable {
 	}
 
 	private byte[] readAllOnce(String path) throws IOException {
+		byte[] kept = keptBytes(path);
+		if( kept != null ) {
+			return kept;
+		}
 		Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
 		try {
 			java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream();
@@ -465,7 +519,17 @@ public class NfsClient implements Closeable {
 			while( true ) {
 				byte[] b = readOpen(o, offset, CHUNK);
 				if( b.length == 0 ) {
-					return all.toByteArray();
+					byte[] bytes = all.toByteArray();
+					Delegation d = o.delegation != null && !o.delegation.write ? o.delegation : delegationOf(o.fh);
+					if( d != null && !d.write && bytes.length <= MAX_CACHED ) {
+						synchronized (delegations) {
+							// only while it is still held: a recall that came meanwhile took it out
+							if( delegations.containsKey(key(d.other)) ) {
+								d.keep(bytes.clone());
+							}
+						}
+					}
+					return bytes;
 				}
 				all.write(b);
 				offset += b.length;
@@ -473,6 +537,40 @@ public class NfsClient implements Closeable {
 		} finally {
 			closeOpen(o);
 		}
+	}
+
+	/**
+	 * The bytes of a file kept under a read delegation, when it is still the file the name leads to: nobody else can
+	 * change the file while the delegation is held, but a rename or remove of its name need not recall it.
+	 */
+	private byte[] keptBytes(String path) throws IOException {
+		boolean any = false;
+		synchronized (delegations) {
+			for (Delegation d : delegations.values()) {
+				if( d.cached() != null ) {
+					any = true;
+					break;
+				}
+			}
+		}
+		if( !any ) {
+			return null;
+		}
+		Compound c = new Compound();
+		lookup(c, path);
+		c.op(Nfs4.OP_GETFH);
+		Reply r;
+		try {
+			r = call(c, "lookup "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_GETFH);
+		} catch (NfsException e) {
+			return null;
+		}
+		byte[] fh = r.in.readOpaque(Nfs4.NFS4_FHSIZE);
+		Delegation d = delegationOf(fh);
+		byte[] kept = d == null ? null : d.cached();
+		return kept == null ? null : kept.clone();
 	}
 
 	/**
@@ -487,6 +585,7 @@ public class NfsClient implements Closeable {
 	}
 
 	private void writeOnce(String path, long offset, byte[] data) throws IOException {
+		dropCached();
 		Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true);
 		try {
 			int done = 0;
@@ -532,7 +631,7 @@ public class NfsClient implements Closeable {
 	}
 
 	private NfsLock lockOnce(String path, long offset, long length, boolean write) throws IOException {
-		Opened o = open(path, write ? Nfs4.OPEN4_SHARE_ACCESS_WRITE : Nfs4.OPEN4_SHARE_ACCESS_READ, false);
+		Opened o = open(path, write ? Nfs4.OPEN4_SHARE_ACCESS_WRITE : Nfs4.OPEN4_SHARE_ACCESS_READ, false, false);
 		NfsLock l = new NfsLock(this, path, offset, length, write, o.owner, ownerPrefix+"-lock-"+(lockCount++));
 		l.fh = o.fh;
 		l.openSeqid = o.seqid;
@@ -719,12 +818,95 @@ public class NfsClient implements Closeable {
 		byte[] other;
 		String owner;
 		int ownerSeq;
+		/** true when the open-owner is the one the file operations share (the seqid goes back to it) */
+		boolean shared;
+		String path;
+		Delegation delegation;
+	}
+
+	/** A read delegation this client holds, and the bytes of the file it has kept under it. */
+	private static final class Delegation {
+		final byte[] fh;
+		final int seqid;
+		final byte[] other;
+		final boolean write;
+		final String path;
+		byte[] data;
+
+		Delegation(byte[] fh, int seqid, byte[] other, boolean write, String path) {
+			this.fh = fh;
+			this.seqid = seqid;
+			this.other = other;
+			this.write = write;
+			this.path = path;
+		}
+
+		synchronized byte[] cached() {
+			return data;
+		}
+
+		synchronized void keep(byte[] bytes) {
+			data = bytes;
+		}
+	}
+
+	private static String key(byte[] other) {
+		StringBuilder b = new StringBuilder();
+		for (byte x : other) {
+			b.append(String.format("%02x", x));
+		}
+		return b.toString();
+	}
+
+	/** A new open-owner for the file operations: the old one's seqid is not known (or its client id is gone). */
+	private void rotateOwner() {
+		sharedOwner = ownerPrefix+"-files-"+(ownerCount++);
+		sharedSeq = 0;
 	}
 
 	private Opened open(String path, int access, boolean create) throws IOException {
+		return open(path, access, create, true);
+	}
+
+	private Opened open(String path, int access, boolean create, boolean shared) throws IOException {
+		for (int attempt = 0; ; attempt++) {
+			try {
+				return openOnce(path, access, create, shared);
+			} catch (IOException | RuntimeException e) {
+				if( shared ) {
+					// the seqid of the failed OPEN may or may not have counted: an owner of its own is certain
+					rotateOwner();
+				}
+				boolean wait = e instanceof NfsException && (((NfsException) e).getStatus() == Nfs4.NFS4ERR_DELAY
+						|| ((NfsException) e).getStatus() == Nfs4.NFS4ERR_GRACE);
+				if( !wait || attempt >= RETRIES ) {
+					throw e;
+				}
+				// the server waits for something (a delegation to come back, the end of its grace period): the OPEN is
+				// made again, with the next seqid, as the delay counted as an answer
+				if( drainReturns() == 0 ) {
+					try {
+						Thread.sleep(RETRY_WAIT);
+					} catch (InterruptedException ie) {
+						Thread.currentThread().interrupt();
+						throw new IOException("open "+path+": interrupted");
+					}
+				}
+			}
+		}
+	}
+
+	private Opened openOnce(String path, int access, boolean create, boolean shared) throws IOException {
 		Path p = split(path);
 		Opened o = new Opened();
-		o.owner = ownerPrefix+"-"+(openCount++);
+		o.shared = shared;
+		o.path = path;
+		if( shared ) {
+			o.owner = sharedOwner;
+			o.ownerSeq = sharedSeq;
+		} else {
+			o.owner = ownerPrefix+"-"+(openCount++);
+		}
 		Compound c = new Compound();
 		lookupParent(c, p);
 		XdrEncoder a = c.op(Nfs4.OP_OPEN).args;
@@ -737,7 +919,7 @@ public class NfsClient implements Closeable {
 		}
 		a.writeInt(Nfs4.CLAIM_NULL).writeString(p.name);
 		c.op(Nfs4.OP_GETFH);
-		Reply r = call(c, "open "+path);
+		Reply r = call(c, "open "+path, false);
 		skipLookup(r, p.parents);
 		r.ok(Nfs4.OP_OPEN);
 		o.seqid = r.in.readInt();
@@ -748,11 +930,32 @@ public class NfsClient implements Closeable {
 		int rflags = r.in.readInt();
 		r.in.readIntArray(8);
 		int delegation = r.in.readInt();
-		if( delegation != Nfs4.OPEN_DELEGATE_NONE ) {
-			throw new IOException("open "+path+": the server gave a delegation this client doesn't ask for");
+		int dseqid = 0;
+		byte[] dother = null;
+		if( delegation == Nfs4.OPEN_DELEGATE_READ || delegation == Nfs4.OPEN_DELEGATE_WRITE ) {
+			dseqid = r.in.readInt();
+			dother = r.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+			r.in.readBoolean();
+			if( delegation == Nfs4.OPEN_DELEGATE_WRITE ) {
+				if( r.in.readInt() == Nfs4.NFS_LIMIT_SIZE ) {
+					r.in.readLong();
+				} else {
+					r.in.readInt();
+					r.in.readInt();
+				}
+			}
+			r.in.readInt();
+			r.in.readInt();
+			r.in.readInt();
+			r.in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+		} else if( delegation != Nfs4.OPEN_DELEGATE_NONE ) {
+			throw new IOException("open "+path+": the server gave a delegation of a kind this client doesn't know: "+delegation);
 		}
 		r.ok(Nfs4.OP_GETFH);
 		o.fh = r.in.readOpaque(Nfs4.NFS4_FHSIZE);
+		if( dother != null ) {
+			o.delegation = new Delegation(o.fh, dseqid, dother, delegation == Nfs4.OPEN_DELEGATE_WRITE, path);
+		}
 		if( (rflags & Nfs4.OPEN4_RESULT_CONFIRM) != 0 ) {
 			Compound cc = new Compound().putfh(o.fh);
 			cc.op(Nfs4.OP_OPEN_CONFIRM).args.writeInt(o.seqid).writeFixedOpaque(o.other).writeInt(o.ownerSeq++);
@@ -760,6 +963,18 @@ public class NfsClient implements Closeable {
 			cr.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_OPEN_CONFIRM);
 			o.seqid = cr.in.readInt();
 			o.other = cr.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+		}
+		if( shared ) {
+			sharedSeq = o.ownerSeq;
+		}
+		if( o.delegation != null ) {
+			if( o.delegation.write ) {
+				// this client doesn't write behind a delegation: it is given back with the close
+			} else {
+				synchronized (delegations) {
+					delegations.put(key(o.delegation.other), o.delegation);
+				}
+			}
 		}
 		return o;
 	}
@@ -776,8 +991,135 @@ public class NfsClient implements Closeable {
 	private void closeOpen(Opened o) throws IOException {
 		Compound c = new Compound().putfh(o.fh);
 		c.op(Nfs4.OP_CLOSE).args.writeInt(o.ownerSeq++).writeInt(o.seqid).writeFixedOpaque(o.other);
-		Reply r = call(c, "close");
-		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_CLOSE);
+		try {
+			Reply r = call(c, "close");
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_CLOSE);
+		} catch (IOException | RuntimeException e) {
+			if( o.shared ) {
+				rotateOwner();
+			}
+			throw e;
+		}
+		if( o.shared ) {
+			sharedSeq = o.ownerSeq;
+		}
+		if( o.delegation != null && o.delegation.write ) {
+			returnDelegation(o.delegation);
+		}
+	}
+
+	// ------------------------------------------------------------------ delegations (D86)
+
+	/** The server recalls a delegation: stop using what it let this client keep, and give it back. */
+	private int recalled(byte[] other, byte[] fh) {
+		Delegation d;
+		synchronized (delegations) {
+			d = delegations.remove(key(other));
+		}
+		if( d == null ) {
+			return Nfs4.NFS4ERR_BAD_STATEID;
+		}
+		d.keep(null);
+		synchronized (delegations) {
+			pendingReturns.add(d);
+		}
+		LOG.log(System.Logger.Level.DEBUG, "NFS server recalls the delegation of "+d.path);
+		// DELEGRETURN goes over the client's connection, which an operation may be using: not in the callback's thread
+		synchronized (delegations) {
+			if( returner == null ) {
+				returner = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+					Thread t = new Thread(r, "parley-nfs-client-delegreturn");
+					t.setDaemon(true);
+					return t;
+				});
+			}
+		}
+		try {
+			returner.execute(() -> {
+				synchronized (NfsClient.this) {
+					if( !closed ) {
+						drainReturns();
+					}
+				}
+			});
+		} catch (java.util.concurrent.RejectedExecutionException e) {
+			// the client is closing
+		}
+		return Nfs4.NFS4_OK;
+	}
+
+	/**
+	 * Give back the delegations the server recalled. Called by whoever has the connection: the returner's thread, and an
+	 * operation that is waiting for the server to answer DELAY because the recall is of a delegation of this client's own.
+	 * @return how many were given back
+	 */
+	private int drainReturns() {
+		List<Delegation> list;
+		synchronized (delegations) {
+			if( pendingReturns.isEmpty() ) {
+				return 0;
+			}
+			list = new ArrayList<Delegation>(pendingReturns);
+			pendingReturns.clear();
+		}
+		for (Delegation d : list) {
+			returnDelegation(d);
+		}
+		return list.size();
+	}
+
+	/** Give a delegation back; one the server no longer has (it was revoked, the file was removed) is no matter. */
+	private void returnDelegation(Delegation d) {
+		try {
+			Compound c = new Compound().putfh(d.fh);
+			c.op(Nfs4.OP_DELEGRETURN).args.writeInt(d.seqid).writeFixedOpaque(d.other);
+			Reply r = call(c, "delegreturn");
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_DELEGRETURN);
+		} catch (IOException | RuntimeException e) {
+			LOG.log(System.Logger.Level.DEBUG, "delegation of "+d.path+" not returned: "+e);
+		}
+	}
+
+	private void returnAllDelegations() {
+		List<Delegation> all;
+		synchronized (delegations) {
+			all = new ArrayList<Delegation>(delegations.values());
+			delegations.clear();
+		}
+		for (Delegation d : all) {
+			d.keep(null);
+			if( socket != null && !socket.isClosed() ) {
+				returnDelegation(d);
+			}
+		}
+	}
+
+	/** Something changes: what a delegation let this client keep may no longer be what is in the file. */
+	private void dropCached() {
+		synchronized (delegations) {
+			for (Delegation d : delegations.values()) {
+				d.keep(null);
+			}
+		}
+	}
+
+	/** @return the delegation of a file, or null */
+	private Delegation delegationOf(byte[] fh) {
+		synchronized (delegations) {
+			for (Delegation d : delegations.values()) {
+				if( java.util.Arrays.equals(d.fh, fh) ) {
+					return d;
+				}
+			}
+		}
+		return null;
+	}
+
+	/** @return how many delegations this client holds */
+	public int getDelegationCount() {
+		synchronized (delegations) {
+			return delegations.size();
+		}
 	}
 
 	// ------------------------------------------------------------------ paths
@@ -898,8 +1240,13 @@ public class NfsClient implements Closeable {
 		Compound c = new Compound();
 		XdrEncoder a = c.op(Nfs4.OP_SETCLIENTID).args;
 		a.writeFixedOpaque(verifier).writeOpaque(ownerPrefix.getBytes(StandardCharsets.UTF_8));
-		// no callback: the server can't call this client, so it gives no delegations
-		a.writeInt(0).writeString("tcp").writeString("0.0.0.0.0.0").writeInt(0);
+		String cb = callbacks == null ? null : callbacks.universalAddress(socket.getLocalAddress());
+		if( cb == null ) {
+			// no callback: the server can't call this client, so it gives no delegations
+			a.writeInt(0).writeString("tcp").writeString("0.0.0.0.0.0").writeInt(0);
+		} else {
+			a.writeInt(ClientCallbacks.PROGRAM).writeString("tcp").writeString(cb).writeInt(1);
+		}
 		Reply r = call(c, "setclientid");
 		r.ok(Nfs4.OP_SETCLIENTID);
 		clientId = r.in.readLong();
@@ -1017,6 +1364,11 @@ public class NfsClient implements Closeable {
 
 	/** Send a COMPOUND, again a few times while the server says to wait (DELAY, GRACE). */
 	private Reply call(Compound c, String what) throws IOException {
+		return call(c, what, true);
+	}
+
+	/** @param again false when DELAY and GRACE are not to be answered by sending the same bytes again (an OPEN: its seqid is used up) */
+	private Reply call(Compound c, String what, boolean again) throws IOException {
 		for (int attempt = 0; ; attempt++) {
 			XdrEncoder a = new XdrEncoder();
 			a.writeString("parley");
@@ -1034,7 +1386,11 @@ public class NfsClient implements Closeable {
 			if( status == Nfs4.NFS4_OK ) {
 				return new Reply(r);
 			}
-			if( wait && attempt < RETRIES ) {
+			if( wait && again && attempt < RETRIES ) {
+				if( drainReturns() > 0 ) {
+					// what the server waited for is back: try again at once
+					continue;
+				}
 				try {
 					Thread.sleep(RETRY_WAIT);
 				} catch (InterruptedException e) {
