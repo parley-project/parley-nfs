@@ -494,6 +494,49 @@ public class NfsServerTest {
 		assertFalse(root.getChild("pipe").exists());
 	}
 
+	/** A link answers its own times, not those of what it leads to (D78). */
+	@Test
+	public void aLinkAnswersItsOwnTimes(@TempDir Path tmp) throws Exception {
+		Path target = tmp.resolve("target.txt");
+		Files.write(target, bytes("data"));
+		Path link = tmp.resolve("ln");
+		long oldTime = 1_000_000_000L;
+		long newTime = 1_500_000_000L;
+		try {
+			Files.createSymbolicLink(link, target.getFileName());
+			java.nio.file.attribute.BasicFileAttributeView v = Files.getFileAttributeView(link,
+					java.nio.file.attribute.BasicFileAttributeView.class, java.nio.file.LinkOption.NOFOLLOW_LINKS);
+			v.setTimes(java.nio.file.attribute.FileTime.fromMillis(newTime * 1000),
+					java.nio.file.attribute.FileTime.fromMillis(newTime * 1000), null);
+		} catch (IOException | UnsupportedOperationException e) {
+			org.junit.jupiter.api.Assumptions.assumeTrue(false, "this system can't make a link or set its times: " + e);
+		}
+		Files.setLastModifiedTime(target, java.nio.file.attribute.FileTime.fromMillis(oldTime * 1000));
+		Files.setAttribute(target, "lastAccessTime", java.nio.file.attribute.FileTime.fromMillis(oldTime * 1000));
+		assertEquals(newTime, Files.getLastModifiedTime(link, java.nio.file.LinkOption.NOFOLLOW_LINKS).toMillis() / 1000);
+
+		root = new us.bringardner.parley.files.fileproxy.FileProxyFactory().createFileSource(tmp.toString());
+		server = new NfsServer("test.nfs.link-times", 0);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+		TestClient c = client();
+
+		for (String name : new String[] {"ln", "target.txt"}) {
+			long expected = name.equals("ln") ? newTime : oldTime;
+			Result r = c.compound(new Ops().putroot().lookup(name).getattr(Nfs4.FATTR4_TIME_ACCESS, Nfs4.FATTR4_TIME_MODIFY));
+			r.ok(Nfs4.OP_PUTROOTFH).ok(Nfs4.OP_LOOKUP).ok(Nfs4.OP_GETATTR);
+			r.in.readIntArray(8);
+			XdrDecoder v = new XdrDecoder(r.in.readOpaque(4096));
+			// reading a link (its text) changes its access time on some systems, so that is checked only for the file
+			long access = v.readLong();
+			if( name.equals("target.txt") ) {
+				assertEquals(expected, access, name + " access time");
+			}
+			v.readInt();
+			assertEquals(expected, v.readLong(), name + " modify time");
+		}
+	}
+
 	/**
 	 * Symbolic links keep the text they were made with (decision D72): CREATE, READLINK, the type and size, LOOKUP,
 	 * a link to nothing, no open or lookup through one, and REMOVE of the link and not of what it points to.
