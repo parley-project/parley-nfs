@@ -658,7 +658,14 @@ public class Attributes {
 		}
 		// the provider knows how to turn a name into what it keeps (a local file, an operating system user)
 		UserPrincipal p = new us.bringardner.parley.files.FileSourceUser(0, name);
-		if( !f.setOwner(p) ) {
+		boolean done;
+		try {
+			done = f.setOwner(p);
+		} catch (UnsupportedOperationException e) {
+			// a provider without owners says so with an exception as well as with false (decision D74)
+			done = false;
+		}
+		if( !done ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system has no user "+name+" or can't change owners");
 		}
 	}
@@ -667,7 +674,13 @@ public class Attributes {
 	private void changeGroup(String asked, FileSource f) throws IOException, Nfs4Exception {
 		String name = unqualify(asked);
 		GroupPrincipal p = new us.bringardner.parley.files.FileSourceGroup(0, name);
-		if( !f.setGroup(p) ) {
+		boolean done;
+		try {
+			done = f.setGroup(p);
+		} catch (UnsupportedOperationException e) {
+			done = false;
+		}
+		if( !done ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "the file system has no group "+name+" or can't change groups");
 		}
 	}
