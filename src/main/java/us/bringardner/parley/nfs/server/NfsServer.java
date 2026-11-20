@@ -399,8 +399,12 @@ public class NfsServer extends NioServer {
 			}
 		}
 		if( state == null ) {
-			logInfo("Server "+getName()+": no "+propertyName(PROPERTY_STATE_DIR)+", so after a restart a renamed file's handle is stale, "
-				+"access control lists can't be set (NFS4ERR_ATTRNOTSUPP)"+(delegations != null ? " and delegations aren't kept" : ""));
+			// said at every start, since a server meant to keep running needs the folder (decision D41); a test or a
+			// short job doesn't
+			logWarn("Server "+getName()+": no "+propertyName(PROPERTY_STATE_DIR)+", so after a restart the handle of a file that was renamed, "
+				+"or whose path is longer than 119 bytes, is stale; access control lists can't be set (NFS4ERR_ATTRNOTSUPP)"
+				+(delegations != null ? "; delegations aren't kept" : "")
+				+". That is fine for a test or a short job; set "+propertyName(PROPERTY_STATE_DIR)+" for a server that is to keep running");
 		}
 		if( state != null && delegations != null ) {
 			// delegations are kept, so that their clients can reclaim them after a restart (D67)
