@@ -2,6 +2,15 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Fixed (2026-11-20: an idle node dropped that could not come back, T11)
+
+- Without a state folder, the node table dropped an idle node whose id was not its path's hash (a renamed file), when
+  there were more nodes than parley.nfs.maxNodes. Decision D42 says such a node stays, since its id is lost on a restart
+  with no node file; the check looked at the table in memory, which is filled with or without a file. The node is kept
+  now. This was also the cause of the test `NodeTableTest.withoutAFileOnlyNodesThatComeBackAreDropped` failing
+  about one run in four (the nodes were dropped in the order of their times, and the time of a, b and c is the same
+  millisecond or not). A new test, `aRenamedNodeWithNoFileIsKeptWhateverItsAge`, does not depend on that.
+
 ### Fixed (2026-11-20: a provider that can't change owners, T2)
 
 - A file system whose `setOwner` or `setGroup` throws `UnsupportedOperationException` (instead of answering false)

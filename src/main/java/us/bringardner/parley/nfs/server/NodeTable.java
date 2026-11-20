@@ -235,7 +235,10 @@ public class NodeTable {
 			if( n.isRoot() || now-n.getLastUsed() < IDLE_BEFORE_DROP || !n.opens.isEmpty() || !n.locks.isEmpty() ) {
 				continue;
 			}
-			if( !stored.containsKey(n.getFileid()) && n.getFileid() != hash(n.getPath()) ) {
+			// an id that is not its path's hash comes back only from the node file (decision D42): with no file
+			// (no state folder) the entry in memory is lost on a restart, so such a node is kept
+			boolean comesBack = n.getFileid() == hash(n.getPath()) || (store != null && stored.containsKey(n.getFileid()));
+			if( !comesBack ) {
 				continue;
 			}
 			candidates.add(n);
