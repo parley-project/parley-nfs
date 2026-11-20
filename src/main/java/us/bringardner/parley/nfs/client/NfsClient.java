@@ -99,6 +99,9 @@ public class NfsClient implements Closeable {
 	private volatile boolean closed;
 	private ScheduledExecutorService renewer;
 	private final NfsKerberos kerberos;
+	private final List<NfsLock> locks = new ArrayList<NfsLock>();
+	private volatile java.util.function.Consumer<NfsLock> lockLostHandler;
+	private int lockCount;
 	private volatile NfsKerberos.Session session;
 
 	/**
@@ -195,6 +198,7 @@ public class NfsClient implements Closeable {
 		connect();
 		reportedLost = false;
 		LOG.log(System.Logger.Level.INFO, "NFS client reconnected to "+host+":"+port);
+		reclaimLocks();
 	}
 
 	/** One operation of this client, which can be run again. */
@@ -505,6 +509,205 @@ public class NfsClient implements Closeable {
 			}
 		} finally {
 			closeOpen(o);
+		}
+	}
+
+
+	// ------------------------------------------------------------------ locks (D85)
+
+	/** Called when a lock could not be reclaimed after the connection was made again. */
+	public void setLockLostHandler(java.util.function.Consumer<NfsLock> handler) {
+		this.lockLostHandler = handler;
+	}
+
+	/**
+	 * Take a byte range lock, which is held until it is unlocked. The server answers at once: a lock another client
+	 * holds is not waited for.
+	 * @param length the length, or {@link NfsLock#TO_END}
+	 * @param write true for a write (exclusive) lock, which needs write access to the file; false for a read (shared) lock
+	 * @throws NfsLockDeniedException when another client holds a conflicting lock
+	 */
+	public synchronized NfsLock lock(String path, long offset, long length, boolean write) throws IOException {
+		return run(false, () -> lockOnce(path, offset, length, write));
+	}
+
+	private NfsLock lockOnce(String path, long offset, long length, boolean write) throws IOException {
+		Opened o = open(path, write ? Nfs4.OPEN4_SHARE_ACCESS_WRITE : Nfs4.OPEN4_SHARE_ACCESS_READ, false);
+		NfsLock l = new NfsLock(this, path, offset, length, write, o.owner, ownerPrefix+"-lock-"+(lockCount++));
+		l.fh = o.fh;
+		l.openSeqid = o.seqid;
+		l.openOther = o.other;
+		l.openOwnerSeq = o.ownerSeq;
+		boolean ok = false;
+		try {
+			sendLock(l, false);
+			ok = true;
+		} finally {
+			if( !ok ) {
+				o.ownerSeq = l.openOwnerSeq;
+				closeOpen(o);
+			}
+		}
+		locks.add(l);
+		return l;
+	}
+
+	/** The first LOCK of a lock-owner (with its open-owner's seqid), taking or reclaiming the range. */
+	private void sendLock(NfsLock l, boolean reclaim) throws IOException {
+		Compound c = new Compound().putfh(l.fh);
+		XdrEncoder a = c.op(Nfs4.OP_LOCK).args;
+		a.writeInt(l.isWrite() ? Nfs4.WRITE_LT : Nfs4.READ_LT).writeBoolean(reclaim).writeLong(l.getOffset()).writeLong(l.getLength());
+		a.writeBoolean(true).writeInt(l.openOwnerSeq++).writeInt(l.openSeqid).writeFixedOpaque(l.openOther);
+		a.writeInt(0).writeLong(clientId).writeOpaque(l.lockOwner.getBytes(StandardCharsets.UTF_8));
+		Reply r = call(c, "lock "+l.getPath());
+		r.ok(Nfs4.OP_PUTFH);
+		int got = r.in.readInt();
+		int status = r.in.readInt();
+		if( got != Nfs4.OP_LOCK ) {
+			throw new IOException("expected LOCK, the server answered "+Nfs4.opName(got));
+		}
+		if( status == Nfs4.NFS4ERR_DENIED ) {
+			throw readDenied(r, "lock "+l.getPath());
+		}
+		if( status != Nfs4.NFS4_OK ) {
+			throw new NfsException(status, "lock "+l.getPath());
+		}
+		r.in.readInt();
+		l.lockOther = r.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+		l.lockSeqid = 1;
+	}
+
+	private static NfsLockDeniedException readDenied(Reply r, String what) throws IOException {
+		long offset = r.in.readLong();
+		long length = r.in.readLong();
+		boolean write = r.in.readInt() == Nfs4.WRITE_LT;
+		r.in.readLong();
+		r.in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
+		return new NfsLockDeniedException(what, offset, length == -1L ? NfsLock.TO_END : length, write);
+	}
+
+	/**
+	 * Ask if a lock could be taken.
+	 * @return null when it could, otherwise the conflicting lock as the server describes it
+	 */
+	public synchronized NfsLockDeniedException testLock(String path, long offset, long length, boolean write) throws IOException {
+		return run(true, () -> testLockOnce(path, offset, length, write));
+	}
+
+	private NfsLockDeniedException testLockOnce(String path, long offset, long length, boolean write) throws IOException {
+		Compound c = new Compound();
+		lookup(c, path);
+		XdrEncoder a = c.op(Nfs4.OP_LOCKT).args;
+		a.writeInt(write ? Nfs4.WRITE_LT : Nfs4.READ_LT).writeLong(offset).writeLong(length).writeLong(clientId);
+		a.writeOpaque((ownerPrefix+"-test").getBytes(StandardCharsets.UTF_8));
+		Reply r = call(c, "test lock "+path);
+		skipLookup(r, path);
+		int got = r.in.readInt();
+		int status = r.in.readInt();
+		if( got != Nfs4.OP_LOCKT ) {
+			throw new IOException("expected LOCKT, the server answered "+Nfs4.opName(got));
+		}
+		if( status == Nfs4.NFS4_OK ) {
+			return null;
+		}
+		if( status == Nfs4.NFS4ERR_DENIED ) {
+			return readDenied(r, "test lock "+path);
+		}
+		throw new NfsException(status, "test lock "+path);
+	}
+
+	synchronized void unlock(NfsLock l) throws IOException {
+		if( l.released ) {
+			return;
+		}
+		run(true, () -> {
+			unlockOnce(l);
+			return null;
+		});
+	}
+
+	private void unlockOnce(NfsLock l) throws IOException {
+		if( l.released ) {
+			return;
+		}
+		if( !l.lost ) {
+			Compound c = new Compound().putfh(l.fh);
+			XdrEncoder a = c.op(Nfs4.OP_LOCKU).args;
+			a.writeInt(l.isWrite() ? Nfs4.WRITE_LT : Nfs4.READ_LT).writeInt(l.lockSeqid).writeInt(1).writeFixedOpaque(l.lockOther);
+			a.writeLong(l.getOffset()).writeLong(l.getLength());
+			call(c, "unlock "+l.getPath()).ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_LOCKU);
+			l.lockSeqid++;
+			Compound rc = new Compound();
+			rc.op(Nfs4.OP_RELEASE_LOCKOWNER).args.writeLong(clientId).writeOpaque(l.lockOwner.getBytes(StandardCharsets.UTF_8));
+			call(rc, "release lock owner").ok(Nfs4.OP_RELEASE_LOCKOWNER);
+			Opened o = new Opened();
+			o.fh = l.fh;
+			o.seqid = l.openSeqid;
+			o.other = l.openOther;
+			o.ownerSeq = l.openOwnerSeq;
+			closeOpen(o);
+		}
+		l.released = true;
+		locks.remove(l);
+	}
+
+	/**
+	 * After the connection was made again (a new client id): take back each lock, by reclaiming its open and then the
+	 * lock, which the server allows in its grace period only. A lock the server refuses is lost, and the caller is told.
+	 * A connection lost again is not a lost lock: the next reconnect tries again.
+	 */
+	private void reclaimLocks() throws IOException {
+		for (NfsLock l : new ArrayList<NfsLock>(locks)) {
+			if( l.lost || l.released ) {
+				continue;
+			}
+			try {
+				Compound c = new Compound().putfh(l.fh);
+				l.openOwnerSeq = 0;
+				XdrEncoder a = c.op(Nfs4.OP_OPEN).args;
+				a.writeInt(l.openOwnerSeq++).writeInt(l.isWrite() ? Nfs4.OPEN4_SHARE_ACCESS_WRITE : Nfs4.OPEN4_SHARE_ACCESS_READ)
+					.writeInt(Nfs4.OPEN4_SHARE_DENY_NONE).writeLong(clientId).writeOpaque(l.openOwner.getBytes(StandardCharsets.UTF_8));
+				a.writeInt(Nfs4.OPEN4_NOCREATE).writeInt(Nfs4.CLAIM_PREVIOUS).writeInt(Nfs4.OPEN_DELEGATE_NONE);
+				Reply r = call(c, "reclaim open "+l.getPath());
+				r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_OPEN);
+				l.openSeqid = r.in.readInt();
+				l.openOther = r.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+				r.in.readBoolean();
+				r.in.readLong();
+				r.in.readLong();
+				int rflags = r.in.readInt();
+				if( (rflags & Nfs4.OPEN4_RESULT_CONFIRM) != 0 ) {
+					Compound cc = new Compound().putfh(l.fh);
+					cc.op(Nfs4.OP_OPEN_CONFIRM).args.writeInt(l.openSeqid).writeFixedOpaque(l.openOther).writeInt(l.openOwnerSeq++);
+					Reply cr = call(cc, "confirm reclaimed open");
+					cr.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_OPEN_CONFIRM);
+					l.openSeqid = cr.in.readInt();
+					l.openOther = cr.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+				}
+				sendLock(l, true);
+			} catch (NfsException e) {
+				lose(l, "the server did not give it back: "+e.getMessage());
+			} catch (IOException e) {
+				if( isConnectionLost(e) ) {
+					throw e;
+				}
+				lose(l, "it could not be reclaimed: "+e);
+			}
+		}
+	}
+
+	private void lose(NfsLock l, String why) {
+		l.lost = true;
+		l.lostReason = why;
+		locks.remove(l);
+		LOG.log(System.Logger.Level.WARNING, "NFS client lost "+l+": "+why);
+		java.util.function.Consumer<NfsLock> h = lockLostHandler;
+		if( h != null ) {
+			try {
+				h.accept(l);
+			} catch (RuntimeException e) {
+				LOG.log(System.Logger.Level.WARNING, "the lock lost handler failed: "+e);
+			}
 		}
 	}
 

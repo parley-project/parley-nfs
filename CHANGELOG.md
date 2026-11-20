@@ -2,6 +2,18 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-20: the client takes byte range locks, T9)
+
+- `NfsClient.lock(path, offset, length, write)` takes a byte range lock (LOCK; `NfsLock.TO_END` for the rest of the
+  file) and returns an `NfsLock` that is held until `unlock()`/`close()` (LOCKU, RELEASE_LOCKOWNER and a close of the
+  open it kept). A lock another client holds is `NfsLockDeniedException` (with the holder's range and type; the server
+  doesn't wait). `testLock` asks without taking (LOCKT). Each lock has an open and a lock-owner of its own.
+- After a lost connection or a restart the client reclaims each lock in the server's grace period (OPEN with
+  CLAIM_PREVIOUS, then LOCK with reclaim). A lock the server refuses is lost: `isHeld()` turns false, `getLostReason()`
+  says why and the handler of `setLockLostHandler` is called. This package's own server keeps no locks across a restart and
+  has no grace period for them (D21), so against it every lock is lost on a restart; a Linux server gives them back.
+- Tests: `NfsClientLockTest`; `NfsClientLiveTest.byteRangeLocks` (the reclaim itself needs a real server that restarts).
+
 ### Added (2026-11-20: the client logs in with Kerberos, T8)
 
 - `NfsClient` can connect with Kerberos (RPCSEC_GSS, RFC 2203) instead of AUTH_SYS: `new NfsClient(host, port, mount,
