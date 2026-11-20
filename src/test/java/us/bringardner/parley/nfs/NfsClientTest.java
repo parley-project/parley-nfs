@@ -209,6 +209,71 @@ public class NfsClientTest {
 		assertThrows(IllegalArgumentException.class, () -> c.truncate("f.txt", -1));
 	}
 
+	/** The server stopped and another one (a restart: no state of its own) took its place, same port, same files. */
+	private void restartServer(String prefix) throws Exception {
+		int port = server.getLocalPort();
+		server.stop();
+		assertTrue(server.awaitStopped(10000));
+		server = new NfsServer(prefix, port);
+		server.setExport(new Export("test", root, false));
+		server.startAndWait(10000);
+	}
+
+	@Test
+	public void aRestartedServerIsReconnected() throws Exception {
+		String prefix = "test.nfs.client.restart";
+		startMemory(prefix);
+		NfsClient c = client("/");
+		c.write("a.txt", 0, bytes("before"));
+
+		restartServer(prefix);
+
+		// safe operations are run again on a new connection, with a new client id
+		assertEquals("before", new String(c.readAll("a.txt"), StandardCharsets.UTF_8));
+		c.write("b.txt", 0, bytes("after"));
+		assertEquals("after", new String(root.getChild("b.txt").getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+		assertEquals(2, c.list("/").size());
+	}
+
+	@Test
+	public void anOperationThatIsNotSafeToRepeatIsNotRepeated() throws Exception {
+		String prefix = "test.nfs.client.norepeat";
+		startMemory(prefix);
+		NfsClient c = client("/");
+		c.mkdir("one");
+
+		restartServer(prefix);
+
+		// the connection was lost with the request in flight, so it is not known if a make-a-folder was done: it is reported
+		IOException e = assertThrows(IOException.class, () -> c.mkdir("two"));
+		assertFalse(e instanceof NfsException, "a lost connection, not an answer of the server: " + e);
+		// the connection is made again for the next call
+		c.mkdir("three");
+		assertTrue(c.exists("three"));
+		assertFalse(c.exists("two"), "the first make-a-folder never reached the server");
+	}
+
+	@Test
+	public void theBackgroundRenewalGetsTheConnectionBack() throws Exception {
+		String prefix = "test.nfs.client.background";
+		System.setProperty(prefix+".leaseTime", "2s");
+		try {
+			startMemory(prefix);
+			NfsClient c = client("/");
+			assertEquals(2, c.getLeaseSeconds());
+			c.mkdir("one");
+
+			restartServer(prefix);
+
+			// no call of ours: the client renews every second, sees the lost connection and makes it again
+			Thread.sleep(3500);
+			c.mkdir("two");   // would throw if the connection were still the old one (mkdir is not repeated)
+			assertTrue(c.exists("two"));
+		} finally {
+			System.clearProperty(prefix+".leaseTime");
+		}
+	}
+
 	@Test
 	public void filesAndFolders() throws Exception {
 		startMemory("test.nfs.client.basic");
