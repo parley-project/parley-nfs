@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import us.bringardner.parley.nfs.client.NfsClient;
 import us.bringardner.parley.nfs.client.NfsException;
 import us.bringardner.parley.nfs.client.NfsFileInfo;
+import us.bringardner.parley.nfs.client.NfsKerberos;
 
 /**
  * The generic client (D77) against a real NFS server, such as the Linux kernel's in a VM (tools/client-live-test.sh
@@ -55,11 +56,15 @@ import us.bringardner.parley.nfs.client.NfsFileInfo;
  * nfs.live.count (400), how many files the long listing makes. Every file is several round trips, so over the internet
  * (about 100 ms each) the 400 take minutes; a smaller count is quicker, but a short listing fits in one READDIR reply and
  * no longer shows that a long one is read in parts, so keep the default where that matters.
+ * With nfs.live.krb5.service ("nfs@host" or "nfs/host@REALM") the client logs in with Kerberos instead (D84): nfs.live.krb5.level
+ * is authentication (krb5, the default), integrity (krb5i) or privacy (krb5p); with nfs.live.krb5.principal and nfs.live.krb5.keytab
+ * the user is logged in from a key table, otherwise from the ticket cache (kinit).
  * Everything happens in a folder of its own, which is removed at the end.
  */
 public class NfsClientLiveTest {
 
 	private NfsClient client;
+	private NfsKerberos kerberos;
 	private String work;
 
 	private static byte[] bytes(String s) {
@@ -70,8 +75,18 @@ public class NfsClientLiveTest {
 	public void connect() throws Exception {
 		String host = System.getProperty("nfs.live.host");
 		Assumptions.assumeTrue(host != null && !host.isEmpty(), "no nfs.live.host: not testing against a real server");
-		client = new NfsClient(host, Integer.getInteger("nfs.live.port", 2049), System.getProperty("nfs.live.mount", "/"),
-				Long.getLong("nfs.live.uid", 1000L), Long.getLong("nfs.live.gid", 1000L), 20000);
+		int port = Integer.getInteger("nfs.live.port", 2049);
+		String mount = System.getProperty("nfs.live.mount", "/");
+		String service = System.getProperty("nfs.live.krb5.service");
+		if( service != null && !service.isEmpty() ) {
+			NfsKerberos.Protection level = NfsKerberos.Protection.valueOf(System.getProperty("nfs.live.krb5.level", "AUTHENTICATION").toUpperCase());
+			String principal = System.getProperty("nfs.live.krb5.principal");
+			kerberos = principal == null ? new NfsKerberos(service, null, level)
+					: NfsKerberos.withKeytab(service, principal, new java.io.File(System.getProperty("nfs.live.krb5.keytab")), level);
+			client = new NfsClient(host, port, mount, 20000, kerberos);
+		} else {
+			client = new NfsClient(host, port, mount, Long.getLong("nfs.live.uid", 1000L), Long.getLong("nfs.live.gid", 1000L), 20000);
+		}
 		work = "client-live-" + System.currentTimeMillis();
 		client.mkdir(work);
 	}
@@ -85,6 +100,9 @@ public class NfsClientLiveTest {
 				}
 			} finally {
 				client.close();
+				if( kerberos != null ) {
+					kerberos.close();
+				}
 			}
 		}
 	}

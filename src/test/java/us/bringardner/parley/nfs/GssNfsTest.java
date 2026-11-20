@@ -87,14 +87,10 @@ import us.bringardner.parley.nfs.server.NfsServer;
  */
 public class GssNfsTest {
 
-	private static final String REALM = "EXAMPLE.COM";
-	private static final String SERVER = "nfs/localhost@"+REALM;
+	private static final String REALM = TestKdc.REALM;
+	private static final String SERVER = TestKdc.SERVER;
 
-	@TempDir
-	static Path kdcDir;
-	private static SimpleKdcServer kdc;
-	private static String oldKrb5Conf;
-	private static final Map<String, File> keytabs = new HashMap<String, File>();
+	private static final Map<String, File> keytabs = TestKdc.KEYTABS;
 
 	private MemoryFileSourceFactory mem;
 	private NfsServer server;
@@ -104,47 +100,7 @@ public class GssNfsTest {
 
 	@BeforeAll
 	public static void startKdc() throws Exception {
-		int port;
-		try (ServerSocket s = new ServerSocket(0)) {
-			port = s.getLocalPort();
-		}
-		File dir = kdcDir.toFile();
-		kdc = new SimpleKdcServer();
-		kdc.setWorkDir(dir);
-		kdc.setKdcRealm(REALM);
-		kdc.setKdcHost("localhost");
-		kdc.setKdcTcpPort(port);
-		kdc.setAllowUdp(false);
-		kdc.setAllowTcp(true);
-		kdc.init();
-		kdc.start();
-		for (String p : new String[] { SERVER, "alice@"+REALM, "bob@"+REALM, "alice@OTHER.REALM" }) {
-			if( p.endsWith("OTHER.REALM") ) {
-				continue;
-			}
-			File k = new File(dir, p.replace('/', '_')+".keytab");
-			kdc.createPrincipal(p, "secret");
-			kdc.exportPrincipal(p, k);
-			keytabs.put(p, k);
-		}
-		File conf = new File(dir, "krb5.conf");
-		Files.write(conf.toPath(), ("[libdefaults]\n default_realm = "+REALM+"\n dns_lookup_kdc = false\n dns_lookup_realm = false\n"
-				+" udp_preference_limit = 1\n rdns = false\n"
-				+"[realms]\n "+REALM+" = {\n  kdc = localhost:"+port+"\n }\n").getBytes(StandardCharsets.UTF_8));
-		oldKrb5Conf = System.getProperty("java.security.krb5.conf");
-		System.setProperty("java.security.krb5.conf", conf.getAbsolutePath());
-	}
-
-	@AfterAll
-	public static void stopKdc() throws Exception {
-		if( kdc != null ) {
-			kdc.stop();
-		}
-		if( oldKrb5Conf == null ) {
-			System.clearProperty("java.security.krb5.conf");
-		} else {
-			System.setProperty("java.security.krb5.conf", oldKrb5Conf);
-		}
+		TestKdc.start();
 	}
 
 	@AfterEach

@@ -2,6 +2,17 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-20: the client logs in with Kerberos, T8)
+
+- `NfsClient` can connect with Kerberos (RPCSEC_GSS, RFC 2203) instead of AUTH_SYS: `new NfsClient(host, port, mount,
+  timeoutMillis, kerberos)`. `NfsKerberos` says who the user is (a key table with `NfsKerberos.withKeytab`, a
+  `Subject`, or null for the ticket cache of kinit) and the protection: `AUTHENTICATION` (krb5), `INTEGRITY` (krb5i) or
+  `PRIVACY` (krb5p). The server's name is "nfs@host" or "nfs/host@REALM". One security context is made for each
+  connection; after a lost connection or a server restart (the server no longer has the context) the client's
+  recovery (D81) makes a new one. Closing the client ends the context. The caller closes the `NfsKerberos`.
+- `NfsClientLiveTest` takes `nfs.live.krb5.service`, `.level`, `.principal` and `.keytab` to run against a real
+  Kerberos server. The tests (`NfsClientGssTest`) use the Kerby KDC of `GssNfsTest`, now one `TestKdc` for the JVM.
+
 ### Changed (2026-11-20: a start with no state folder warns)
 
 - A server started with no `parley.nfs.stateDir` logs a warning (it was an info line) that says what it costs: the
