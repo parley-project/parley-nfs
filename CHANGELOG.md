@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-19: a client, D77)
+
+- `us.bringardner.parley.nfs.client.NfsClient`: a generic NFSv4.0 client (AUTH_SYS) that mounts a path of a server and
+  gets information about a file, lists a folder, reads, writes, makes folders and removes, and renews its lease. It uses
+  the `rpc` package of this module and knows nothing of FileSource (a FileSource over it is a separate module).
+  Not yet: Kerberos, delegations and callbacks, locks, recovery after a server restart, rename, links, attribute changes.
+
 ### Added (2026-11-19: the mapped root and modes, D76)
 
 - With `parley.nfs.enforceModes`, the mapped root (AUTH_SYS uid 0 mapped to a registry user with write on the export)
