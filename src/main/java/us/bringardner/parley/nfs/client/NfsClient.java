@@ -63,6 +63,13 @@ public class NfsClient implements Closeable {
 	/** The most bytes of one READ or WRITE call. */
 	public static final int CHUNK = 32768;
 
+	/**
+	 * The mode a new folder and a new file ask for. A server that is given none may make them with no permissions
+	 * at all (the Linux kernel's does), so every create says what it wants; the server's umask or policy can still narrow it.
+	 */
+	private static final int DIR_MODE = 0755;
+	private static final int FILE_MODE = 0644;
+
 	private static final int[] FILE_ATTRS = bitmap(Nfs4.FATTR4_TYPE, Nfs4.FATTR4_SIZE, Nfs4.FATTR4_FILEID,
 			Nfs4.FATTR4_MODE, Nfs4.FATTR4_TIME_MODIFY);
 	private static final byte[] NO_STATE = new byte[12];
@@ -206,7 +213,7 @@ public class NfsClient implements Closeable {
 		Path p = split(path);
 		Compound c = new Compound();
 		lookupParent(c, p);
-		c.op(Nfs4.OP_CREATE).args.writeInt(Nfs4.NF4DIR).writeString(p.name).writeIntArray(new int[0]).writeInt(0);
+		c.op(Nfs4.OP_CREATE).args.writeInt(Nfs4.NF4DIR).writeString(p.name).writeIntArray(bitmap(Nfs4.FATTR4_MODE)).writeInt(4).writeInt(DIR_MODE);
 		Reply r = call(c, "mkdir "+path);
 		skipLookup(r, p.parents);
 		r.ok(Nfs4.OP_CREATE);
@@ -305,7 +312,7 @@ public class NfsClient implements Closeable {
 		a.writeInt(o.ownerSeq++).writeInt(access).writeInt(Nfs4.OPEN4_SHARE_DENY_NONE).writeLong(clientId)
 			.writeOpaque(o.owner.getBytes(StandardCharsets.UTF_8));
 		if( create ) {
-			a.writeInt(Nfs4.OPEN4_CREATE).writeInt(Nfs4.UNCHECKED4).writeIntArray(new int[0]).writeInt(0);
+			a.writeInt(Nfs4.OPEN4_CREATE).writeInt(Nfs4.UNCHECKED4).writeIntArray(bitmap(Nfs4.FATTR4_MODE)).writeInt(4).writeInt(FILE_MODE);
 		} else {
 			a.writeInt(Nfs4.OPEN4_NOCREATE);
 		}
