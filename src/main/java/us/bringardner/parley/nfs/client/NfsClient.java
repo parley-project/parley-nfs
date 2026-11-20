@@ -98,6 +98,8 @@ public class NfsClient implements Closeable {
 	private long leaseSeconds = 90;
 	private volatile boolean closed;
 	private ScheduledExecutorService renewer;
+	private final NfsKerberos kerberos;
+	private volatile NfsKerberos.Session session;
 
 	/**
 	 * Connect, set up a client ID and mount a path.
@@ -109,6 +111,19 @@ public class NfsClient implements Closeable {
 	 * @param timeoutMillis how long to wait for an answer
 	 */
 	public NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis) throws IOException {
+		this(host, port, mount, uid, gid, timeoutMillis, null);
+	}
+
+	/**
+	 * Connect with Kerberos (decision D84): the server knows the user by the Kerberos name, so no uid or gid is claimed.
+	 * @param kerberos who the user is and how the calls are protected; the caller closes it after this client
+	 */
+	public NfsClient(String host, int port, String mount, int timeoutMillis, NfsKerberos kerberos) throws IOException {
+		this(host, port, mount, 0, 0, timeoutMillis, java.util.Objects.requireNonNull(kerberos, "kerberos"));
+	}
+
+	private NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, NfsKerberos kerberos) throws IOException {
+		this.kerberos = kerberos;
 		this.uid = uid;
 		this.gid = gid;
 		String name = "parley-nfs-client";
@@ -143,6 +158,11 @@ public class NfsClient implements Closeable {
 			socket = s;
 			in = new DataInputStream(s.getInputStream());
 			out = s.getOutputStream();
+			if( kerberos != null ) {
+				NfsKerberos.Session n = new NfsKerberos.Session(kerberos);
+				session = n;
+				n.establish(wire);
+			}
 			setClientId();
 			mount(mountPath);
 		} catch (IOException | RuntimeException e) {
@@ -239,6 +259,12 @@ public class NfsClient implements Closeable {
 				r.awaitTermination(5, TimeUnit.SECONDS);
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
+			}
+		}
+		NfsKerberos.Session g = session;
+		if( g != null ) {
+			synchronized (this) {
+				g.destroy(wire);
 			}
 		}
 		Socket s = socket;
@@ -820,35 +846,60 @@ public class NfsClient implements Closeable {
 
 	private XdrDecoder rpc(int proc, XdrEncoder args) throws IOException {
 		int x = xid++;
-		XdrEncoder e = new XdrEncoder();
-		e.writeInt(x).writeInt(Rpc.CALL).writeInt(Rpc.RPC_VERSION).writeInt(Nfs4.PROGRAM).writeInt(Nfs4.VERSION).writeInt(proc);
-		e.writeInt(Rpc.AUTH_SYS);
-		e.writeOpaque(new AuthSys((int) (System.currentTimeMillis()/1000), machineName, uid, gid, new long[] {gid}).encode());
-		e.writeInt(Rpc.AUTH_NONE).writeInt(0);
-		e.write(args);
-		ByteBuffer f = RecordMarkingDecoder.frame(e);
-		byte[] b = new byte[f.remaining()];
-		f.get(b);
-		out.write(b);
-		out.flush();
-		XdrDecoder r = readRecord();
-		if( r.readInt() != x ) {
-			throw new IOException("the reply isn't for this call (xid)");
+		NfsKerberos.Session gss = session;
+		long seq = 0;
+		XdrEncoder e;
+		if( kerberos == null ) {
+			e = new XdrEncoder();
+			e.writeInt(x).writeInt(Rpc.CALL).writeInt(Rpc.RPC_VERSION).writeInt(Nfs4.PROGRAM).writeInt(Nfs4.VERSION).writeInt(proc);
+			e.writeInt(Rpc.AUTH_SYS);
+			e.writeOpaque(new AuthSys((int) (System.currentTimeMillis()/1000), machineName, uid, gid, new long[] {gid}).encode());
+			e.writeInt(Rpc.AUTH_NONE).writeInt(0);
+			e.write(args);
+		} else {
+			seq = gss.nextSeq();
+			e = gss.dataCall(x, proc, args, seq);
 		}
-		if( r.readInt() != Rpc.REPLY ) {
-			throw new IOException("not an RPC reply");
-		}
+		XdrDecoder r = wire.exchange(x, e);
 		if( r.readInt() != Rpc.MSG_ACCEPTED ) {
+			if( gss != null ) {
+				gss.denied(r);
+			}
 			throw new IOException("the server denied the call: "+r.readInt());
 		}
 		r.readInt();
-		r.readOpaque(Rpc.MAX_AUTH_BYTES);
+		byte[] verifier = r.readOpaque(Rpc.MAX_AUTH_BYTES);
 		int accept = r.readInt();
 		if( accept != Rpc.SUCCESS ) {
 			throw new IOException("the server didn't accept the call: accept_stat "+accept);
 		}
-		return r;
+		return gss == null ? r : gss.results(seq, verifier, r);
 	}
+
+	/** Calls and replies on the current connection. */
+	private final NfsKerberos.Session.Wire wire = new NfsKerberos.Session.Wire() {
+		@Override
+		public int nextXid() {
+			return xid++;
+		}
+
+		@Override
+		public XdrDecoder exchange(int x, XdrEncoder call) throws IOException {
+			ByteBuffer f = RecordMarkingDecoder.frame(call);
+			byte[] b = new byte[f.remaining()];
+			f.get(b);
+			out.write(b);
+			out.flush();
+			XdrDecoder r = readRecord();
+			if( r.readInt() != x ) {
+				throw new IOException("the reply isn't for this call (xid)");
+			}
+			if( r.readInt() != Rpc.REPLY ) {
+				throw new IOException("not an RPC reply");
+			}
+			return r;
+		}
+	};
 
 	private XdrDecoder readRecord() throws IOException {
 		XdrEncoder rec = new XdrEncoder();
