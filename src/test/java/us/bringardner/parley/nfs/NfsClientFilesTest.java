@@ -26,6 +26,7 @@ package us.bringardner.parley.nfs;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -92,6 +93,18 @@ public class NfsClientFilesTest {
 
 	private static byte[] bytes(String s) {
 		return s.getBytes(StandardCharsets.UTF_8);
+	}
+
+	@Test
+	public void createNewMakesAFileOnlyOnce() throws Exception {
+		start();
+		NfsClient c = client();
+		assertTrue(c.createNew("once.txt"), "made it");
+		assertFalse(c.createNew("once.txt"), "it was there");
+		assertEquals(0, c.info("once.txt").getSize());
+		c.write("data.txt", 0, bytes("keep"));
+		assertFalse(c.createNew("data.txt"), "a file with data is left alone");
+		assertEquals(4, c.info("data.txt").getSize());
 	}
 
 	@Test

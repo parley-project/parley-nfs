@@ -622,6 +622,27 @@ public class NfsClient implements Closeable {
 	// ------------------------------------------------------------------ more of a file (D87)
 
 	/**
+	 * Make a file that isn't there yet, the server deciding when several callers race for the name.
+	 * @return true if this call made it, false if there was something at the path already
+	 */
+	public synchronized boolean createNew(String path) throws IOException {
+		return run(false, () -> {
+			dropCached();
+			Opened o;
+			try {
+				o = open(path, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, true, true);
+			} catch (NfsException e) {
+				if( e.getStatus() == Nfs4.NFS4ERR_EXIST ) {
+					return false;
+				}
+				throw e;
+			}
+			closeOpen(o);
+			return true;
+		});
+	}
+
+	/**
 	 * What the server lets this client's user do to a path.
 	 * @param mask ACCESS4_ bits asked about (Nfs4.ACCESS4_READ ...)
 	 * @return the bits the server allows (a path that isn't there is NfsException isNotFound)
@@ -1047,9 +1068,13 @@ public class NfsClient implements Closeable {
 	}
 
 	private Opened open(String path, int access, boolean create, boolean shared) throws IOException {
+		return open(path, access, create, false, shared);
+	}
+
+	private Opened open(String path, int access, boolean create, boolean guarded, boolean shared) throws IOException {
 		for (int attempt = 0; ; attempt++) {
 			try {
-				return openOnce(path, access, create, shared);
+				return openOnce(path, access, create, guarded, shared);
 			} catch (IOException | RuntimeException e) {
 				if( shared ) {
 					// the seqid of the failed OPEN may or may not have counted: an owner of its own is certain
@@ -1074,7 +1099,7 @@ public class NfsClient implements Closeable {
 		}
 	}
 
-	private Opened openOnce(String path, int access, boolean create, boolean shared) throws IOException {
+	private Opened openOnce(String path, int access, boolean create, boolean guarded, boolean shared) throws IOException {
 		Path p = split(path);
 		Opened o = new Opened();
 		o.shared = shared;
@@ -1091,7 +1116,7 @@ public class NfsClient implements Closeable {
 		a.writeInt(o.ownerSeq++).writeInt(access).writeInt(Nfs4.OPEN4_SHARE_DENY_NONE).writeLong(clientId)
 			.writeOpaque(o.owner.getBytes(StandardCharsets.UTF_8));
 		if( create ) {
-			a.writeInt(Nfs4.OPEN4_CREATE).writeInt(Nfs4.UNCHECKED4).writeIntArray(bitmap(Nfs4.FATTR4_MODE)).writeInt(4).writeInt(FILE_MODE);
+			a.writeInt(Nfs4.OPEN4_CREATE).writeInt(guarded ? Nfs4.GUARDED4 : Nfs4.UNCHECKED4).writeIntArray(bitmap(Nfs4.FATTR4_MODE)).writeInt(4).writeInt(FILE_MODE);
 		} else {
 			a.writeInt(Nfs4.OPEN4_NOCREATE);
 		}
