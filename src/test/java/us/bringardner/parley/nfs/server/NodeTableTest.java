@@ -259,6 +259,28 @@ public class NodeTableTest {
 		assertNull(t.findPath("b"));
 	}
 
+	/**
+	 * The renamed node is the oldest one here, so it would be dropped first if it could be (it was left to the order of
+	 * equal times before): with no file its id is gone on a restart, so it stays (decision D42).
+	 */
+	@Test
+	public void aRenamedNodeWithNoFileIsKeptWhateverItsAge() throws Exception {
+		NodeTable t = export.getNodes();
+		t.setMaxNodes(2);
+		Node a = t.get("a");
+		root.getChild("a").createNewFile();
+		Thread.sleep(20);
+		t.get("b");
+		Thread.sleep(20);
+		t.get("c");
+		root.getChild("a").renameTo(root.getChild("z"));
+		t.renamed("a", "z");
+		t.trim(System.currentTimeMillis()+NodeTable.IDLE_BEFORE_DROP+1000, true);
+		assertEquals(a, t.findPath("z"), "kept: it can't come back");
+		assertNull(t.findPath("b"), "its id is its path's hash: it is made again with the same id");
+		assertNull(t.findPath("c"));
+	}
+
 	@Test
 	public void aTornLastLineIsIgnored() throws Exception {
 		export.getNodes().open(store(), 100);
