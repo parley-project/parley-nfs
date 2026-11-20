@@ -46,7 +46,8 @@ if [ "$state" != "Running" ]; then
 	echo "        \$ multipass start $VM"
 	multipass start "$VM" || { echo "could not start $VM"; exit 1; }
 fi
-if ! multipass exec "$VM" -- timeout "$LIMIT" which exportfs >/dev/null 2>&1; then
+echo "        \$ multipass exec $VM -- timeout $LIMIT sh -c 'command -v exportfs || ls /usr/sbin/exportfs'"
+if ! multipass exec "$VM" -- timeout "$LIMIT" sh -c 'command -v exportfs || ls /usr/sbin/exportfs'; then
 	echo "        installing nfs-kernel-server (up to ${INSTALL_LIMIT}s)"
 	LIMIT=$INSTALL_LIMIT vm sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nfs-kernel-server || { echo "could not install nfs-kernel-server"; exit 1; }
 fi
@@ -54,7 +55,7 @@ vm sudo mkdir -p "$FOLDER" || exit 1
 vm sudo chown "$CLIENT_UID:$CLIENT_UID" "$FOLDER" || exit 1
 vm sudo mkdir -p /etc/exports.d
 vm sudo sh -c "echo '$FOLDER *(rw,sync,no_subtree_check,insecure,fsid=0)' > $EXPORTS_FILE"
-vm sudo systemctl enable --now nfs-server >/dev/null 2>&1
+vm sudo systemctl enable --now nfs-server
 vm sudo exportfs -ra || { echo "exportfs failed"; exit 1; }
 vm sudo exportfs -v
 
