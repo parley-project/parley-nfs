@@ -2,6 +2,14 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Fixed (2026-11-20: a provider that can't change owners, T2)
+
+- A file system whose `setOwner` or `setGroup` throws `UnsupportedOperationException` (instead of answering false)
+  made SETATTR answer NFS4ERR_SERVERFAULT and log an error; it is NFS4ERR_PERM now, as for one that answers false
+  (decision D74). New tests: `ChownProviderTest` (a server that is not the superuser, one that is, a provider that
+  refuses with an exception, one that fails with an IOException) and, for T1, `AclNfsTest.aStoredListDecidesForTheMappedRootToo`
+  (the mapped root is not held to the mode bits but a stored list decides for it like for anyone).
+
 ### Added (2026-11-20: the client recovers, T7)
 
 - `NfsClient` gets its connection and client id back after the server restarts, the connection is lost or the lease
