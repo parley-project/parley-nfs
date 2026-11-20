@@ -7,7 +7,8 @@
 #   tools/client-live-test.sh --remove   stop exporting the folder the script made (the folder stays)
 #
 # The VM gets the nfs-kernel-server package (if it hasn't it) and the folder /srv/parley-client-test, owned by uid 1000,
-# exported as the NFSv4 root (fsid=0), so the client mounts "/". The client says it is uid/gid 1000 (AUTH_SYS).
+# exported as the NFSv4 root (fsid=0), so the client mounts "/". The export says "insecure": the kernel server refuses
+# (NFS4ERR_PERM) a client that does not send from a port below 1024, which a Java client does not. The client says it is uid/gid 1000 (AUTH_SYS).
 # The test makes a folder of its own in the export and removes it at the end.
 #
 # Settings (environment):
@@ -36,7 +37,7 @@ vm which exportfs >/dev/null 2>&1 || vm sudo apt-get install -y nfs-kernel-serve
 vm sudo mkdir -p "$FOLDER" || exit 1
 vm sudo chown "$CLIENT_UID:$CLIENT_UID" "$FOLDER" || exit 1
 vm sudo mkdir -p /etc/exports.d
-vm sudo sh -c "echo '$FOLDER *(rw,sync,no_subtree_check,fsid=0)' > $EXPORTS_FILE"
+vm sudo sh -c "echo '$FOLDER *(rw,sync,no_subtree_check,insecure,fsid=0)' > $EXPORTS_FILE"
 vm sudo systemctl enable --now nfs-server >/dev/null 2>&1
 vm sudo exportfs -ra || { echo "exportfs failed"; exit 1; }
 vm sudo exportfs -v
