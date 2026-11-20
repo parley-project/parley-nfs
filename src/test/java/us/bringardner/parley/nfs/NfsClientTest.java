@@ -111,6 +111,43 @@ public class NfsClientTest {
 		return s.getBytes(StandardCharsets.UTF_8);
 	}
 
+	/**
+	 * A file the user the server runs as may not write or read is NFS4ERR_ACCESS. It used to be NFS4ERR_NOTSUPP: a
+	 * FileSource refuses random access and refuses a user with the same exception, and the server took every refusal
+	 * for "no random access" and then could not overwrite.
+	 */
+	@Test
+	public void aFileTheServerMayNotUseIsAccessDenied() throws Exception {
+		mem = new MemoryFileSourceFactory() {
+			private static final long serialVersionUID = 1L;
+
+			@Override
+			public FileSourceUser whoAmI() {
+				return new FileSourceUser(1000, "tester", 1000, "testers");   // not the superuser: held to the bits
+			}
+		};
+		mem.connect(new Properties());
+		root = mem.createFileSource("/export");
+		assertTrue(root.mkdirs());
+		for (String name : new String[] {"no-write.txt", "no-read.txt"}) {
+			FileSource f = root.getChild(name);
+			try (java.io.OutputStream out = f.getOutputStream()) {
+				out.write(bytes("data"));
+			}
+			assertTrue(f.setOwnerReadable(name.equals("no-write.txt")) & f.setOwnerWritable(false) & f.setGroupReadable(true)
+					& f.setGroupWritable(false) & f.setOtherReadable(true) & f.setOtherWritable(false));
+		}
+		start("test.nfs.client.noaccess", root);
+		NfsClient c = client("/");
+
+		NfsException e = assertThrows(NfsException.class, () -> c.write("no-write.txt", 0, bytes("new!")));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, e.getStatus(), "not NOTSUPP: it is a refusal, not a file without random access");
+		assertEquals("data", new String(root.getChild("no-write.txt").getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+
+		NfsException r = assertThrows(NfsException.class, () -> c.readAll("no-read.txt"));
+		assertEquals(Nfs4.NFS4ERR_ACCESS, r.getStatus());
+	}
+
 	@Test
 	public void filesAndFolders() throws Exception {
 		startMemory("test.nfs.client.basic");

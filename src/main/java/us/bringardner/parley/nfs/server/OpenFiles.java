@@ -27,10 +27,13 @@ package us.bringardner.parley.nfs.server;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.AccessDeniedException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import us.bringardner.parley.files.FileSource;
 import us.bringardner.parley.files.IRandomAccessStream;
@@ -66,6 +69,22 @@ public class OpenFiles {
 
 	private final Map<Node, Handle> handles = new HashMap<Node, Handle>();
 
+	private static final System.Logger LOG = System.getLogger(OpenFiles.class.getName());
+
+	/** The files already reported as having no random access: once is enough, a provider without it does so on every request. */
+	private final Set<String> reported = new HashSet<String>();
+
+	private void noRandomAccess(FileSource file, IOException cause) {
+		String key = file.getAbsolutePath();
+		synchronized (reported) {
+			if( reported.size() >= 1000 || !reported.add(key) ) {
+				return;
+			}
+		}
+		LOG.log(System.Logger.Level.INFO, "No random access to "+key+" ("+file.getClass().getSimpleName()+": "+cause
+				+"): it is read from the start and can only be appended to");
+	}
+
 	private synchronized Handle cached(Node node) {
 		return handles.get(node);
 	}
@@ -93,6 +112,14 @@ public class OpenFiles {
 			if( !file.exists() ) {
 				throw e;
 			}
+			// A FileSource says "no random access" and "not allowed" with the same exception, so ask: a file the
+			// server's own user may not read or write is NFS4ERR_ACCESS, not "no random access" (which, for a write,
+			// would be NFS4ERR_NOTSUPP and hide the real reason).
+			if( write ? !file.canWrite() : !file.canRead() ) {
+				throw new AccessDeniedException(file.getAbsolutePath(), null,
+						"the user the server runs as may not "+(write ? "write" : "read")+" it");
+			}
+			noRandomAccess(file, e);
 			return null;
 		}
 		Handle nh = new Handle(s, write);
