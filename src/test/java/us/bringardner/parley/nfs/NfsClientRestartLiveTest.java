@@ -125,6 +125,28 @@ public class NfsClientRestartLiveTest {
 		}
 	}
 
+	/** What the server says it holds, when nfs.live.state.command says how to ask. */
+	private static void printServerState(String when) {
+		String command = System.getProperty("nfs.live.state.command");
+		if( command == null || command.isEmpty() ) {
+			return;
+		}
+		System.out.println("restart live test: the server's state "+when+":");
+		Process p = null;
+		try {
+			p = new ProcessBuilder("sh", "-c", command).redirectErrorStream(true).inheritIO().start();
+			if( !p.waitFor(60, TimeUnit.SECONDS) ) {
+				System.out.println("restart live test: the state command did not end in 60 seconds");
+			}
+		} catch (IOException | InterruptedException e) {
+			System.out.println("restart live test: the state command failed: "+e);
+		} finally {
+			if( p != null ) {
+				p.destroyForcibly();
+			}
+		}
+	}
+
 	@Test
 	public void aLockIsReclaimedAfterTheServerRestarts() throws Exception {
 		String file = work + "/locked.txt";
@@ -185,7 +207,13 @@ public class NfsClientRestartLiveTest {
 		assertTrue(sawHeld, "the range was never reported held. "+timeline);
 		assertTrue(lost.isEmpty(), "the lock was lost: "+(lost.isEmpty() ? "" : lost.get(0).getLostReason()));
 		assertTrue(mine.isHeld(), "not held: "+mine.getLostReason());
+		printServerState("after the check");
 		mine.unlock();
-		other.lock(file, 0, 5, true).unlock();
+		try {
+			other.lock(file, 0, 5, true).unlock();
+		} catch (IOException | RuntimeException e) {
+			printServerState("when taking the range after the unlock failed ("+e+")");
+			throw e;
+		}
 	}
 }
