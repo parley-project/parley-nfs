@@ -86,6 +86,10 @@ import us.bringardner.parley.net.server.ServerMain;
  * @author Tony Bringardner
  */
 public class NfsServer extends NioServer {
+
+	/** READ_PLUS sends a run of at least this many zero bytes as a hole, not as data. */
+	public static final int READ_PLUS_MIN_HOLE = 4096;
+
 	private volatile int maxMinorVersion = 2;
 
 	public static final String PROPERTY_PREFIX = "parley.nfs";

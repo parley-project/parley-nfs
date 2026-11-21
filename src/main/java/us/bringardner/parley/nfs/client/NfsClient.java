@@ -600,6 +600,55 @@ public class NfsClient implements Closeable {
 		});
 	}
 
+	/**
+	 * Read a range with READ_PLUS: the server sends data and holes (ranges of zeros), and the holes are not sent
+	 * as bytes. The result has the bytes of the range, the holes as zeros, as {@link #read} would, and says how many
+	 * of them were holes.
+	 * @throws NfsException NFS4ERR_NOTSUPP when the server is not NFSv4.2
+	 */
+	public synchronized NfsReadPlus readPlus(String path, long offset, int count) throws IOException {
+		return run(true, () -> {
+			need42("readPlus");
+			Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
+			try {
+				Compound c = new Compound().putfh(o.fh);
+				c.op(Nfs4.OP_READ_PLUS).args.writeInt(o.seqid).writeFixedOpaque(o.other).writeLong(offset).writeUnsignedInt(count);
+				Reply r = call(c, "readPlus "+path);
+				r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_READ_PLUS);
+				boolean eof = r.in.readBoolean();
+				int segments = r.in.readInt();
+				java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+				long holes = 0;
+				long next = offset;
+				for (int i = 0; i < segments; i++) {
+					int type = r.in.readInt();
+					long at = r.in.readLong();
+					if( at != next ) {
+						throw new NfsException(Nfs4.NFS4ERR_SERVERFAULT, "READ_PLUS segment at "+at+", expected "+next);
+					}
+					if( type == Nfs4.NFS4_CONTENT_DATA ) {
+						byte[] d = r.in.readOpaque(Integer.MAX_VALUE);
+						bytes.write(d);
+						next += d.length;
+					} else if( type == Nfs4.NFS4_CONTENT_HOLE ) {
+						long n = r.in.readLong();
+						if( n < 0 || n > Integer.MAX_VALUE-bytes.size() ) {
+							throw new NfsException(Nfs4.NFS4ERR_SERVERFAULT, "READ_PLUS hole of "+n+" bytes");
+						}
+						bytes.write(new byte[(int) n]);
+						holes += n;
+						next += n;
+					} else {
+						throw new NfsException(Nfs4.NFS4ERR_SERVERFAULT, "READ_PLUS segment of type "+type);
+					}
+				}
+				return new NfsReadPlus(bytes.toByteArray(), eof, holes);
+			} finally {
+				closeOpen(o);
+			}
+		});
+	}
+
 	/** Make sure the range of the file is there (ALLOCATE); a range past the end makes the file longer. */
 	public synchronized void allocate(String path, long offset, long length) throws IOException {
 		rangeOp(Nfs4.OP_ALLOCATE, "allocate", path, offset, length);

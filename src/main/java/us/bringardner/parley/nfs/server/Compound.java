@@ -279,6 +279,7 @@ public class Compound {
 		case Nfs4.OP_BACKCHANNEL_CTL: backchannelCtl(); break;
 		case Nfs4.OP_BIND_CONN_TO_SESSION: bindConnToSession(); break;
 		case Nfs4.OP_SEEK: seek(); break;
+		case Nfs4.OP_READ_PLUS: readPlus(); break;
 		case Nfs4.OP_ALLOCATE: allocate(); break;
 		case Nfs4.OP_DEALLOCATE: deallocate(); break;
 		case Nfs4.OP_COPY: copy(); break;
@@ -289,7 +290,6 @@ public class Compound {
 		case Nfs4.OP_LAYOUTSTATS:
 		case Nfs4.OP_OFFLOAD_CANCEL:
 		case Nfs4.OP_OFFLOAD_STATUS:
-		case Nfs4.OP_READ_PLUS:
 		case Nfs4.OP_WRITE_SAME:
 		case Nfs4.OP_GET_DIR_DELEGATION: getDirDelegation(); break;
 		case Nfs4.OP_WANT_DELEGATION:
@@ -1486,6 +1486,64 @@ public class Compound {
 
 
 	// ================================================================ NFSv4.2 (RFC 7862)
+
+	/**
+	 * READ_PLUS (RFC 7862 section 15.10): a read whose result is a list of data and hole segments. A file here has no
+	 * holes of its own, so a run of {@value NfsServer#READ_PLUS_MIN_HOLE} or more zero bytes in what is read is sent as a hole: the
+	 * client reads it as zeros all the same, and it is not sent. Everything else is data.
+	 */
+	private void readPlus() throws Nfs4Exception, IOException {
+		StateId id = stateid();
+		long offset = in.readLong();
+		long count = in.readUnsignedInt();
+		Node node = current();
+		FileSource f = currentRegular();
+		allowRead();
+		aclCheck(node, f, Nfs4.ACE4_READ_DATA);
+		checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_READ);
+		if( offset < 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
+		}
+		int n = (int) Math.min(count, server.getMaxRead());
+		byte[] buf = new byte[n];
+		int got = n == 0 ? 0 : Math.max(0, files.read(node, f, offset, buf, 0, n));
+		Long len = files.length(node);
+		long size = len != null ? len : f.length();
+		out.writeBoolean(offset+got >= size);
+		int countPos = out.reserve(4);
+		int segments = 0;
+		int dataStart = 0;
+		int i = 0;
+		while( i < got ) {
+			if( buf[i] != 0 ) {
+				i++;
+				continue;
+			}
+			int end = i;
+			while( end < got && buf[end] == 0 ) {
+				end++;
+			}
+			if( end-i >= NfsServer.READ_PLUS_MIN_HOLE ) {
+				if( i > dataStart ) {
+					dataSegment(offset, buf, dataStart, i);
+					segments++;
+				}
+				out.writeInt(Nfs4.NFS4_CONTENT_HOLE).writeLong(offset+i).writeLong(end-i);
+				segments++;
+				dataStart = end;
+			}
+			i = end;
+		}
+		if( got > dataStart ) {
+			dataSegment(offset, buf, dataStart, got);
+			segments++;
+		}
+		out.setInt(countPos, segments);
+	}
+
+	private void dataSegment(long offset, byte[] buf, int from, int to) {
+		out.writeInt(Nfs4.NFS4_CONTENT_DATA).writeLong(offset+from).writeOpaque(buf, from, to-from);
+	}
 
 	/** SEEK: the next data or hole. A file here has no holes but the one at its end. */
 	private void seek() throws Nfs4Exception, IOException {
