@@ -28,6 +28,7 @@ import java.io.Closeable;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -72,8 +73,16 @@ public class Delegations implements Closeable {
 	/** the calls on back channels waiting for their reply, by xid */
 	private final Map<Integer, CompletableFuture<byte[]>> backPending = new ConcurrentHashMap<Integer, CompletableFuture<byte[]>>();
 
+	/** one thread, so a folder's changes reach a client in the order they were made */
+	private final ExecutorService notifier;
+
 	public Delegations(NfsServer server) {
 		this.server = server;
+		notifier = Executors.newSingleThreadExecutor(r -> {
+			Thread t = new Thread(r, server.getName()+"-notify");
+			t.setDaemon(true);
+			return t;
+		});
 		client = new NioClient(server.getName()+"-callback");
 		client.setConnectTimeout((int) CALL_TIMEOUT);
 		executor = Executors.newCachedThreadPool(r -> {
@@ -194,6 +203,69 @@ public class Delegations implements Closeable {
 				backPending.remove(xid);
 			}
 		}
+	}
+
+	/**
+	 * A folder changed: tell the other clients that hold a directory delegation of it (CB_NOTIFY, RFC 8881 section 20.4),
+	 * in a thread of its own and in the order the changes were made. A client that can't be told loses the delegation.
+	 * @param by the client that made the change, which isn't told (null: not an NFSv4.1 client)
+	 * @param type NOTIFY4_REMOVE_ENTRY, NOTIFY4_ADD_ENTRY or NOTIFY4_RENAME_ENTRY
+	 * @param newName the new name, for a rename
+	 */
+	public void directoryChanged(Node dir, ClientRecord by, int type, String name, String newName) {
+		List<DelegationState> holders = server.getStateManager().directoryDelegations(dir, by);
+		if( holders.isEmpty() ) {
+			return;
+		}
+		XdrEncoder vals = new XdrEncoder(64);
+		if( type == Nfs4.NOTIFY4_REMOVE_ENTRY ) {
+			removeEntry(vals, name);
+		} else if( type == Nfs4.NOTIFY4_ADD_ENTRY ) {
+			addEntry(vals, name);
+		} else {
+			removeEntry(vals, name);
+			addEntry(vals, newName);
+		}
+		byte[] values = java.util.Arrays.copyOf(vals.array(), vals.size());
+		byte[] fh = dir.getExport().toHandle(dir);
+		try {
+			notifier.execute(() -> {
+				for (DelegationState d : holders) {
+					ClientRecord c = d.getClient();
+					Session s = c.backSession;
+					try {
+						if( s == null ) {
+							throw new IllegalStateException("the client has no back channel");
+						}
+						XdrEncoder ops = new XdrEncoder(128);
+						ops.writeInt(Nfs4.OP_CB_NOTIFY).writeInt(d.stateId().seqid).writeFixedOpaque(d.stateId().other).writeOpaque(fh);
+						ops.writeInt(1).writeIntArray(new int[] {1 << type}).writeOpaque(values);
+						XdrDecoder r = callBack(s, ops, 1);
+						r.readInt();
+						int status = r.readInt();
+						if( status != Nfs4.NFS4_OK ) {
+							throw new IllegalStateException("CB_NOTIFY answered "+status+" ("+Nfs4Errors.describe(status)+")");
+						}
+					} catch (Exception e) {
+						server.logInfo("Client "+c+" could not be told of a change in "+dir+": "+e.getMessage()
+							+"; its directory delegation is taken back");
+						server.getStateManager().dropDirectory(d);
+					}
+				}
+			});
+		} catch (java.util.concurrent.RejectedExecutionException e) {
+			// the server is stopping
+		}
+	}
+
+	/** notify_remove4: the entry's name, no attributes, no cookie */
+	private static void removeEntry(XdrEncoder e, String name) {
+		e.writeString(name).writeInt(0).writeInt(0).writeLong(0);
+	}
+
+	/** notify_add4: the entry's name, no attributes, no cookie, no previous entry, and not the last */
+	private static void addEntry(XdrEncoder e, String name) {
+		e.writeString(name).writeInt(0).writeInt(0).writeInt(0).writeInt(0).writeBoolean(false);
 	}
 
 	/** Send the CB_RECALL of a delegation, once, in a thread of its own. */
@@ -321,6 +393,7 @@ public class Delegations implements Closeable {
 	@Override
 	public void close() {
 		executor.shutdownNow();
+		notifier.shutdownNow();
 		client.close();
 	}
 }

@@ -368,6 +368,15 @@ public final class Nfs4 {
 	public static final int CB_NULL = 0;
 	public static final int CB_COMPOUND = 1;
 	public static final int OP_CB_RECALL = 4;
+	/** CB_NOTIFY (RFC 8881 section 20.4): the changes of a directory a client holds a delegation of */
+	public static final int OP_CB_NOTIFY = 6;
+	/** the kinds of change CB_NOTIFY tells of, as bit numbers of the notification bitmap (RFC 8881 section 20.4) */
+	public static final int NOTIFY4_REMOVE_ENTRY = 2;
+	public static final int NOTIFY4_ADD_ENTRY = 3;
+	public static final int NOTIFY4_RENAME_ENTRY = 4;
+	/** GET_DIR_DELEGATION: the answers (RFC 8881 section 18.39) */
+	public static final int GDD4_OK = 0;
+	public static final int GDD4_UNAVAIL = 1;
 	/** NFSv4.1 callback operations (RFC 8881 section 20) */
 	public static final int OP_CB_SEQUENCE = 11;
 

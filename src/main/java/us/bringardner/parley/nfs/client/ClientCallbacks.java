@@ -23,6 +23,25 @@ final class ClientCallbacks implements AutoCloseable {
 	/** The program number the client gives the server (any number in the range for programs of an application). */
 	static final int PROGRAM = 0x40000000;
 
+	/** A change of a folder the CB_NOTIFY names (D93). */
+	static final class Change {
+		final int type;
+		final String name;
+		final String newName;
+
+		Change(int type, String name, String newName) {
+			this.type = type;
+			this.name = name;
+			this.newName = newName;
+		}
+	}
+
+	/** What the client does when the server tells of changes in a folder it holds a directory delegation of. */
+	interface Notifier {
+		/** @return the status of CB_NOTIFY */
+		int notify(byte[] stateidOther, List<Change> changes);
+	}
+
 	/** What the client does when the server recalls a delegation. */
 	interface Listener {
 		/** @return the NFS4 status to answer: NFS4_OK, or NFS4ERR_BAD_STATEID for a delegation the client does not hold */
@@ -35,12 +54,14 @@ final class ClientCallbacks implements AutoCloseable {
 	private final ServerSocket socket;
 	private final Thread thread;
 	private final Listener listener;
+	private final Notifier notifier;
 	private final List<Socket> open = Collections.synchronizedList(new ArrayList<Socket>());
 	private volatile InetAddress server;
 	private volatile boolean closed;
 
-	ClientCallbacks(Listener listener) throws IOException {
+	ClientCallbacks(Listener listener, Notifier notifier) throws IOException {
 		this.listener = listener;
+		this.notifier = notifier;
 		socket = new ServerSocket(0);
 		thread = new Thread(this::run, "parley-nfs-client-callbacks");
 		thread.setDaemon(true);
@@ -176,6 +197,21 @@ final class ClientCallbacks implements AutoCloseable {
 				byte[] fh = d.readOpaque(Nfs4.NFS4_FHSIZE);
 				status = listener.recall(other, fh);
 				results.writeInt(op).writeInt(status);
+			} else if( op == Nfs4.OP_CB_NOTIFY ) {
+				d.readInt();
+				byte[] other = d.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+				d.readOpaque(Nfs4.NFS4_FHSIZE);
+				int lists = d.readInt();
+				if( lists < 0 || lists > 64 ) {
+					throw new IOException("notifications "+lists);
+				}
+				List<Change> changes = new ArrayList<Change>();
+				for (int l = 0; l < lists; l++) {
+					int[] mask = d.readIntArray(8);
+					parse(mask, new XdrDecoder(d.readOpaque(1 << 20)), changes);
+				}
+				status = notifier.notify(other, changes);
+				results.writeInt(op).writeInt(status);
 			} else {
 				// the other callbacks (CB_GETATTR is for write delegations, which this client returns at once) are not offered
 				boolean getattr = op == CB_GETATTR;
@@ -186,6 +222,64 @@ final class ClientCallbacks implements AutoCloseable {
 		}
 		r.writeInt(status).writeString("").writeInt(done).write(results);
 		return r;
+	}
+
+	/** The values of a notify4 (RFC 8881 section 20.4.1), one per bit set in the mask, in the order of the bits. */
+	private static void parse(int[] mask, XdrDecoder v, List<Change> changes) throws IOException {
+		int bits = mask.length > 0 ? mask[0] : 0;
+		for (int w = 1; w < mask.length; w++) {
+			if( mask[w] != 0 ) {
+				throw new IOException("a notification type that wasn't asked for");
+			}
+		}
+		for (int bit = 0; bit < 32; bit++) {
+			if( (bits & (1 << bit)) == 0 ) {
+				continue;
+			}
+			switch (bit) {
+			case Nfs4.NOTIFY4_REMOVE_ENTRY:
+				changes.add(new Change(bit, removed(v), null));
+				break;
+			case Nfs4.NOTIFY4_ADD_ENTRY:
+				changes.add(new Change(bit, added(v), null));
+				break;
+			case Nfs4.NOTIFY4_RENAME_ENTRY:
+				String from = removed(v);
+				changes.add(new Change(bit, from, added(v)));
+				break;
+			default:
+				throw new IOException("a notification type that wasn't asked for: "+bit);
+			}
+		}
+	}
+
+	/** notify_remove4: the name, its attributes and its cookie */
+	private static String removed(XdrDecoder v) throws IOException {
+		String name = v.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+		v.readIntArray(8);
+		v.readOpaque(1 << 16);
+		v.readLong();
+		return name;
+	}
+
+	/** notify_add4: the name, its attributes, the cookie, the previous entry and whether it's the last */
+	private static String added(XdrDecoder v) throws IOException {
+		String name = v.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+		v.readIntArray(8);
+		v.readOpaque(1 << 16);
+		if( v.readInt() == 1 ) {
+			v.readLong();
+		}
+		if( v.readInt() == 1 ) {
+			v.readLong();
+			v.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+			v.readIntArray(8);
+			v.readOpaque(1 << 16);
+			v.readBoolean();
+			v.readBoolean();
+		}
+		v.readBoolean();
+		return name;
 	}
 
 	@Override

@@ -291,7 +291,7 @@ public class Compound {
 		case Nfs4.OP_OFFLOAD_STATUS:
 		case Nfs4.OP_READ_PLUS:
 		case Nfs4.OP_WRITE_SAME:
-		case Nfs4.OP_GET_DIR_DELEGATION:
+		case Nfs4.OP_GET_DIR_DELEGATION: getDirDelegation(); break;
 		case Nfs4.OP_WANT_DELEGATION:
 		case 47: case 48: case 49: case 50: case 51: case 54:
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
@@ -1099,6 +1099,7 @@ public class Compound {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_IO, "mkdir "+path+" failed");
 		}
 		dir.changed();
+		dirChanged(dir, Nfs4.NOTIFY4_ADD_ENTRY, name, null);
 		Node node = export.getNodes().get(path);
 		newAcl(export, dir, node, settings, true);
 		ownCreated(f);
@@ -1136,6 +1137,7 @@ public class Compound {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_PERM, "symbolic link "+path+": "+e.getMessage());
 		}
 		dir.changed();
+		dirChanged(dir, Nfs4.NOTIFY4_ADD_ENTRY, name, null);
 		Node node = export.getNodes().get(path);
 		newAcl(export, dir, node, settings, false);
 		ownCreated(f);
@@ -1225,6 +1227,7 @@ public class Compound {
 		}
 		export.getNodes().removed(path);
 		dir.changed();
+		dirChanged(dir, Nfs4.NOTIFY4_REMOVE_ENTRY, name, null);
 		changeInfo(before, change(dir, d));
 	}
 
@@ -1314,6 +1317,12 @@ public class Compound {
 		export.getNodes().renamed(fromPath, toPath);
 		fromDir.changed();
 		toDir.changed();
+		if( fromDir.getExport() == toDir.getExport() && fromDir.getFileid() == toDir.getFileid() ) {
+			dirChanged(fromDir, Nfs4.NOTIFY4_RENAME_ENTRY, oldName, newName);
+		} else {
+			dirChanged(fromDir, Nfs4.NOTIFY4_REMOVE_ENTRY, oldName, null);
+			dirChanged(toDir, Nfs4.NOTIFY4_ADD_ENTRY, newName, null);
+		}
 		changeInfo(fromBefore, change(fromDir, fd));
 		changeInfo(toBefore, change(toDir, td));
 	}
@@ -1432,6 +1441,50 @@ public class Compound {
 	private static final int SP4_NONE = 0;
 
 	/** @throws Nfs4Exception for an operation that isn't allowed here: not in 4.1, or outside a session */
+	// ================================================================ directory delegations (RFC 8881 section 10.9)
+
+	/** GET_DIR_DELEGATION: tell the client of the changes others make to the current folder (CB_NOTIFY). */
+	private void getDirDelegation() throws Nfs4Exception, IOException {
+		in.readBoolean();	// signal_deleg_avail: not used
+		int[] types = in.readIntArray(8);
+		in.readLong();	// the delay the client puts up with for child attributes
+		in.readInt();
+		in.readLong();	// and for the folder's
+		in.readInt();
+		in.readIntArray(8);	// child attributes
+		in.readIntArray(8);	// folder attributes
+		Node dir = current();
+		currentDir();
+		allowRead();
+		int granted = (types.length > 0 ? types[0] : 0) & ((1 << Nfs4.NOTIFY4_REMOVE_ENTRY) | (1 << Nfs4.NOTIFY4_ADD_ENTRY)
+				| (1 << Nfs4.NOTIFY4_RENAME_ENTRY));
+		StateManager.DelegationState d = null;
+		if( granted != 0 && server.getDelegations() != null && session != null && !dir.getExport().isPseudo() ) {
+			d = state.grantDirectory(session.getClient(), dir);
+		}
+		if( d == null ) {
+			out.writeInt(Nfs4.GDD4_UNAVAIL);
+			out.writeBoolean(false);
+			return;
+		}
+		server.logDebug(() -> "Directory delegation of "+dir+" to client "+session.getClient());
+		out.writeInt(Nfs4.GDD4_OK);
+		out.writeFixedOpaque(new byte[Nfs4.NFS4_VERIFIER_SIZE]);
+		writeStateid(d.stateId());
+		out.writeIntArray(new int[] {granted});
+		out.writeIntArray(new int[0]);
+		out.writeIntArray(new int[0]);
+	}
+
+	/** Tell the other holders of a directory delegation of the folder that it changed. */
+	private void dirChanged(Node dir, int type, String name, String newName) {
+		Delegations d = server.getDelegations();
+		if( d != null ) {
+			d.directoryChanged(dir, session != null ? session.getClient() : null, type, name, newName);
+		}
+	}
+
+
 	// ================================================================ NFSv4.2 (RFC 7862)
 
 	/** SEEK: the next data or hole. A file here has no holes but the one at its end. */
@@ -2089,6 +2142,7 @@ public class Compound {
 					create(f, path);
 					server.setExclusiveCreate(path, exclusive);
 					dir.changed();
+					dirChanged(dir, Nfs4.NOTIFY4_ADD_ENTRY, f.getName(), null);
 					newAcl(export, dir, export.getNodes().get(path), null, false);
 					ownCreated(f);
 				}
@@ -2099,6 +2153,7 @@ public class Compound {
 				if( !exists ) {
 					create(f, path);
 					dir.changed();
+					dirChanged(dir, Nfs4.NOTIFY4_ADD_ENTRY, f.getName(), null);
 					Node made = export.getNodes().get(path);
 					newAcl(export, dir, made, settings, false);
 					ownCreated(f);

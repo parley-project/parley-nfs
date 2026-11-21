@@ -105,6 +105,9 @@ public class NfsClient implements Closeable {
 	// delegations (D86): the callback server, what is held, and the one open-owner the file operations share
 	private final ClientCallbacks callbacks;
 	private final Map<String, Delegation> delegations = new HashMap<String, Delegation>();
+	/** the folders watched through directory delegations (D93), by the stateid; guarded by {@link #delegations} */
+	private final Map<String, DirWatch> dirWatches = new HashMap<String, DirWatch>();
+	private java.util.concurrent.ExecutorService dirExecutor;
 	private java.util.concurrent.ExecutorService returner;
 	/** delegations the server recalled, not yet given back */
 	private final List<Delegation> pendingReturns = new ArrayList<Delegation>();
@@ -180,7 +183,7 @@ public class NfsClient implements Closeable {
 	private NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, NfsKerberos kerberos, boolean wantDelegations) throws IOException {
 		this.kerberos = kerberos;
 		this.wantedMinor = Math.max(0, Math.min(2, Integer.getInteger(PROPERTY_MINOR_VERSION, 2)));
-		this.callbacks = wantDelegations ? new ClientCallbacks(this::recalled) : null;
+		this.callbacks = wantDelegations ? new ClientCallbacks(this::recalled, this::notified) : null;
 		this.uid = uid;
 		this.gid = gid;
 		String name = "parley-nfs-client";
@@ -219,6 +222,7 @@ public class NfsClient implements Closeable {
 			synchronized (delegations) {
 				delegations.clear();
 			}
+			endWatches("the connection was made again");
 			rotateOwner();
 			generation++;
 			if( callbacks != null ) {
@@ -347,6 +351,11 @@ public class NfsClient implements Closeable {
 		java.util.concurrent.ExecutorService rt = returner;
 		if( rt != null ) {
 			rt.shutdownNow();
+		}
+		synchronized (delegations) {
+			if( dirExecutor != null ) {
+				dirExecutor.shutdown();
+			}
 		}
 		destroySession();
 		NfsKerberos.Session g = session;
@@ -1388,11 +1397,21 @@ public class NfsClient implements Closeable {
 	/** The server recalls a delegation: stop using what it let this client keep, and give it back. */
 	private int recalled(byte[] other, byte[] fh) {
 		Delegation d;
+		DirWatch w = null;
 		synchronized (delegations) {
 			d = delegations.remove(key(other));
+			if( d == null ) {
+				w = dirWatches.remove(key(other));
+				if( w != null ) {
+					d = new Delegation(w.fh, w.seqid, w.other, false, w.path);
+				}
+			}
 		}
 		if( d == null ) {
 			return Nfs4.NFS4ERR_BAD_STATEID;
+		}
+		if( w != null ) {
+			lose(w, "the server took the folder's delegation back: another client needs it");
 		}
 		d.keep(null);
 		synchronized (delegations) {
@@ -1457,9 +1476,18 @@ public class NfsClient implements Closeable {
 
 	private void returnAllDelegations() {
 		List<Delegation> all;
+		List<DirWatch> watches;
 		synchronized (delegations) {
 			all = new ArrayList<Delegation>(delegations.values());
 			delegations.clear();
+			watches = new ArrayList<DirWatch>(dirWatches.values());
+			dirWatches.clear();
+		}
+		for (DirWatch w : watches) {
+			lose(w, "the client was closed");
+			if( socket != null && !socket.isClosed() ) {
+				returnDelegation(new Delegation(w.fh, w.seqid, w.other, false, w.path));
+			}
 		}
 		for (Delegation d : all) {
 			d.keep(null);
@@ -1494,6 +1522,166 @@ public class NfsClient implements Closeable {
 	public int getDelegationCount() {
 		synchronized (delegations) {
 			return delegations.size();
+		}
+	}
+
+	// ------------------------------------------------------------------ directory delegations (D93, RFC 8881 section 10.9)
+
+	/** A folder watched through a directory delegation. */
+	static final class DirWatch {
+		final byte[] fh;
+		final int seqid;
+		final byte[] other;
+		final String path;
+		final NfsDirectoryListener listener;
+		volatile boolean active = true;
+
+		DirWatch(byte[] fh, int seqid, byte[] other, String path, NfsDirectoryListener listener) {
+			this.fh = fh;
+			this.seqid = seqid;
+			this.other = other;
+			this.path = path;
+			this.listener = listener;
+		}
+	}
+
+	/**
+	 * Be told of the changes other clients make to a folder (a directory delegation, NFSv4.1): entries added, removed
+	 * and renamed, as they happen, with no polling. The listener is told when the watch ends ({@link NfsDirectoryListener#lost}),
+	 * and then the folder should be looked at again. Only a client that takes delegations (see the constructor with
+	 * {@code delegations}) on a server of NFSv4.1 or higher can have this.
+	 * @return the watch, or null when the server gives no directory delegation (the server hasn't got them, the
+	 * client has no back channel, or another client...): poll the folder then
+	 */
+	public synchronized NfsDirectoryWatch watchDirectory(String path, NfsDirectoryListener listener) throws IOException {
+		java.util.Objects.requireNonNull(listener, "listener");
+		return run(true, () -> {
+			if( callbacks == null || minorVersion < 1 ) {
+				return null;
+			}
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_GETFH);
+			XdrEncoder a = c.op(Nfs4.OP_GET_DIR_DELEGATION).args;
+			a.writeBoolean(false).writeIntArray(new int[] {(1 << Nfs4.NOTIFY4_REMOVE_ENTRY) | (1 << Nfs4.NOTIFY4_ADD_ENTRY)
+					| (1 << Nfs4.NOTIFY4_RENAME_ENTRY)});
+			a.writeLong(0).writeInt(0).writeLong(0).writeInt(0).writeIntArray(new int[0]).writeIntArray(new int[0]);
+			Reply r = call(c, "watch "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_GETFH);
+			byte[] fh = r.in.readOpaque(Nfs4.NFS4_FHSIZE);
+			int got = r.in.readInt();
+			int status = r.in.readInt();
+			if( got != Nfs4.OP_GET_DIR_DELEGATION ) {
+				throw new IOException("expected GET_DIR_DELEGATION, the server answered "+Nfs4.opName(got));
+			}
+			if( status == Nfs4.NFS4ERR_NOTSUPP || status == Nfs4.NFS4ERR_OP_ILLEGAL ) {
+				return null;
+			}
+			if( status != Nfs4.NFS4_OK ) {
+				throw new NfsException(status, "watch "+path);
+			}
+			if( r.in.readInt() != Nfs4.GDD4_OK ) {
+				r.in.readBoolean();
+				return null;
+			}
+			r.in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
+			int seqid = r.in.readInt();
+			byte[] other = r.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+			DirWatch w = new DirWatch(fh, seqid, other, path, listener);
+			synchronized (delegations) {
+				dirWatches.put(key(other), w);
+			}
+			return new NfsDirectoryWatch(this, path, w);
+		});
+	}
+
+	/** CB_NOTIFY: tell the listener of the watched folder, in a thread of its own so it may use this client. */
+	private int notified(byte[] other, List<ClientCallbacks.Change> changes) {
+		DirWatch w;
+		synchronized (delegations) {
+			w = dirWatches.get(key(other));
+		}
+		if( w == null ) {
+			return Nfs4.NFS4ERR_BAD_STATEID;
+		}
+		for (ClientCallbacks.Change ch : changes) {
+			NfsDirectoryEvent.Type type = ch.type == Nfs4.NOTIFY4_ADD_ENTRY ? NfsDirectoryEvent.Type.ADDED
+					: ch.type == Nfs4.NOTIFY4_REMOVE_ENTRY ? NfsDirectoryEvent.Type.REMOVED : NfsDirectoryEvent.Type.RENAMED;
+			NfsDirectoryEvent e = new NfsDirectoryEvent(type, w.path, ch.name, ch.newName);
+			deliver(() -> {
+				try {
+					w.listener.changed(e);
+				} catch (RuntimeException ex) {
+					LOG.log(System.Logger.Level.WARNING, "A directory listener of "+w.path+" failed: "+ex);
+				}
+			});
+		}
+		return Nfs4.NFS4_OK;
+	}
+
+	private void deliver(Runnable task) {
+		synchronized (delegations) {
+			if( dirExecutor == null ) {
+				dirExecutor = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+					Thread t = new Thread(r, "parley-nfs-client-watch");
+					t.setDaemon(true);
+					return t;
+				});
+			}
+			try {
+				dirExecutor.execute(task);
+			} catch (java.util.concurrent.RejectedExecutionException e) {
+				// the client is closing
+			}
+		}
+	}
+
+	/** The watch is over: tell its listener once. */
+	private void lose(DirWatch w, String reason) {
+		if( w.active ) {
+			w.active = false;
+			deliver(() -> {
+				try {
+					w.listener.lost(reason);
+				} catch (RuntimeException ex) {
+					LOG.log(System.Logger.Level.WARNING, "A directory listener of "+w.path+" failed: "+ex);
+				}
+			});
+		}
+	}
+
+	private void endWatches(String reason) {
+		List<DirWatch> all;
+		synchronized (delegations) {
+			all = new ArrayList<DirWatch>(dirWatches.values());
+			dirWatches.clear();
+		}
+		for (DirWatch w : all) {
+			lose(w, reason);
+		}
+	}
+
+	void closeWatch(DirWatch w) throws IOException {
+		boolean mine;
+		synchronized (delegations) {
+			mine = dirWatches.remove(key(w.other)) != null;
+		}
+		if( !mine ) {
+			return;
+		}
+		lose(w, "the watch was closed");
+		synchronized (this) {
+			if( !closed && socket != null && !socket.isClosed() ) {
+				returnDelegation(new Delegation(w.fh, w.seqid, w.other, false, w.path));
+			}
+		}
+	}
+
+	/** @return how many folders this client watches */
+	public int getWatchCount() {
+		synchronized (delegations) {
+			return dirWatches.size();
 		}
 	}
 
