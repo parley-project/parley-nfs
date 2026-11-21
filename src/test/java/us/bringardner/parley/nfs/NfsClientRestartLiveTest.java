@@ -25,7 +25,6 @@
 package us.bringardner.parley.nfs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -40,7 +39,6 @@ import org.junit.jupiter.api.Test;
 import us.bringardner.parley.nfs.client.NfsClient;
 import us.bringardner.parley.nfs.client.NfsException;
 import us.bringardner.parley.nfs.client.NfsLock;
-import us.bringardner.parley.nfs.client.NfsLockDeniedException;
 
 /**
  * A lock is given back to the client after the NFS server restarts (D85): the client makes a new client id and
@@ -155,23 +153,38 @@ public class NfsClientRestartLiveTest {
 		assertTrue(lost.isEmpty(), "the lock was lost: "+(lost.isEmpty() ? "" : lost.get(0).getLostReason()));
 		assertTrue(mine.isHeld(), "not held: "+mine.getLostReason());
 
-		// another client can't take the range, once the server's grace period is over (until then it answers GRACE)
+		// Another client asks the server about the range (LOCKT) every few seconds, for a whole lease period and more, and
+		// the answers are written down: GRACE while the server is in its grace period, then "held" for as long as it has
+		// our lock. "Free" is a failure: either the server never took the lock back, or it dropped it again (a lease that ran out).
 		other = newClient();
-		boolean denied = false;
-		while( !denied ) {
+		long hold = Long.getLong("nfs.live.restart.hold", 150L);
+		StringBuilder timeline = new StringBuilder("lease "+client.getLeaseSeconds()+"s; seconds after the restart: ");
+		long start = System.currentTimeMillis();
+		boolean sawHeld = false;
+		String failure = null;
+		while( failure == null && System.currentTimeMillis() - start < hold * 1000L ) {
+			long t = (System.currentTimeMillis() - start) / 1000L;
+			String answer;
 			try {
-				other.lock(file, 2, 2, false).unlock();
-				assertFalse(true, "another client took a range the first one holds: the lock did not survive the restart");
-			} catch (NfsLockDeniedException e) {
-				denied = true;
+				answer = other.testLock(file, 0, 5, true) != null ? "held" : "FREE";
 			} catch (NfsException e) {
-				if( System.currentTimeMillis() > deadline ) {
-					throw e;
-				}
-				Thread.sleep(2000);
+				answer = e.getStatus() == 10013 ? "grace" : "status "+e.getStatus();
+			}
+			timeline.append(t).append("s ").append(answer).append(", ");
+			System.out.println("restart live test: "+t+"s after the restart, the range is "+answer);
+			if( "held".equals(answer) ) {
+				sawHeld = true;
+			} else if( "FREE".equals(answer) ) {
+				failure = "the server does not hold the lock any more"+(sawHeld ? " (it did earlier: it was dropped)" : " (it never did: not reclaimed)");
+			}
+			if( failure == null ) {
+				Thread.sleep(3000);
 			}
 		}
-		assertTrue(mine.isHeld());
+		assertTrue(failure == null, failure+". "+timeline);
+		assertTrue(sawHeld, "the range was never reported held. "+timeline);
+		assertTrue(lost.isEmpty(), "the lock was lost: "+(lost.isEmpty() ? "" : lost.get(0).getLostReason()));
+		assertTrue(mine.isHeld(), "not held: "+mine.getLostReason());
 		mine.unlock();
 		other.lock(file, 0, 5, true).unlock();
 	}
