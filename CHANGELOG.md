@@ -2,6 +2,19 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-21: extended attributes, RFC 8276, D101)
+
+- **GETXATTR, SETXATTR, LISTXATTRS, REMOVEXATTR (NFSv4.2) and the `xattr_support` attribute** (RFC 8276). The server
+  keeps nothing itself: it asks the file (`FileSource.isExtendedAttributesSupported()` and the four methods that go
+  with it in parley-files, which local files and the memory provider have), and says `xattr_support` true only for a
+  file that does. Names are opaque text up to 255 bytes, values up to 64 KiB (`NFS4ERR_XATTR2BIG` beyond);
+  reading and listing need read permission and setting and removing need write permission, through the same checks
+  as file data; the change attribute moves when an attribute is created, changes or goes (not when the same value is
+  set again); ACCESS answers the three new bits. A file system that keeps none answers NFS4ERR_NOTSUPP, and below
+  NFSv4.2 the operations are illegal. Named attributes (OPENATTR, RFC 7530) are still not offered.
+- **`NfsClient.isXattrSupported`, `getXattr`, `setXattr` (either, create or replace), `listXattrs` and
+  `removeXattr`.** Needs parley-files with the extended-attribute methods.
+
 ### Added (2026-11-21: READ_PLUS, D100)
 
 - **READ_PLUS (NFSv4.2, RFC 7862 section 15.10)**: the server answers it with data and hole segments. A file here

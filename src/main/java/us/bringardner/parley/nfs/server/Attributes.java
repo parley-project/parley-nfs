@@ -65,7 +65,7 @@ public class Attributes {
 			Nfs4.FATTR4_OWNER_GROUP, Nfs4.FATTR4_RAWDEV, Nfs4.FATTR4_TIME_ACCESS, Nfs4.FATTR4_TIME_ACCESS_SET,
 			Nfs4.FATTR4_TIME_CREATE, Nfs4.FATTR4_TIME_DELTA, Nfs4.FATTR4_TIME_METADATA,
 			Nfs4.FATTR4_TIME_MODIFY, Nfs4.FATTR4_TIME_MODIFY_SET, Nfs4.FATTR4_MOUNTED_ON_FILEID,
-			Nfs4.FATTR4_SPACE_AVAIL, Nfs4.FATTR4_SPACE_FREE, Nfs4.FATTR4_SPACE_TOTAL);
+			Nfs4.FATTR4_SPACE_AVAIL, Nfs4.FATTR4_SPACE_FREE, Nfs4.FATTR4_SPACE_TOTAL, Nfs4.FATTR4_XATTR_SUPPORT);
 
 	/** The attributes a client can set. */
 	public static final int[] WRITABLE = bitmap(Nfs4.FATTR4_SIZE, Nfs4.FATTR4_ACL, Nfs4.FATTR4_MODE, Nfs4.FATTR4_OWNER,
@@ -305,6 +305,15 @@ public class Attributes {
 		}
 	}
 
+	/** RFC 8276 xattr_support: the provider keeps extended attributes for the file (D101) */
+	private static boolean xattrSupported(FileSource f) {
+		try {
+			return f.isExtendedAttributesSupported();
+		} catch (IOException | RuntimeException e) {
+			return false;
+		}
+	}
+
 	private void value(int attr, Source src, XdrEncoder out) throws IOException {
 		switch (attr) {
 		case Nfs4.FATTR4_SUPPORTED_ATTRS: {
@@ -322,6 +331,7 @@ public class Attributes {
 		case Nfs4.FATTR4_LINK_SUPPORT: out.writeBoolean(false); break;
 		case Nfs4.FATTR4_SYMLINK_SUPPORT: out.writeBoolean(true); break;
 		case Nfs4.FATTR4_NAMED_ATTR: out.writeBoolean(false); break;
+		case Nfs4.FATTR4_XATTR_SUPPORT: out.writeBoolean(src.linkText() == null && xattrSupported(src.file)); break;
 		case Nfs4.FATTR4_FSID:
 			out.writeLong(src.export.getFsidMajor());
 			out.writeLong(src.export.getFsidMinor());

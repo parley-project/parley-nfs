@@ -189,13 +189,15 @@ public class Compound {
 	private int operation(int op) {
 		boolean known = op >= Nfs4.OP_ACCESS && op <= Nfs4.OP_RELEASE_LOCKOWNER
 				|| v41 && op >= Nfs4.OP_BACKCHANNEL_CTL && op <= Nfs4.OP_RECLAIM_COMPLETE
-				|| v42 && op >= Nfs4.OP_ALLOCATE && op <= Nfs4.OP_CLONE;
+				|| v42 && op >= Nfs4.OP_ALLOCATE && op <= Nfs4.OP_REMOVEXATTR;
 		switch (op) {
 		case Nfs4.OP_CREATE:
 		case Nfs4.OP_REMOVE:
 		case Nfs4.OP_RENAME:
 		case Nfs4.OP_LINK:
 		case Nfs4.OP_SETATTR:
+		case Nfs4.OP_SETXATTR:
+		case Nfs4.OP_REMOVEXATTR:
 			nonIdempotent = true;
 			break;
 		default:
@@ -283,6 +285,10 @@ public class Compound {
 		case Nfs4.OP_ALLOCATE: allocate(); break;
 		case Nfs4.OP_DEALLOCATE: deallocate(); break;
 		case Nfs4.OP_COPY: copy(); break;
+		case Nfs4.OP_GETXATTR: getXattr(); break;
+		case Nfs4.OP_SETXATTR: setXattr(); break;
+		case Nfs4.OP_LISTXATTRS: listXattrs(); break;
+		case Nfs4.OP_REMOVEXATTR: removeXattr(); break;
 		case Nfs4.OP_CLONE:
 		case Nfs4.OP_COPY_NOTIFY:
 		case Nfs4.OP_IO_ADVISE:
@@ -912,6 +918,16 @@ public class Compound {
 				if( (allowed & m[0]) != 0 && !server.getAclPolicy().permits(acl, f, caller, client, m[1]) ) {
 					allowed &= ~m[0];
 				}
+			}
+		}
+		if( v42 && f.isExtendedAttributesSupported() && !Attributes.isLink(f) ) {
+			// RFC 8276 section 8.5: reading and listing follow READ, setting and removing follow MODIFY
+			supported |= asked & (Nfs4.ACCESS4_XAREAD | Nfs4.ACCESS4_XALIST | Nfs4.ACCESS4_XAWRITE);
+			if( (allowed & Nfs4.ACCESS4_READ) != 0 ) {
+				allowed |= Nfs4.ACCESS4_XAREAD | Nfs4.ACCESS4_XALIST;
+			}
+			if( (allowed & Nfs4.ACCESS4_MODIFY) != 0 ) {
+				allowed |= Nfs4.ACCESS4_XAWRITE;
 			}
 		}
 		out.writeInt(supported);
@@ -1597,6 +1613,131 @@ public class Compound {
 		node.changed();
 	}
 
+	// ------------------------------------------------------------ RFC 8276 extended attributes (D101)
+
+	/** the longest value a SETXATTR takes, as on Linux (XATTR_SIZE_MAX); a bigger one is NFS4ERR_XATTR2BIG */
+	public static final int XATTR_VALUE_MAX = 65536;
+	/** the longest name in bytes, as on Linux (XATTR_NAME_MAX) */
+	public static final int XATTR_NAME_MAX = 255;
+
+	private String xattrName() throws Nfs4Exception, XdrException {
+		String name = in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+		if( name.isEmpty() || name.indexOf('\0') >= 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "bad attribute name");
+		}
+		if( name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > XATTR_NAME_MAX ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NAMETOOLONG);
+		}
+		return name;
+	}
+
+	/** the current file, which must keep extended attributes (RFC 8276: the operations are for xattr_support true) */
+	private FileSource xattrFile() throws Nfs4Exception, IOException {
+		FileSource f = currentFile();
+		if( Attributes.isLink(f) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_SYMLINK);
+		}
+		if( !f.isExtendedAttributesSupported() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP, "no extended attributes here");
+		}
+		return f;
+	}
+
+	private void getXattr() throws Nfs4Exception, IOException {
+		String name = xattrName();
+		Node node = current();
+		FileSource f = xattrFile();
+		allowRead();
+		aclCheck(node, f, Nfs4.ACE4_READ_DATA);
+		byte[] value = f.getExtendedAttribute(name);
+		if( value == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOXATTR);
+		}
+		out.writeOpaque(value);
+	}
+
+	private void setXattr() throws Nfs4Exception, IOException {
+		int option = in.readInt();
+		String name = xattrName();
+		byte[] value = in.readOpaque(1<<20);
+		Node node = current();
+		FileSource f = xattrFile();
+		allowWrite();
+		aclCheck(node, f, Nfs4.ACE4_WRITE_DATA);
+		if( option < Nfs4.SETXATTR4_EITHER || option > Nfs4.SETXATTR4_REPLACE ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "option "+option);
+		}
+		if( value.length > XATTR_VALUE_MAX ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_XATTR2BIG);
+		}
+		byte[] old = f.getExtendedAttribute(name);
+		if( option == Nfs4.SETXATTR4_CREATE && old != null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_EXIST);
+		}
+		if( option == Nfs4.SETXATTR4_REPLACE && old == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOXATTR);
+		}
+		long before = change(node, f);
+		// the change attribute moves only when the attribute is new or its value differs (RFC 8276 section 8.4.2)
+		if( old == null || !java.util.Arrays.equals(old, value) ) {
+			f.setExtendedAttribute(name, value);
+			node.changed();
+		}
+		changeInfo(before, change(node, f));
+	}
+
+	private void listXattrs() throws Nfs4Exception, IOException {
+		long cookie = in.readLong();
+		long maxcount = in.readUnsignedInt();
+		Node node = current();
+		FileSource f = xattrFile();
+		allowRead();
+		aclCheck(node, f, Nfs4.ACE4_READ_DATA);
+		// sorted, so the cookie (the position of the next name) means the same on the next call
+		List<String> names = new java.util.ArrayList<>(f.getExtendedAttributeNames());
+		java.util.Collections.sort(names);
+		if( cookie < 0 || cookie > names.size() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_COOKIE);
+		}
+		// maxcount is the bytes of the whole result: cookie, the count, eof and each name
+		long room = maxcount - 8 - 4 - 4;
+		int i = (int) cookie;
+		List<String> page = new java.util.ArrayList<>();
+		while( i < names.size() ) {
+			int len = names.get(i).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+			long need = 4 + ((len + 3) & ~3);
+			if( need > room ) {
+				break;
+			}
+			room -= need;
+			page.add(names.get(i));
+			i++;
+		}
+		if( page.isEmpty() && i < names.size() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_TOOSMALL);
+		}
+		out.writeLong(i);
+		out.writeInt(page.size());
+		for (String n : page) {
+			out.writeString(n);
+		}
+		out.writeBoolean(i >= names.size());
+	}
+
+	private void removeXattr() throws Nfs4Exception, IOException {
+		String name = xattrName();
+		Node node = current();
+		FileSource f = xattrFile();
+		allowWrite();
+		aclCheck(node, f, Nfs4.ACE4_WRITE_DATA);
+		long before = change(node, f);
+		if( !f.removeExtendedAttribute(name) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOXATTR);
+		}
+		node.changed();
+		changeInfo(before, change(node, f));
+	}
+
 	/** DEALLOCATE: the range reads as zeros (a hole punched); the file's length stays. */
 	private void deallocate() throws Nfs4Exception, IOException {
 		StateId id = stateid();
@@ -1694,7 +1835,7 @@ public class Compound {
 	}
 
 	private void v41Gate(int op) throws Nfs4Exception {
-		if( op >= Nfs4.OP_ALLOCATE && op <= Nfs4.OP_CLONE && !v42 ) {
+		if( op >= Nfs4.OP_ALLOCATE && op <= Nfs4.OP_REMOVEXATTR && !v42 ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_OP_ILLEGAL, Nfs4.opName(op)+" isn't in NFSv4.1");
 		}
 		switch (op) {

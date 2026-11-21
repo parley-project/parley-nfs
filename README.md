@@ -25,6 +25,10 @@ Supported:
 7. Access control lists (see "Access control lists"), a state folder that keeps file identities and lists
    across a restart (see "File handles"), and a folder for each user.
 
+8. Extended attributes (RFC 8276, NFSv4.2): GETXATTR, SETXATTR, LISTXATTRS and REMOVEXATTR for files whose
+   FileSource keeps them (local files and the memory provider do); `setfattr` and `getfattr` on a Linux 5.9 or later
+   client work with the `user.` names. Names up to 255 bytes, values up to 64 KiB.
+
 Not yet (answered with NFS4ERR_NOTSUPP):
 
 1. Named attributes (OPENATTR).
@@ -80,7 +84,7 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.delegations` | false | true to give read delegations (see "Delegations"); none are given while `mirrorLocks` is on |
 | `parley.nfs.writeDelegations` | false | true (with `delegations`) to give write delegations too |
 | `parley.nfs.mirrorLocks` | false | true to hold the clients' byte-range locks as FileSource locks too (see "Locks") |
-| `parley.nfs.minorVersion` | 2 | The server's highest NFSv4 minor version: 2 serves NFSv4.2 (SEEK, ALLOCATE, DEALLOCATE, COPY, READ_PLUS), 4.1 (sessions) and 4.0; 1 serves 4.1 and 4.0; 0 serves 4.0 only |
+| `parley.nfs.minorVersion` | 2 | The server's highest NFSv4 minor version: 2 serves NFSv4.2 (SEEK, ALLOCATE, DEALLOCATE, COPY, READ_PLUS and the extended-attribute operations of RFC 8276), 4.1 (sessions) and 4.0; 1 serves 4.1 and 4.0; 0 serves 4.0 only |
 | `parley.nfs.client.minorVersion` | 2 | The client's highest NFSv4 minor version (a system property): it tries that version and goes down (4.2, 4.1, 4.0) to what the server has; 0 uses 4.0 only. In 4.1 a client takes delegations over the session's back channel, so the server needs no route to the client |
 | `parley.nfs.enforceModes` | false | true to check the mode bits of files that have no access control list, by the caller's registry name (see "Permissions") |
 | `parley.nfs.maxNodes` | 100000 | The most files per export kept in memory; those nobody has asked for lately go first |

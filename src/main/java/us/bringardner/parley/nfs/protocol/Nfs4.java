@@ -108,6 +108,15 @@ public final class Nfs4 {
 	public static final int OP_SEEK = 69;
 	public static final int OP_WRITE_SAME = 70;
 	public static final int OP_CLONE = 71;
+	// RFC 8276 extended attributes (D101)
+	public static final int OP_GETXATTR = 72;
+	public static final int OP_SETXATTR = 73;
+	public static final int OP_LISTXATTRS = 74;
+	public static final int OP_REMOVEXATTR = 75;
+	/** setxattr_option4 */
+	public static final int SETXATTR4_EITHER = 0;
+	public static final int SETXATTR4_CREATE = 1;
+	public static final int SETXATTR4_REPLACE = 2;
 	/** SEEK: what to look for (RFC 7862 section 15.11) */
 	public static final int NFS4_CONTENT_DATA = 0;
 	public static final int NFS4_CONTENT_HOLE = 1;
@@ -213,6 +222,9 @@ public final class Nfs4 {
 	public static final int NFS4ERR_WRONG_LFS = 10092;
 	public static final int NFS4ERR_BADLABEL = 10093;
 	public static final int NFS4ERR_OFFLOAD_NO_REQS = 10094;
+	/** RFC 8276 */
+	public static final int NFS4ERR_NOXATTR = 10095;
+	public static final int NFS4ERR_XATTR2BIG = 10096;
 
 	// ---------------------------------------------------------------- nfs_ftype4
 	public static final int NF4REG = 1;
@@ -289,6 +301,8 @@ public final class Nfs4 {
 	public static final int FATTR4_TIME_MODIFY = 53;
 	public static final int FATTR4_TIME_MODIFY_SET = 54;
 	public static final int FATTR4_MOUNTED_ON_FILEID = 55;
+	/** RFC 8276: true when the file system keeps extended attributes */
+	public static final int FATTR4_XATTR_SUPPORT = 82;
 
 	// time_how4
 	public static final int SET_TO_SERVER_TIME4 = 0;
@@ -301,6 +315,10 @@ public final class Nfs4 {
 	public static final int ACCESS4_EXTEND = 0x08;
 	public static final int ACCESS4_DELETE = 0x10;
 	public static final int ACCESS4_EXECUTE = 0x20;
+	/** RFC 8276 section 8.5: GETXATTR, SETXATTR and REMOVEXATTR, LISTXATTRS */
+	public static final int ACCESS4_XAREAD = 0x40;
+	public static final int ACCESS4_XAWRITE = 0x80;
+	public static final int ACCESS4_XALIST = 0x100;
 
 	// ---------------------------------------------------------------- ACL (RFC 7530 section 6)
 	public static final int ACE4_ACCESS_ALLOWED_ACE_TYPE = 0;
@@ -474,6 +492,10 @@ public final class Nfs4 {
 		case OP_SEEK: return "SEEK";
 		case OP_WRITE_SAME: return "WRITE_SAME";
 		case OP_CLONE: return "CLONE";
+		case OP_GETXATTR: return "GETXATTR";
+		case OP_SETXATTR: return "SETXATTR";
+		case OP_LISTXATTRS: return "LISTXATTRS";
+		case OP_REMOVEXATTR: return "REMOVEXATTR";
 		default: return "ILLEGAL("+op+")";
 		}
 	}

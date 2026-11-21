@@ -649,6 +649,140 @@ public class NfsClient implements Closeable {
 		});
 	}
 
+	// ------------------------------------------------------------------ extended attributes (RFC 8276, D101)
+
+	/**
+	 * Does the file system of the path keep extended attributes (the xattr_support attribute)?
+	 * @return false when the server isn't NFSv4.2, doesn't know the attribute or says no
+	 */
+	public synchronized boolean isXattrSupported(String path) throws IOException {
+		if( minorVersion < 2 ) {
+			return false;
+		}
+		return run(true, () -> {
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_GETATTR).args.writeIntArray(bitmap(Nfs4.FATTR4_XATTR_SUPPORT));
+			Reply r = call(c, "isXattrSupported "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_GETATTR);
+			int[] map = r.in.readIntArray(8);
+			XdrDecoder a = new XdrDecoder(r.in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT*64));
+			int word = Nfs4.FATTR4_XATTR_SUPPORT / 32;
+			if( map.length <= word || (map[word] & (1 << (Nfs4.FATTR4_XATTR_SUPPORT % 32))) == 0 ) {
+				return false;
+			}
+			return a.readBoolean();
+		});
+	}
+
+	/**
+	 * Read an extended attribute (GETXATTR).
+	 * @return the value, or null when the file has no attribute of that name
+	 * @throws NfsException NFS4ERR_NOTSUPP when the server isn't NFSv4.2 or the file system keeps none
+	 */
+	public synchronized byte[] getXattr(String path, String name) throws IOException {
+		return run(true, () -> {
+			need42("getXattr");
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_GETXATTR).args.writeString(name);
+			try {
+				Reply r = call(c, "getXattr "+path);
+				skipLookup(r, path);
+				r.ok(Nfs4.OP_GETXATTR);
+				return r.in.readOpaque(Integer.MAX_VALUE);
+			} catch (NfsException e) {
+				if( e.getStatus() == Nfs4.NFS4ERR_NOXATTR ) {
+					return null;
+				}
+				throw e;
+			}
+		});
+	}
+
+	/** Create or replace an extended attribute (SETXATTR, either). */
+	public void setXattr(String path, String name, byte[] value) throws IOException {
+		setXattr(path, name, value, Nfs4.SETXATTR4_EITHER);
+	}
+
+	/**
+	 * Create or replace an extended attribute (SETXATTR).
+	 * @param option {@link Nfs4#SETXATTR4_EITHER}, {@link Nfs4#SETXATTR4_CREATE} (NFS4ERR_EXIST if there is one) or
+	 * {@link Nfs4#SETXATTR4_REPLACE} (NFS4ERR_NOXATTR if there isn't)
+	 * @throws NfsException NFS4ERR_XATTR2BIG when the value is too big for the server
+	 */
+	public synchronized void setXattr(String path, String name, byte[] value, int option) throws IOException {
+		run(true, () -> {
+			need42("setXattr");
+			dropCached();
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_SETXATTR).args.writeInt(option).writeString(name).writeOpaque(value);
+			Reply r = call(c, "setXattr "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_SETXATTR);
+			return null;
+		});
+	}
+
+	/**
+	 * The names of the extended attributes (LISTXATTRS, as many calls as it takes).
+	 * @return the names, in the order the server gave them
+	 */
+	public synchronized List<String> listXattrs(String path) throws IOException {
+		return run(true, () -> {
+			need42("listXattrs");
+			List<String> names = new ArrayList<>();
+			long cookie = 0;
+			boolean eof = false;
+			while( !eof ) {
+				Compound c = new Compound();
+				lookup(c, path);
+				c.op(Nfs4.OP_LISTXATTRS).args.writeLong(cookie).writeUnsignedInt(32768);
+				Reply r = call(c, "listXattrs "+path);
+				skipLookup(r, path);
+				r.ok(Nfs4.OP_LISTXATTRS);
+				long next = r.in.readLong();
+				int n = r.in.readInt();
+				for (int i = 0; i < n; i++) {
+					names.add(r.in.readString(Nfs4.NFS4_OPAQUE_LIMIT));
+				}
+				eof = r.in.readBoolean();
+				if( !eof && next == cookie && n == 0 ) {
+					throw new NfsException(Nfs4.NFS4ERR_SERVERFAULT, "LISTXATTRS made no progress");
+				}
+				cookie = next;
+			}
+			return names;
+		});
+	}
+
+	/**
+	 * Remove an extended attribute (REMOVEXATTR).
+	 * @return false when the file had none of that name
+	 */
+	public synchronized boolean removeXattr(String path, String name) throws IOException {
+		return run(true, () -> {
+			need42("removeXattr");
+			dropCached();
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_REMOVEXATTR).args.writeString(name);
+			try {
+				Reply r = call(c, "removeXattr "+path);
+				skipLookup(r, path);
+				r.ok(Nfs4.OP_REMOVEXATTR);
+				return true;
+			} catch (NfsException e) {
+				if( e.getStatus() == Nfs4.NFS4ERR_NOXATTR ) {
+					return false;
+				}
+				throw e;
+			}
+		});
+	}
+
 	/** Make sure the range of the file is there (ALLOCATE); a range past the end makes the file longer. */
 	public synchronized void allocate(String path, long offset, long length) throws IOException {
 		rangeOp(Nfs4.OP_ALLOCATE, "allocate", path, offset, length);

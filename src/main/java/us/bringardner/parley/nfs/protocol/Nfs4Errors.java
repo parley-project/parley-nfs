@@ -133,6 +133,8 @@ public final class Nfs4Errors {
 		case Nfs4.NFS4ERR_WRONG_LFS: return "the file handle's file system isn't the one the operation needs";
 		case Nfs4.NFS4ERR_BADLABEL: return "the security label is not valid";
 		case Nfs4.NFS4ERR_OFFLOAD_NO_REQS: return "the copy can't be done as the request asks";
+		case Nfs4.NFS4ERR_NOXATTR: return "no extended attribute of that name";
+		case Nfs4.NFS4ERR_XATTR2BIG: return "the extended attribute value is too big";
 		default: return "unknown NFS status "+status;
 		}
 	}
@@ -237,6 +239,8 @@ public final class Nfs4Errors {
 		case Nfs4.NFS4ERR_WRONG_LFS: return "NFS4ERR_WRONG_LFS";
 		case Nfs4.NFS4ERR_BADLABEL: return "NFS4ERR_BADLABEL";
 		case Nfs4.NFS4ERR_OFFLOAD_NO_REQS: return "NFS4ERR_OFFLOAD_NO_REQS";
+		case Nfs4.NFS4ERR_NOXATTR: return "NFS4ERR_NOXATTR";
+		case Nfs4.NFS4ERR_XATTR2BIG: return "NFS4ERR_XATTR2BIG";
 		default: return Integer.toString(status);
 		}
 	}
