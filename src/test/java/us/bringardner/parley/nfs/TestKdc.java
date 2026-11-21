@@ -39,19 +39,21 @@ import org.apache.kerby.kerberos.kerb.server.SimpleKdcServer;
 /**
  * One Kerby KDC for the whole test JVM. The JDK reads krb5.conf once, so each test class starting its own KDC on
  * another port would find the first one's address.
+ * <p>
+ * Public, and in parley-nfs's test jar, for the tests of the modules built on the client (parley-files-nfs).
  */
-final class TestKdc {
+public final class TestKdc {
 
-	static final String REALM = "EXAMPLE.COM";
-	static final String SERVER = "nfs/localhost@"+REALM;
-	static final Map<String, File> KEYTABS = new HashMap<String, File>();
+	public static final String REALM = "EXAMPLE.COM";
+	public static final String SERVER = "nfs/localhost@"+REALM;
+	public static final Map<String, File> KEYTABS = new HashMap<String, File>();
 	private static boolean started;
 
 	private TestKdc() {
 	}
 
 	/** Start the KDC if no test class has yet. */
-	static synchronized void start(String... users) throws Exception {
+	public static synchronized void start(String... users) throws Exception {
 		if( started ) {
 			return;
 		}
