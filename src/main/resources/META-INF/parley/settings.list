@@ -4,6 +4,9 @@
 prefix parley.nfs
 parley.nfs.configFile
 parley.nfs.port
+parley.nfs.minorVersion
+# the client's setting (NfsClient.PROPERTY_MINOR_VERSION)
+parley.nfs.client.minorVersion
 parley.nfs.export
 parley.nfs.exportName
 parley.nfs.exports

@@ -119,6 +119,17 @@ public class NfsClient implements Closeable {
 	private volatile java.util.function.Consumer<NfsLock> lockLostHandler;
 	private int lockCount;
 	private volatile NfsKerberos.Session session;
+	/**
+	 * The highest NFSv4 minor version this client tries: 1 (the default) tries NFSv4.1 and goes on with 4.0 when the
+	 * server doesn't have it; 0 uses 4.0 only. The system property {@value #PROPERTY_MINOR_VERSION} sets it.
+	 */
+	public static final String PROPERTY_MINOR_VERSION = "parley.nfs.client.minorVersion";
+	private final int wantedMinor;
+	/** the minor version in use, from the last connect */
+	private volatile int minorVersion;
+	/** NFSv4.1: the session and the sequence id last used in its (only) slot */
+	private byte[] sessionId;
+	private int slotSeq;
 
 	/**
 	 * Connect, set up a client ID and mount a path.
@@ -158,6 +169,8 @@ public class NfsClient implements Closeable {
 
 	private NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, NfsKerberos kerberos, boolean wantDelegations) throws IOException {
 		this.kerberos = kerberos;
+		// delegations need the server's callbacks to reach the client, which a 4.1 session does only over its back channel (T5 step (b)): until then a client that wants delegations uses 4.0
+		this.wantedMinor = wantDelegations ? 0 : Math.max(0, Math.min(1, Integer.getInteger(PROPERTY_MINOR_VERSION, 1)));
 		this.callbacks = wantDelegations ? new ClientCallbacks(this::recalled) : null;
 		this.uid = uid;
 		this.gid = gid;
@@ -177,6 +190,7 @@ public class NfsClient implements Closeable {
 		this.timeoutMillis = timeoutMillis;
 		try {
 			connect();
+			reclaimComplete();
 			startRenewing();
 		} catch (IOException | RuntimeException e) {
 			close();
@@ -240,6 +254,7 @@ public class NfsClient implements Closeable {
 		reportedLost = false;
 		LOG.log(System.Logger.Level.INFO, "NFS client reconnected to "+host+":"+port);
 		reclaimLocks();
+		reclaimComplete();
 	}
 
 	/** One operation of this client, which can be run again. */
@@ -286,7 +301,13 @@ public class NfsClient implements Closeable {
 
 	private static boolean isStateGone(int status) {
 		return status == Nfs4.NFS4ERR_STALE_CLIENTID || status == Nfs4.NFS4ERR_EXPIRED || status == Nfs4.NFS4ERR_STALE_STATEID
-				|| status == Nfs4.NFS4ERR_BAD_STATEID || status == Nfs4.NFS4ERR_STALE || status == Nfs4.NFS4ERR_FHEXPIRED;
+				|| status == Nfs4.NFS4ERR_BAD_STATEID || status == Nfs4.NFS4ERR_STALE || status == Nfs4.NFS4ERR_FHEXPIRED
+				|| status == Nfs4.NFS4ERR_BADSESSION || status == Nfs4.NFS4ERR_DEADSESSION || status == Nfs4.NFS4ERR_SEQ_MISORDERED;
+	}
+
+	/** @return the NFSv4 minor version in use: 0 or 1 (a session) */
+	public int getMinorVersion() {
+		return minorVersion;
 	}
 
 	/** @return the lease time in seconds the server gave */
@@ -316,6 +337,7 @@ public class NfsClient implements Closeable {
 		if( rt != null ) {
 			rt.shutdownNow();
 		}
+		destroySession();
 		NfsKerberos.Session g = session;
 		if( g != null ) {
 			synchronized (this) {
@@ -929,9 +951,16 @@ public class NfsClient implements Closeable {
 			a.writeLong(l.getOffset()).writeLong(l.getLength());
 			call(c, "unlock "+l.getPath()).ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_LOCKU);
 			l.lockSeqid++;
-			Compound rc = new Compound();
-			rc.op(Nfs4.OP_RELEASE_LOCKOWNER).args.writeLong(clientId).writeOpaque(l.lockOwner.getBytes(StandardCharsets.UTF_8));
-			call(rc, "release lock owner").ok(Nfs4.OP_RELEASE_LOCKOWNER);
+			if( minorVersion == 0 ) {
+				Compound rc = new Compound();
+				rc.op(Nfs4.OP_RELEASE_LOCKOWNER).args.writeLong(clientId).writeOpaque(l.lockOwner.getBytes(StandardCharsets.UTF_8));
+				call(rc, "release lock owner").ok(Nfs4.OP_RELEASE_LOCKOWNER);
+			} else {
+				// 4.1 has no lock-owners to release: the lock's stateid is freed
+				Compound rc = new Compound();
+				rc.op(Nfs4.OP_FREE_STATEID).args.writeInt(0).writeFixedOpaque(l.lockOther);
+				call(rc, "free lock stateid").ok(Nfs4.OP_FREE_STATEID);
+			}
 			Opened o = new Opened();
 			o.fh = l.fh;
 			o.seqid = l.openSeqid;
@@ -1476,6 +1505,21 @@ public class NfsClient implements Closeable {
 	// ------------------------------------------------------------------ set-up and lease
 
 	private void setClientId() throws IOException {
+		sessionId = null;
+		slotSeq = 0;
+		if( wantedMinor >= 1 ) {
+			minorVersion = 1;
+			try {
+				setClientIdV41();
+				return;
+			} catch (NfsException e) {
+				if( e.getStatus() != Nfs4.NFS4ERR_MINOR_VERS_MISMATCH ) {
+					throw e;
+				}
+				LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" has no NFSv4.1: using NFSv4.0");
+			}
+		}
+		minorVersion = 0;
 		byte[] verifier = new byte[Nfs4.NFS4_VERIFIER_SIZE];
 		new SecureRandom().nextBytes(verifier);
 		Compound c = new Compound();
@@ -1495,6 +1539,73 @@ public class NfsClient implements Closeable {
 		Compound cc = new Compound();
 		cc.op(Nfs4.OP_SETCLIENTID_CONFIRM).args.writeLong(clientId).writeFixedOpaque(confirm);
 		call(cc, "setclientid_confirm").ok(Nfs4.OP_SETCLIENTID_CONFIRM);
+	}
+
+	/** EXCHANGE_ID and CREATE_SESSION (RFC 8881 sections 18.35 and 18.36): a client id and a session. */
+	private void setClientIdV41() throws IOException {
+		byte[] verifier = new byte[Nfs4.NFS4_VERIFIER_SIZE];
+		new SecureRandom().nextBytes(verifier);
+		Compound c = new Compound().withoutSession();
+		XdrEncoder a = c.op(Nfs4.OP_EXCHANGE_ID).args;
+		a.writeFixedOpaque(verifier).writeOpaque(ownerPrefix.getBytes(StandardCharsets.UTF_8));
+		a.writeInt(EXCHGID4_FLAG_USE_NON_PNFS).writeInt(0);
+		a.writeInt(1).writeString("bringardner.us").writeString("parley-nfs-client").writeLong(0).writeInt(0);
+		Reply r = call(c, "exchange_id");
+		r.ok(Nfs4.OP_EXCHANGE_ID);
+		clientId = r.in.readLong();
+		int sequence = r.in.readInt();
+
+		Compound cs = new Compound().withoutSession();
+		a = cs.op(Nfs4.OP_CREATE_SESSION).args;
+		a.writeLong(clientId).writeInt(sequence).writeInt(0);
+		// the fore channel: one request at a time (every operation of this client is synchronized), none kept for a retry
+		a.writeInt(0).writeInt(SESSION_MAX_SIZE).writeInt(SESSION_MAX_SIZE).writeInt(0).writeInt(32).writeInt(1).writeInt(0);
+		// the back channel, which isn't used yet
+		a.writeInt(0).writeInt(4096).writeInt(4096).writeInt(0).writeInt(2).writeInt(1).writeInt(0);
+		a.writeInt(0x40000000).writeInt(1).writeInt(Rpc.AUTH_NONE);
+		r = call(cs, "create_session");
+		r.ok(Nfs4.OP_CREATE_SESSION);
+		sessionId = r.in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+		slotSeq = 0;
+	}
+
+	private static final int EXCHGID4_FLAG_USE_NON_PNFS = 0x00010000;
+	/** the largest request or reply asked of a session: the biggest READ or WRITE and its header */
+	private static final int SESSION_MAX_SIZE = (1 << 20) + 65536;
+
+	/** NFSv4.1: give the session and the client id back, so the server doesn't keep them for a lease; no error matters here. */
+	private synchronized void destroySession() {
+		byte[] id = sessionId;
+		if( minorVersion != 1 || id == null || socket == null || socket.isClosed() ) {
+			return;
+		}
+		try {
+			Compound c = new Compound().withoutSession();
+			c.op(Nfs4.OP_DESTROY_SESSION).args.writeFixedOpaque(id);
+			sessionId = null;
+			call(c, "destroy_session", false).ok(Nfs4.OP_DESTROY_SESSION);
+			Compound d = new Compound().withoutSession();
+			d.op(Nfs4.OP_DESTROY_CLIENTID).args.writeLong(clientId);
+			call(d, "destroy_clientid", false).ok(Nfs4.OP_DESTROY_CLIENTID);
+		} catch (IOException | RuntimeException e) {
+			LOG.log(System.Logger.Level.DEBUG, "NFS client: the session was not given back: "+e);
+		}
+	}
+
+	/** RECLAIM_COMPLETE (NFSv4.1): this client has taken back what it held before the server restarted, and has no more to take. */
+	private void reclaimComplete() throws IOException {
+		if( minorVersion == 0 ) {
+			return;
+		}
+		Compound c = new Compound();
+		c.op(Nfs4.OP_RECLAIM_COMPLETE).args.writeBoolean(false);
+		try {
+			call(c, "reclaim_complete").ok(Nfs4.OP_RECLAIM_COMPLETE);
+		} catch (NfsException e) {
+			if( e.getStatus() != Nfs4.NFS4ERR_COMPLETE_ALREADY ) {
+				throw e;
+			}
+		}
 	}
 
 	private void mount(String path) throws IOException {
@@ -1546,8 +1657,13 @@ public class NfsClient implements Closeable {
 		}
 		try {
 			Compound c = new Compound();
-			c.op(Nfs4.OP_RENEW).args.writeLong(clientId);
-			call(c, "renew").ok(Nfs4.OP_RENEW);
+			if( minorVersion == 0 ) {
+				c.op(Nfs4.OP_RENEW).args.writeLong(clientId);
+				call(c, "renew").ok(Nfs4.OP_RENEW);
+			} else {
+				// any call in a session renews the lease: SEQUENCE alone does
+				call(c, "renew");
+			}
 		} catch (NfsException e) {
 			if( e.getStatus() != Nfs4.NFS4ERR_CB_PATH_DOWN ) {
 				renewFailed(e);
@@ -1584,6 +1700,13 @@ public class NfsClient implements Closeable {
 		final XdrEncoder ops = new XdrEncoder();
 		XdrEncoder args;
 		int count;
+		/** NFSv4.1: the COMPOUND is not in a session (EXCHANGE_ID, CREATE_SESSION, DESTROY_CLIENTID) */
+		boolean sessionless;
+
+		Compound withoutSession() {
+			sessionless = true;
+			return this;
+		}
 
 		Compound op(int op) {
 			ops.writeInt(op);
@@ -1629,13 +1752,40 @@ public class NfsClient implements Closeable {
 		for (int attempt = 0; ; attempt++) {
 			XdrEncoder a = new XdrEncoder();
 			a.writeString("parley");
-			a.writeInt(0);
-			a.writeInt(c.count);
+			a.writeInt(minorVersion);
+			boolean sequenced = minorVersion == 1 && !c.sessionless;
+			if( sequenced && sessionId == null ) {
+				throw new IOException(what+": the session is closed");
+			}
+			if( sequenced ) {
+				// SEQUENCE first: the session, the slot (0), its next sequence id, the highest slot, and no reply kept
+				a.writeInt(c.count+1);
+				a.writeInt(Nfs4.OP_SEQUENCE).writeFixedOpaque(sessionId).writeInt(slotSeq+1).writeInt(0).writeInt(0).writeBoolean(false);
+			} else {
+				a.writeInt(c.count);
+			}
 			a.write(c.ops);
 			XdrDecoder r = rpc(Nfs4.PROC_COMPOUND, a);
 			int status = r.readInt();
 			r.readOpaque(1024);
 			int count = r.readInt();
+			if( sequenced && count > 0 ) {
+				int op = r.readInt();
+				int seqStatus = r.readInt();
+				if( op != Nfs4.OP_SEQUENCE ) {
+					throw new IOException("expected SEQUENCE, the server answered "+Nfs4.opName(op));
+				}
+				if( seqStatus != Nfs4.NFS4_OK ) {
+					throw new NfsException(seqStatus, "sequence for "+what);
+				}
+				r.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+				for (int i = 0; i < 5; i++) {
+					r.readInt();
+				}
+				// the slot's request was run, so its sequence id is used, whatever the operations answered
+				slotSeq++;
+				count--;
+			}
 			boolean wait = status == Nfs4.NFS4ERR_DELAY || status == Nfs4.NFS4ERR_GRACE;
 			if( status != Nfs4.NFS4_OK && count > 0 && !wait ) {
 				return new Reply(r);
