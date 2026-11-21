@@ -798,6 +798,104 @@ public class DelegationNfsTest {
 		assertEquals(Nfs4.NFS4ERR_DELEG_REVOKED, write(a, held.fh, held.delegationOther), "the holder is told");
 	}
 
+
+	// ------------------------------------------------------------------ NFSv4.1 clients after a restart (RFC 8881 section 18.51)
+
+	/** A 4.1 client with the name and verifier of {@link #clientid(TestClient, String, String)}: EXCHANGE_ID and CREATE_SESSION. */
+	private static byte[] session41(TestClient c, String name) throws IOException {
+		Ops ops = new Ops().op(Nfs4.OP_EXCHANGE_ID);
+		ops.args().writeFixedOpaque(new byte[] {1, 2, 3, 4, 5, 6, 7, 8});
+		ops.args().writeOpaque(bytes(name));
+		ops.args().writeInt(0).writeInt(0).writeInt(0);
+		Result r = c.compound(ops, 1);
+		r.ok(Nfs4.OP_EXCHANGE_ID);
+		long clientid = r.in.readLong();
+		clientid41 = clientid;
+		slotSeq41 = 0;
+		int sequence = r.in.readInt();
+		Ops cs = new Ops().op(Nfs4.OP_CREATE_SESSION);
+		cs.args().writeLong(clientid).writeInt(sequence).writeInt(0);
+		for (int i = 0; i < 2; i++) {
+			cs.args().writeInt(0).writeInt(65536).writeInt(65536).writeInt(0).writeInt(8).writeInt(1).writeInt(0);
+		}
+		cs.args().writeInt(0x40000000).writeInt(1).writeInt(0);
+		Result created = c.compound(cs, 1);
+		created.ok(Nfs4.OP_CREATE_SESSION);
+		return created.in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+	}
+
+	private static int slotSeq41;
+	private static long clientid41;
+
+	private static Ops sequence41(byte[] session) {
+		Ops ops = new Ops().op(Nfs4.OP_SEQUENCE);
+		ops.args().writeFixedOpaque(session).writeInt(++slotSeq41).writeInt(0).writeInt(0).writeBoolean(false);
+		return ops;
+	}
+
+	private static int reclaimComplete41(TestClient c, byte[] session) throws IOException {
+		Ops ops = sequence41(session).op(Nfs4.OP_RECLAIM_COMPLETE);
+		ops.args().writeBoolean(false);
+		return c.compound(ops, 1).status;
+	}
+
+	/** @return the status of OPEN with CLAIM_PREVIOUS of a file in a 4.1 session */
+	private static int reclaim41(TestClient c, byte[] session, byte[] fh, long clientid, String owner, int held) throws IOException {
+		Ops ops = sequence41(session).putfh(fh).op(Nfs4.OP_OPEN);
+		ops.args().writeInt(1).writeInt(Nfs4.OPEN4_SHARE_ACCESS_WRITE).writeInt(0).writeLong(clientid).writeOpaque(bytes(owner))
+			.writeInt(Nfs4.OPEN4_NOCREATE).writeInt(Nfs4.CLAIM_PREVIOUS).writeInt(held);
+		return c.compound(ops, 1).status;
+	}
+
+	/** A 4.1 client says its reclaim is complete without reclaiming: what it held is given up and the file is open to others at once. */
+	@Test
+	public void reclaimCompleteGivesUpWhatWasNotReclaimed() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = writeHolder(client(), cb, "a");
+		assertEquals(Nfs4.OPEN_DELEGATE_WRITE, held.delegation);
+		restart();
+		assertTrue(server.getStateManager().isReclaiming());
+		TestClient b = client();
+		long bid = clientid(b, "b", "");
+		assertEquals(Nfs4.NFS4ERR_GRACE, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
+		TestClient a = client();
+		byte[] session = session41(a, "a");
+		assertEquals(Nfs4.NFS4_OK, reclaimComplete41(a, session));
+		assertFalse(server.getStateManager().isReclaiming(), "nobody is left to come back");
+		assertEquals(Nfs4.NFS4_OK, open(b, rootFh(b), bid, Nfs4.OPEN4_SHARE_ACCESS_WRITE, "bo", "f").status);
+	}
+
+	/** A 4.1 client takes back its delegation in a session, then says it is done: nothing is left to wait for. */
+	@Test
+	public void aDelegationIsReclaimedInASession() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = writeHolder(client(), cb, "a");
+		restart();
+		TestClient a = client();
+		byte[] session = session41(a, "a");
+		assertEquals(Nfs4.NFS4_OK, reclaim41(a, session, held.fh, clientid41, "a-owner", Nfs4.OPEN_DELEGATE_WRITE));
+		assertTrue(server.getStateManager().isReclaiming(), "the grace period runs till the client says it is done");
+		assertEquals(Nfs4.NFS4_OK, reclaimComplete41(a, session));
+		assertFalse(server.getStateManager().isReclaiming());
+		assertEquals(1, server.getStateManager().getDelegationCount(), "the delegation it took back is kept");
+	}
+
+	/** After RECLAIM_COMPLETE a reclaim is too late. */
+	@Test
+	public void noReclaimAfterReclaimComplete() throws Exception {
+		startKeeping("90s");
+		Callbacks cb = callbacks("127.0.0.1");
+		Opened held = writeHolder(client(), cb, "a");
+		restart();
+		TestClient a = client();
+		byte[] session = session41(a, "a");
+		assertEquals(Nfs4.NFS4_OK, reclaimComplete41(a, session));
+		// the grace period is over for this client: the reclaim gets NO_GRACE (the client's id is in the session's record)
+		assertEquals(Nfs4.NFS4ERR_NO_GRACE, reclaim41(a, session, held.fh, clientid41, "a-owner", Nfs4.OPEN_DELEGATE_WRITE));
+	}
+
 	// ------------------------------------------------------------------ after a restart (D67)
 
 	/** A client takes back its write delegation after a restart; until it does, the file is closed to others. */
