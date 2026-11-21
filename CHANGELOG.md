@@ -2,6 +2,14 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-21: threads from Parley, D96)
+
+- Every thread the server and client start is made with parley-core's `NamedExecutors` (named daemon
+  threads), none with `new Thread`: the server's workers, timer, notifier, callbacks and stop thread, and the
+  client's lease renewer, reader, callback listener, delegation returner and directory-watch deliverer.
+  Names are kept; the server's worker threads are now `name-worker`, `name-worker-2` ... (were `-1`, `-2`).
+  Needs parley-core with `NamedExecutors`.
+
 ### Added (2026-11-20: what a FileSource needs of the client, T10, D87)
 
 - Directory delegations and `CB_NOTIFY`, step (d) of T5 (D93): a client on NFSv4.1 or 4.2 that takes delegations can ask for a folder (`GET_DIR_DELEGATION`) and be told, over the session's back channel, when another client adds, removes or renames an entry in it. `NfsClient.watchDirectory(path, listener)` returns an `NfsDirectoryWatch`, or null when the server gives none (poll then); the `NfsDirectoryListener` gets `NfsDirectoryEvent`s (ADDED, REMOVED, RENAMED, with the name and the new name) in order, in a thread of its own, and `lost(reason)` when the watch ends (the server took the delegation back, the connection was made again, the watch or the client was closed). The server (with `delegations=true`) tells every other holder from CREATE, REMOVE, RENAME and OPEN-with-create, in the order the changes were made; the client that makes a change isn't told of it; a client that can't be told loses the delegation; removing a folder recalls its delegations. Changes made outside the server (to the files it shares) are not seen. Not kept across a server restart. Found by the live test: Linux nfsd on mx1 gives directory delegations but recalls them on a change instead of sending CB_NOTIFY, so `watchDirectory` gives such a delegation back and returns null (poll).

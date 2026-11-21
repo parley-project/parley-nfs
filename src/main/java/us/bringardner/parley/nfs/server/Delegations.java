@@ -33,10 +33,10 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import us.bringardner.parley.core.NamedExecutors;
 import us.bringardner.parley.net.nio.INioConnection;
 import us.bringardner.parley.net.nio.INioHandler;
 import us.bringardner.parley.net.nio.NioClient;
@@ -78,18 +78,10 @@ public class Delegations implements Closeable {
 
 	public Delegations(NfsServer server) {
 		this.server = server;
-		notifier = Executors.newSingleThreadExecutor(r -> {
-			Thread t = new Thread(r, server.getName()+"-notify");
-			t.setDaemon(true);
-			return t;
-		});
+		notifier = NamedExecutors.singleThread(server.getName()+"-notify");
 		client = new NioClient(server.getName()+"-callback");
 		client.setConnectTimeout((int) CALL_TIMEOUT);
-		executor = Executors.newCachedThreadPool(r -> {
-			Thread t = new Thread(r, server.getName()+"-callback");
-			t.setDaemon(true);
-			return t;
-		});
+		executor = NamedExecutors.cached(server.getName()+"-callback");
 	}
 
 	/** Find out in a thread of its own whether the client's callback address answers; {@code cbUp} says. */
