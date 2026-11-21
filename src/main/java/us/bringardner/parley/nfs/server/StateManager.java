@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import us.bringardner.parley.nfs.protocol.Nfs4;
 
@@ -68,6 +69,9 @@ public class StateManager {
 	private final Map<Long, ClientRecord> confirmedById = new HashMap<Long, ClientRecord>();
 	private final Map<String, ClientRecord> confirmedByName = new HashMap<String, ClientRecord>();
 	private final Map<Long, ClientRecord> unconfirmedById = new HashMap<Long, ClientRecord>();
+	/** the NFSv4.1 sessions by their id */
+	private final Map<String, Session> sessionsById = new HashMap<String, Session>();
+	private final AtomicLong sessionSeq = new AtomicLong();
 	private final Map<String, ClientRecord> unconfirmedByName = new HashMap<String, ClientRecord>();
 	private final Map<String, OpenState> states = new HashMap<String, OpenState>();
 	/** the clients' locks as FileSource locks, null unless parley.nfs.mirrorLocks (D68) */
@@ -124,6 +128,16 @@ public class StateManager {
 		volatile boolean cbUp;
 		volatile boolean confirmed;
 		volatile long lastRenew;
+		/** true for a client made by EXCHANGE_ID (NFSv4.1): no seqids, no OPEN_CONFIRM, a session for every request */
+		volatile boolean v41;
+		/** the sequence id the next CREATE_SESSION must have (NFSv4.1), guarded by the StateManager */
+		int createSeq = 1;
+		/** the session the last CREATE_SESSION made: a CREATE_SESSION sent again gets it again, guarded by the StateManager */
+		Session lastSession;
+		/** the sessions of this (NFSv4.1) client, guarded by the StateManager */
+		final List<Session> sessions = new ArrayList<Session>();
+		/** true once RECLAIM_COMPLETE was done (NFSv4.1) */
+		volatile boolean reclaimComplete;
 		/** open-owners by owner, guarded by the StateManager */
 		Map<String, OpenOwner> owners = new HashMap<String, OpenOwner>();
 		/** lock-owners by owner, guarded by the StateManager */
@@ -145,6 +159,14 @@ public class StateManager {
 
 		public long getClientid() {
 			return clientid;
+		}
+
+		public boolean isV41() {
+			return v41;
+		}
+
+		public boolean isConfirmed() {
+			return confirmed;
 		}
 
 		public byte[] getConfirmVerifier() {
@@ -571,6 +593,235 @@ public class StateManager {
 		return c;
 	}
 
+
+	// ================================================================== NFSv4.1 clients and sessions
+
+	/** eir_flags (RFC 8881 section 18.35) */
+	public static final int EXCHGID4_FLAG_UPD_CONFIRMED_REC_A = 0x40000000;
+	public static final int EXCHGID4_FLAG_CONFIRMED_R = 0x80000000;
+
+	/**
+	 * EXCHANGE_ID (RFC 8881 section 18.35.5): the client made, unconfirmed until its first CREATE_SESSION, or the
+	 * confirmed one it already has.
+	 * @param update true if the client set EXCHGID4_FLAG_UPD_CONFIRMED_REC_A
+	 * @throws Nfs4Exception NFS4ERR_NOENT, NFS4ERR_NOT_SAME or NFS4ERR_PERM for an update, NFS4ERR_CLID_INUSE
+	 */
+	public synchronized ClientRecord exchangeId(byte[] verifier, byte[] id, String principal, boolean update) throws Nfs4Exception {
+		String name = nameKey(id);
+		ClientRecord confirmed = confirmedByName.get(name);
+		if( update ) {
+			if( confirmed == null ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
+			}
+			if( !Arrays.equals(confirmed.verifier, verifier) ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_NOT_SAME);
+			}
+			if( !confirmed.principal.equals(principal) ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_PERM);
+			}
+			confirmed.lastRenew = System.currentTimeMillis();
+			return confirmed;
+		}
+		if( confirmed != null ) {
+			boolean same = confirmed.principal.equals(principal);
+			if( same && Arrays.equals(confirmed.verifier, verifier) && confirmed.v41 ) {
+				confirmed.lastRenew = System.currentTimeMillis();
+				return confirmed;
+			}
+			if( !same && (hasState(confirmed) || !confirmed.sessions.isEmpty())
+					&& System.currentTimeMillis()-confirmed.lastRenew <= leaseMillis ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_CLID_INUSE);
+			}
+		}
+		ClientRecord old = unconfirmedByName.remove(name);
+		if( old != null ) {
+			unconfirmedById.remove(old.clientid);
+		}
+		ClientRecord ret = new ClientRecord(newClientid(), verifier.clone(), name, principal, newVerifier(), null, null);
+		ret.v41 = true;
+		unconfirmedByName.put(name, ret);
+		unconfirmedById.put(ret.clientid, ret);
+		return ret;
+	}
+
+	/**
+	 * CREATE_SESSION (RFC 8881 section 18.36.4): the first one confirms the client.
+	 * @param fore the fore channel the client asks for; the session gets what the server grants of it
+	 * @return the session (the one made before if the call is one sent again)
+	 * @throws Nfs4Exception NFS4ERR_STALE_CLIENTID, NFS4ERR_CLID_INUSE or NFS4ERR_SEQ_MISORDERED
+	 */
+	public synchronized Session createSession(long clientid, int seq, String principal, int flags, Session.Channel fore,
+			Session.Channel back, long cbProgram, int maxRecord, int maxCached) throws Nfs4Exception {
+		if( (int) (clientid >>> 32) != boot ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE_CLIENTID);
+		}
+		ClientRecord c = unconfirmedById.get(clientid);
+		if( c == null ) {
+			c = confirmedById.get(clientid);
+		}
+		if( c == null || !c.v41 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE_CLIENTID);
+		}
+		if( !c.principal.equals(principal) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_CLID_INUSE);
+		}
+		if( c.confirmed && seq == c.createSeq-1 && c.lastSession != null ) {
+			c.lastRenew = System.currentTimeMillis();
+			return c.lastSession;
+		}
+		if( seq != c.createSeq ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_SEQ_MISORDERED, "CREATE_SESSION "+seq+", expected "+c.createSeq);
+		}
+		if( !c.confirmed ) {
+			unconfirmedById.remove(clientid);
+			unconfirmedByName.remove(c.name);
+			ClientRecord old = confirmedByName.get(c.name);
+			if( old != null ) {
+				// the client rebooted (a new verifier): its old state goes, and its stateids are NFS4ERR_EXPIRED
+				confirmedByName.remove(old.name);
+				confirmedById.remove(old.clientid);
+				dropState(old);
+				rememberExpired(old);
+			}
+			forgetOfRebooted(c);
+			c.confirmed = true;
+			confirmedById.put(clientid, c);
+			confirmedByName.put(c.name, c);
+		}
+		Session.Channel granted = new Session.Channel();
+		granted.maxRequest = Math.min(Math.max(fore.maxRequest, 1024), maxRecord);
+		granted.maxResponse = Math.min(Math.max(fore.maxResponse, 1024), maxRecord);
+		granted.maxCached = Math.min(fore.maxCached, maxCached);
+		granted.maxOperations = Math.min(Math.max(fore.maxOperations, 2), Compound.MAX_OPERATIONS);
+		granted.maxRequests = Math.min(Math.max(fore.maxRequests, 1), MAX_SLOTS);
+		Session.Channel grantedBack = new Session.Channel();
+		grantedBack.maxRequest = Math.min(back.maxRequest, 4096);
+		grantedBack.maxResponse = Math.min(back.maxResponse, 4096);
+		grantedBack.maxCached = 0;
+		grantedBack.maxOperations = Math.min(back.maxOperations, 8);
+		grantedBack.maxRequests = Math.min(back.maxRequests, 4);
+		byte[] id = new byte[Nfs4.NFS4_SESSIONID_SIZE];
+		ByteBuffer b = ByteBuffer.wrap(id);
+		b.putLong(clientid);
+		b.putLong(sessionSeq.incrementAndGet());
+		Session ret = new Session(id, c, granted, grantedBack, 0, cbProgram);
+		c.sessions.add(ret);
+		sessionsById.put(ret.getKey(), ret);
+		c.createSeq++;
+		c.lastSession = ret;
+		c.lastRenew = System.currentTimeMillis();
+		return ret;
+	}
+
+	/** the most slots of a session */
+	public static final int MAX_SLOTS = 64;
+
+	/**
+	 * The session of a SEQUENCE; the client's lease is renewed.
+	 * @throws Nfs4Exception NFS4ERR_BADSESSION
+	 */
+	public synchronized Session findSession(byte[] id) throws Nfs4Exception {
+		Session s = sessionsById.get(Session.key(id));
+		if( s == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BADSESSION);
+		}
+		s.getClient().lastRenew = System.currentTimeMillis();
+		return s;
+	}
+
+	/**
+	 * DESTROY_SESSION (RFC 8881 section 18.37).
+	 * @throws Nfs4Exception NFS4ERR_BADSESSION
+	 */
+	public synchronized void destroySession(byte[] id) throws Nfs4Exception {
+		Session s = sessionsById.remove(Session.key(id));
+		if( s == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_BADSESSION);
+		}
+		s.getClient().sessions.remove(s);
+	}
+
+	/**
+	 * DESTROY_CLIENTID (RFC 8881 section 18.50): a client with no sessions and no state goes.
+	 * @throws Nfs4Exception NFS4ERR_STALE_CLIENTID or NFS4ERR_CLIENTID_BUSY
+	 */
+	public synchronized void destroyClientId(long clientid) throws Nfs4Exception {
+		ClientRecord c = confirmedById.get(clientid);
+		if( c == null ) {
+			c = unconfirmedById.get(clientid);
+		}
+		if( c == null || !c.v41 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_STALE_CLIENTID);
+		}
+		if( !c.sessions.isEmpty() || hasState(c) || !c.delegations.isEmpty() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_CLIENTID_BUSY);
+		}
+		confirmedById.remove(clientid);
+		confirmedByName.remove(c.name);
+		unconfirmedById.remove(clientid);
+		unconfirmedByName.remove(c.name);
+	}
+
+	/**
+	 * RECLAIM_COMPLETE (RFC 8881 section 18.51): the client is done taking back what it held before a restart.
+	 * @throws Nfs4Exception NFS4ERR_COMPLETE_ALREADY
+	 */
+	public synchronized void reclaimComplete(ClientRecord c, boolean oneFs) throws Nfs4Exception {
+		if( c.reclaimComplete && !oneFs ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_COMPLETE_ALREADY);
+		}
+		if( !oneFs ) {
+			c.reclaimComplete = true;
+		}
+	}
+
+
+	/**
+	 * TEST_STATEID of one stateid (RFC 8881 section 18.48).
+	 * @return NFS4_OK or the status that stateid gets
+	 */
+	public synchronized int testStateId(StateId id) {
+		if( id.other.length != Nfs4.NFS4_OTHER_SIZE || id.isSpecial() ) {
+			return Nfs4.NFS4ERR_BAD_STATEID;
+		}
+		ByteBuffer b = ByteBuffer.wrap(id.other);
+		if( b.getInt() != boot ) {
+			return Nfs4.NFS4ERR_STALE_STATEID;
+		}
+		int client = b.getInt();
+		LockState l = lockStates.get(stateKey(id.other));
+		if( l != null && !l.closed ) {
+			return id.seqid == 0 || id.seqid == l.seqid ? Nfs4.NFS4_OK : Nfs4.NFS4ERR_OLD_STATEID;
+		}
+		OpenState s = states.get(stateKey(id.other));
+		if( s != null && !s.closed ) {
+			return id.seqid == 0 || id.seqid == s.seqid ? Nfs4.NFS4_OK : Nfs4.NFS4ERR_OLD_STATEID;
+		}
+		return expired.contains(client) ? Nfs4.NFS4ERR_EXPIRED : Nfs4.NFS4ERR_BAD_STATEID;
+	}
+
+	/**
+	 * FREE_STATEID (RFC 8881 section 18.38): a lock stateid with no locks goes.
+	 * @throws Nfs4Exception NFS4ERR_LOCKS_HELD (an open, or a lock stateid that still has locks) or NFS4ERR_BAD_STATEID
+	 */
+	public synchronized void freeStateId(StateId id) throws Nfs4Exception {
+		LockState l = id.other.length == Nfs4.NFS4_OTHER_SIZE ? lockStates.get(stateKey(id.other)) : null;
+		if( l != null && !l.closed ) {
+			if( !l.ranges.isEmpty() ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_LOCKS_HELD);
+			}
+			dropLockState(l);
+			return;
+		}
+		if( id.other.length == Nfs4.NFS4_OTHER_SIZE ) {
+			OpenState s = states.get(stateKey(id.other));
+			if( s != null && !s.closed ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_LOCKS_HELD, "the open is still open");
+			}
+		}
+		throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
+	}
+
 	// ================================================================== open-owners and opens
 
 	private static String ownerKey(byte[] owner) {
@@ -590,6 +841,8 @@ public class StateManager {
 		}
 		if( ret == null ) {
 			ret = new OpenOwner(client, key, seqid);
+			// an NFSv4.1 open-owner needs no OPEN_CONFIRM (RFC 8881 section 18.18.3)
+			ret.confirmed = client.v41;
 			client.owners.put(key, ret);
 		}
 		return ret;
@@ -737,6 +990,10 @@ public class StateManager {
 		if( node != null && s.node != node ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "stateid of another file");
 		}
+		if( id.seqid == 0 && s.owner.client.v41 ) {
+			// RFC 8881 section 8.2.2: a seqid of zero means the current one
+			return s;
+		}
 		if( id.seqid - current > 0 ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
 		}
@@ -789,7 +1046,7 @@ public class StateManager {
 		if( node != null && l.node != node ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID, "stateid of another file");
 		}
-		if( checkSeqid ) {
+		if( checkSeqid && !(id.seqid == 0 && l.owner.client.v41) ) {
 			if( id.seqid - current > 0 ) {
 				throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_STATEID);
 			}
@@ -1625,6 +1882,10 @@ public class StateManager {
 
 	private List<Node> dropState(ClientRecord c) {
 		List<Node> ret = new ArrayList<Node>();
+		for (Session session : c.sessions) {
+			sessionsById.remove(session.getKey());
+		}
+		c.sessions.clear();
 		for (DelegationState d : new ArrayList<DelegationState>(c.delegations)) {
 			if( d.write ) {
 				warn("Client "+c+" lost its write delegation of "+d.node+" with its lease; changes it hadn't written are lost");

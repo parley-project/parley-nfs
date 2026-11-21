@@ -82,7 +82,22 @@ public final class Nfs4 {
 	public static final int OP_VERIFY = 37;
 	public static final int OP_WRITE = 38;
 	public static final int OP_RELEASE_LOCKOWNER = 39;
+	public static final int OP_BACKCHANNEL_CTL = 40;
+	public static final int OP_BIND_CONN_TO_SESSION = 41;
+	public static final int OP_EXCHANGE_ID = 42;
+	public static final int OP_CREATE_SESSION = 43;
+	public static final int OP_DESTROY_SESSION = 44;
+	public static final int OP_FREE_STATEID = 45;
+	public static final int OP_GET_DIR_DELEGATION = 46;
+	public static final int OP_SECINFO_NO_NAME = 52;
+	public static final int OP_SEQUENCE = 53;
+	public static final int OP_TEST_STATEID = 55;
+	public static final int OP_WANT_DELEGATION = 56;
+	public static final int OP_DESTROY_CLIENTID = 57;
+	public static final int OP_RECLAIM_COMPLETE = 58;
 	public static final int OP_ILLEGAL = 10044;
+	/** the size of a session id (RFC 8881 section 3.3.12) */
+	public static final int NFS4_SESSIONID_SIZE = 16;
 
 	// ---------------------------------------------------------------- status (nfsstat4)
 	public static final int NFS4_OK = 0;
@@ -152,6 +167,29 @@ public final class Nfs4 {
 	public static final int NFS4ERR_ADMIN_REVOKED = 10047;
 	public static final int NFS4ERR_CB_PATH_DOWN = 10048;
 	public static final int NFS4ERR_DELEG_REVOKED = 10087;
+	public static final int NFS4ERR_BADSESSION = 10052;
+	public static final int NFS4ERR_BADSLOT = 10053;
+	public static final int NFS4ERR_COMPLETE_ALREADY = 10054;
+	public static final int NFS4ERR_CONN_NOT_BOUND_TO_SESSION = 10055;
+	public static final int NFS4ERR_BACK_CHAN_BUSY = 10057;
+	public static final int NFS4ERR_SEQ_MISORDERED = 10063;
+	public static final int NFS4ERR_SEQUENCE_POS = 10064;
+	public static final int NFS4ERR_REQ_TOO_BIG = 10065;
+	public static final int NFS4ERR_REP_TOO_BIG = 10066;
+	public static final int NFS4ERR_REP_TOO_BIG_TO_CACHE = 10067;
+	public static final int NFS4ERR_RETRY_UNCACHED_REP = 10068;
+	public static final int NFS4ERR_UNSAFE_COMPOUND = 10069;
+	public static final int NFS4ERR_TOO_MANY_OPS = 10070;
+	public static final int NFS4ERR_OP_NOT_IN_SESSION = 10071;
+	public static final int NFS4ERR_HASH_ALG_UNSUPP = 10072;
+	public static final int NFS4ERR_CLIENTID_BUSY = 10074;
+	public static final int NFS4ERR_SEQ_FALSE_RETRY = 10076;
+	public static final int NFS4ERR_BAD_HIGH_SLOT = 10077;
+	public static final int NFS4ERR_DEADSESSION = 10078;
+	public static final int NFS4ERR_ENCR_ALG_UNSUPP = 10079;
+	public static final int NFS4ERR_NOT_ONLY_OP = 10081;
+	public static final int NFS4ERR_WRONG_CRED = 10082;
+	public static final int NFS4ERR_WRONG_TYPE = 10083;
 
 	// ---------------------------------------------------------------- nfs_ftype4
 	public static final int NF4REG = 1;
@@ -376,6 +414,19 @@ public final class Nfs4 {
 		case OP_VERIFY: return "VERIFY";
 		case OP_WRITE: return "WRITE";
 		case OP_RELEASE_LOCKOWNER: return "RELEASE_LOCKOWNER";
+		case OP_BACKCHANNEL_CTL: return "BACKCHANNEL_CTL";
+		case OP_BIND_CONN_TO_SESSION: return "BIND_CONN_TO_SESSION";
+		case OP_EXCHANGE_ID: return "EXCHANGE_ID";
+		case OP_CREATE_SESSION: return "CREATE_SESSION";
+		case OP_DESTROY_SESSION: return "DESTROY_SESSION";
+		case OP_FREE_STATEID: return "FREE_STATEID";
+		case OP_GET_DIR_DELEGATION: return "GET_DIR_DELEGATION";
+		case OP_SECINFO_NO_NAME: return "SECINFO_NO_NAME";
+		case OP_SEQUENCE: return "SEQUENCE";
+		case OP_TEST_STATEID: return "TEST_STATEID";
+		case OP_WANT_DELEGATION: return "WANT_DELEGATION";
+		case OP_DESTROY_CLIENTID: return "DESTROY_CLIENTID";
+		case OP_RECLAIM_COMPLETE: return "RECLAIM_COMPLETE";
 		default: return "ILLEGAL("+op+")";
 		}
 	}

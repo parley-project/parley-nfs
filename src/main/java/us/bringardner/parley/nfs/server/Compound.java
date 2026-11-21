@@ -78,6 +78,18 @@ public class Compound {
 	private int statusPos;
 	/** true once an operation that mustn't run twice ran (its reply goes in the {@link ReplayCache}) */
 	private boolean nonIdempotent;
+	/** the COMPOUND is NFSv4.1 (minor version 1) */
+	private boolean v41;
+	/** where this COMPOUND's reply starts in the output, for the reply a session keeps */
+	private int compoundStart;
+	private int opIndex;
+	private long totalOps;
+	private Session session;
+	private int slot = -1;
+	private boolean cacheThis;
+	private boolean slotDone;
+	/** the reply was a saved one: nothing more is written */
+	private boolean replayDone;
 
 	public Compound(NfsServer server, Caller caller, InetAddress client, int localPort) {
 		this.server = server;
@@ -99,33 +111,62 @@ public class Compound {
 		byte[] tag = in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
 		int minor = in.readInt();
 		long numops = in.readUnsignedInt();
+		compoundStart = out.size();
+		totalOps = numops;
+		v41 = minor == 1;
 		int compoundStatus = out.reserve(4);
 		out.writeOpaque(tag);
 		int countPos = out.reserve(4);
 		int count = 0;
 		int status = Nfs4.NFS4_OK;
-		if( minor != 0 ) {
+		if( minor != 0 && minor != 1 ) {
 			status = Nfs4.NFS4ERR_MINOR_VERS_MISMATCH;
 		} else if( numops > MAX_OPERATIONS ) {
 			status = Nfs4.NFS4ERR_RESOURCE;
 		} else {
-			for (int i = 0; i < numops; i++) {
-				int op;
-				try {
-					op = in.readInt();
-				} catch (XdrException e) {
-					status = Nfs4.NFS4ERR_BADXDR;
-					break;
+			try {
+				for (int i = 0; i < numops; i++) {
+					int op;
+					try {
+						op = in.readInt();
+					} catch (XdrException e) {
+						status = Nfs4.NFS4ERR_BADXDR;
+						break;
+					}
+					opIndex = i;
+					count++;
+					status = operation(op);
+					if( replayDone || status != Nfs4.NFS4_OK ) {
+						break;
+					}
 				}
-				count++;
-				status = operation(op);
-				if( status != Nfs4.NFS4_OK ) {
-					break;
+			} finally {
+				if( session != null && !slotDone && replayDone ) {
+					slotDone = true;
 				}
 			}
 		}
+		if( replayDone ) {
+			return;
+		}
 		out.setInt(compoundStatus, status);
 		out.setInt(countPos, count);
+		if( session != null && !slotDone ) {
+			slotDone = true;
+			byte[] saved = null;
+			if( cacheThis && out.size()-compoundStart <= session.getFore().maxCached ) {
+				saved = Arrays.copyOfRange(out.array(), compoundStart, out.size());
+			}
+			session.finish(slot, saved);
+		}
+	}
+
+	/** Free the slot of a session if the COMPOUND ended without {@link #run} finishing it. */
+	public void abandon() {
+		if( session != null && !slotDone ) {
+			slotDone = true;
+			session.finish(slot, null);
+		}
 	}
 
 	/**
@@ -137,7 +178,8 @@ public class Compound {
 	}
 
 	private int operation(int op) {
-		boolean known = op >= Nfs4.OP_ACCESS && op <= Nfs4.OP_RELEASE_LOCKOWNER;
+		boolean known = op >= Nfs4.OP_ACCESS && op <= Nfs4.OP_RELEASE_LOCKOWNER
+				|| v41 && op >= Nfs4.OP_BACKCHANNEL_CTL && op <= Nfs4.OP_RECLAIM_COMPLETE;
 		switch (op) {
 		case Nfs4.OP_CREATE:
 		case Nfs4.OP_REMOVE:
@@ -211,7 +253,25 @@ public class Compound {
 	}
 
 	private void dispatch(int op) throws Nfs4Exception, IOException {
+		if( v41 ) {
+			v41Gate(op);
+		}
 		switch (op) {
+		case Nfs4.OP_SEQUENCE: sequence(); break;
+		case Nfs4.OP_EXCHANGE_ID: exchangeId(); break;
+		case Nfs4.OP_CREATE_SESSION: createSession(); break;
+		case Nfs4.OP_DESTROY_SESSION: destroySession(); break;
+		case Nfs4.OP_DESTROY_CLIENTID: destroyClientId(); break;
+		case Nfs4.OP_RECLAIM_COMPLETE: reclaimComplete(); break;
+		case Nfs4.OP_TEST_STATEID: testStateid(); break;
+		case Nfs4.OP_FREE_STATEID: freeStateid(); break;
+		case Nfs4.OP_SECINFO_NO_NAME: secinfoNoName(); break;
+		case Nfs4.OP_BACKCHANNEL_CTL:
+		case Nfs4.OP_BIND_CONN_TO_SESSION:
+		case Nfs4.OP_GET_DIR_DELEGATION:
+		case Nfs4.OP_WANT_DELEGATION:
+		case 47: case 48: case 49: case 50: case 51: case 54:
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
 		case Nfs4.OP_ACCESS: access(); break;
 		case Nfs4.OP_CLOSE: close(); break;
 		case Nfs4.OP_COMMIT: commit(); break;
@@ -277,6 +337,14 @@ public class Compound {
 	 */
 	private void sequenced(SeqOwner owner, int seqid, int op, Body body) throws Nfs4Exception, IOException {
 		synchronized (owner) {
+			if( v41 ) {
+				// the session's slots give exactly-once behavior: the seqid is ignored (RFC 8881 section 8.1.3)
+				if( owner instanceof OpenOwner ) {
+					server.getStateManager().forgetClosed((OpenOwner) owner);
+				}
+				body.run();
+				return;
+			}
 			if( owner.checkSeqid(seqid, op) ) {
 				byte[] saved = owner.getLastResult();
 				out.truncate(statusPos);
@@ -637,6 +705,20 @@ public class Compound {
 		if( !Attributes.present(export.resolve(Export.childPath(dir, name))) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOENT);
 		}
+		writeSecinfo();
+	}
+
+	/** SECINFO_NO_NAME (RFC 8881 section 18.45): the flavors of the current file handle or its parent. */
+	private void secinfoNoName() throws Nfs4Exception, XdrException {
+		int style = in.readInt();
+		if( style != 0 && style != 1 ) {
+			throw new XdrException("secinfo_style4 "+style);
+		}
+		current();
+		writeSecinfo();
+	}
+
+	private void writeSecinfo() {
 		// the flavors the server takes, strongest first (decision D37)
 		boolean none = server.isAuthNoneAllowed();
 		boolean sys = server.allowsSec(NfsServer.SEC_SYS);
@@ -1319,6 +1401,216 @@ public class Compound {
 			// whether the client's callback address works decides if it gets delegations (D47)
 			d.probe(state.renew(clientid));
 		}
+	}
+
+	// ================================================================ NFSv4.1 (RFC 8881)
+
+	private static final int EXCHGID4_FLAG_USE_NON_PNFS = 0x00010000;
+	private static final int SP4_NONE = 0;
+
+	/** @throws Nfs4Exception for an operation that isn't allowed here: not in 4.1, or outside a session */
+	private void v41Gate(int op) throws Nfs4Exception {
+		switch (op) {
+		case Nfs4.OP_SETCLIENTID:
+		case Nfs4.OP_SETCLIENTID_CONFIRM:
+		case Nfs4.OP_RENEW:
+		case Nfs4.OP_OPEN_CONFIRM:
+		case Nfs4.OP_RELEASE_LOCKOWNER:
+		case Nfs4.OP_DELEGPURGE:
+			throw new Nfs4Exception(Nfs4.NFS4ERR_OP_ILLEGAL, Nfs4.opName(op)+" isn't in NFSv4.1");
+		case Nfs4.OP_SEQUENCE:
+			if( opIndex != 0 ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_SEQUENCE_POS);
+			}
+			break;
+		case Nfs4.OP_EXCHANGE_ID:
+		case Nfs4.OP_CREATE_SESSION:
+		case Nfs4.OP_DESTROY_CLIENTID:
+		case Nfs4.OP_BIND_CONN_TO_SESSION:
+			if( opIndex != 0 || totalOps != 1 ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_NOT_ONLY_OP);
+			}
+			break;
+		default:
+			if( session == null && op != Nfs4.OP_DESTROY_SESSION ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_OP_NOT_IN_SESSION);
+			}
+			break;
+		}
+	}
+
+	private void sequence() throws Nfs4Exception, XdrException {
+		byte[] id = in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+		int seq = in.readInt();
+		int slotid = (int) in.readUnsignedInt();
+		int highest = (int) in.readUnsignedInt();
+		boolean cache = in.readBoolean();
+		Session s = state.findSession(id);
+		if( totalOps > s.getFore().maxOperations ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_TOO_MANY_OPS);
+		}
+		Session.Use use = s.start(slotid, seq, highest);
+		if( use.replay != null ) {
+			out.truncate(compoundStart);
+			out.writeRaw(use.replay, 0, use.replay.length);
+			replayDone = true;
+			throw new Replayed(Nfs4.NFS4_OK);
+		}
+		session = s;
+		slot = use.slot;
+		cacheThis = cache;
+		out.writeFixedOpaque(id);
+		out.writeInt(seq);
+		out.writeInt(slotid);
+		out.writeInt(s.getSlotCount()-1);
+		out.writeInt(s.getSlotCount()-1);
+		out.writeInt(0); // sr_status_flags
+	}
+
+	private void exchangeId() throws Nfs4Exception, XdrException {
+		byte[] verifier = in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
+		byte[] owner = in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
+		int flags = in.readInt();
+		int protect = in.readInt();
+		if( protect != SP4_NONE ) {
+			// SP4_MACH_CRED and SP4_SSV aren't offered (a client then goes on with SP4_NONE)
+			throw new Nfs4Exception(Nfs4.NFS4ERR_ENCR_ALG_UNSUPP, "state protection "+protect);
+		}
+		int impl = in.readInt();
+		if( impl < 0 || impl > 1 ) {
+			throw new XdrException("client_impl_id count "+impl);
+		}
+		if( impl == 1 ) {
+			in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+			in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+			in.readLong();
+			in.readInt();
+		}
+		ClientRecord r = state.exchangeId(verifier, owner, caller.getStateKey(),
+				(flags & StateManager.EXCHGID4_FLAG_UPD_CONFIRMED_REC_A) != 0);
+		out.writeLong(r.getClientid());
+		out.writeInt(r.createSeq);
+		out.writeInt(EXCHGID4_FLAG_USE_NON_PNFS | (r.isConfirmed() ? StateManager.EXCHGID4_FLAG_CONFIRMED_R : 0));
+		out.writeInt(SP4_NONE);
+		// server_owner4: the minor id and the major id
+		out.writeLong(0);
+		byte[] major = ("parley-nfs:"+server.getName()).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+		out.writeOpaque(major);
+		out.writeOpaque(major); // eir_server_scope
+		out.writeInt(1); // eir_server_impl_id
+		out.writeString("bringardner.us");
+		out.writeString("parley-nfs");
+		out.writeLong(0);
+		out.writeInt(0);
+	}
+
+	private Session.Channel readChannel() throws XdrException {
+		Session.Channel c = new Session.Channel();
+		c.headerPad = (int) in.readUnsignedInt();
+		c.maxRequest = clamp(in.readUnsignedInt());
+		c.maxResponse = clamp(in.readUnsignedInt());
+		c.maxCached = clamp(in.readUnsignedInt());
+		c.maxOperations = clamp(in.readUnsignedInt());
+		c.maxRequests = clamp(in.readUnsignedInt());
+		int ird = in.readInt();
+		if( ird < 0 || ird > 1 ) {
+			throw new XdrException("ca_rdma_ird count "+ird);
+		}
+		if( ird == 1 ) {
+			in.readInt();
+		}
+		return c;
+	}
+
+	private static int clamp(long v) {
+		return (int) Math.min(v, Integer.MAX_VALUE);
+	}
+
+	private void writeChannel(Session.Channel c) {
+		out.writeInt(c.headerPad);
+		out.writeInt(c.maxRequest);
+		out.writeInt(c.maxResponse);
+		out.writeInt(c.maxCached);
+		out.writeInt(c.maxOperations);
+		out.writeInt(c.maxRequests);
+		out.writeInt(0);
+	}
+
+	private void createSession() throws Nfs4Exception, XdrException {
+		long clientid = in.readLong();
+		int seq = in.readInt();
+		in.readInt(); // csa_flags: no persistent sessions, RDMA or callback connection
+		Session.Channel fore = readChannel();
+		Session.Channel back = readChannel();
+		long cbProgram = in.readUnsignedInt();
+		int parms = in.readInt();
+		if( parms < 0 || parms > 16 ) {
+			throw new XdrException("csa_sec_parms count "+parms);
+		}
+		for (int i = 0; i < parms; i++) {
+			int flavor = in.readInt();
+			if( flavor == Rpc.AUTH_SYS ) {
+				in.readInt();
+				in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+				in.readInt();
+				in.readInt();
+				int gids = in.readInt();
+				if( gids < 0 || gids > 16 ) {
+					throw new XdrException("gids "+gids);
+				}
+				for (int g = 0; g < gids; g++) {
+					in.readInt();
+				}
+			} else if( flavor == Rpc.RPCSEC_GSS ) {
+				in.readInt();
+				in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
+				in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
+			} else if( flavor != Rpc.AUTH_NONE ) {
+				throw new XdrException("callback_sec_parms4 "+flavor);
+			}
+		}
+		Session s = state.createSession(clientid, seq, caller.getStateKey(), 0, fore, back, cbProgram,
+				server.getMaxRead()+NfsServer.RECORD_OVERHEAD, CACHED_REPLY_LIMIT);
+		out.writeFixedOpaque(s.getId());
+		out.writeInt(seq);
+		out.writeInt(s.getFlags());
+		writeChannel(s.getFore());
+		writeChannel(s.getBack());
+	}
+
+	/** the most of a reply a slot keeps */
+	private static final int CACHED_REPLY_LIMIT = 128*1024;
+
+	private void destroySession() throws Nfs4Exception, XdrException {
+		state.destroySession(in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE));
+	}
+
+	private void destroyClientId() throws Nfs4Exception, XdrException {
+		state.destroyClientId(in.readLong());
+	}
+
+	private void reclaimComplete() throws Nfs4Exception, XdrException {
+		boolean oneFs = in.readBoolean();
+		state.reclaimComplete(session.getClient(), oneFs);
+	}
+
+	private void testStateid() throws Nfs4Exception, XdrException {
+		int n = in.readInt();
+		if( n < 0 || n > 1024 ) {
+			throw new XdrException("stateid count "+n);
+		}
+		int[] statuses = new int[n];
+		for (int i = 0; i < n; i++) {
+			statuses[i] = state.testStateId(stateid());
+		}
+		out.writeInt(n);
+		for (int status : statuses) {
+			out.writeInt(status);
+		}
+	}
+
+	private void freeStateid() throws Nfs4Exception, XdrException {
+		state.freeStateId(stateid());
 	}
 
 	private void renew() throws Nfs4Exception, XdrException {
