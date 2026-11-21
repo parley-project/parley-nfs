@@ -977,6 +977,7 @@ public class NfsClient implements Closeable {
 					l.openOther = cr.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
 				}
 				sendLock(l, true);
+				LOG.log(System.Logger.Level.INFO, "NFS client reclaimed "+l);
 			} catch (NfsException e) {
 				lose(l, "the server did not give it back: "+e.getMessage());
 			} catch (IOException e) {
@@ -1527,6 +1528,7 @@ public class NfsClient implements Closeable {
 			call(c, "renew").ok(Nfs4.OP_RENEW);
 		} catch (IOException | RuntimeException e) {
 			// the lease or the connection is gone: get them back now, so the next call finds a client that works
+			LOG.log(System.Logger.Level.INFO, "NFS client's RENEW failed ("+e+"): making a new client id");
 			try {
 				reconnect();
 			} catch (IOException | RuntimeException again) {
