@@ -27,6 +27,7 @@ package us.bringardner.parley.nfs.server;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -35,14 +36,11 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
+import us.bringardner.parley.core.NamedExecutors;
 import us.bringardner.parley.files.FileSource;
 import us.bringardner.parley.files.FileSourceFactory;
 import us.bringardner.parley.nfs.protocol.Nfs4;
@@ -337,14 +335,12 @@ public class NfsServer extends NioServer {
 			setMaxInputBuffer(record+8);
 		}
 		int threads = getIntProperty(propertyName(PROPERTY_WORKER_THREADS), DEFAULT_WORKER_THREADS);
-		ThreadPoolExecutor w = new ThreadPoolExecutor(Math.max(1, threads), Math.max(1, threads), 60, TimeUnit.SECONDS,
-				new LinkedBlockingQueue<Runnable>(), threads(getName()+"-worker"));
-		w.allowCoreThreadTimeOut(true);
+		ThreadPoolExecutor w = NamedExecutors.fixed(getName()+"-worker", threads, Duration.ofSeconds(60));
 		workers = w;
 		setHandlerExecutor(w);
 		long idle = getDuration(propertyName(PROPERTY_FILE_IDLE_TIME), DEFAULT_FILE_IDLE_TIME);
 		prepareNodes();
-		ScheduledExecutorService t = Executors.newSingleThreadScheduledExecutor(threads(getName()+"-timer"));
+		ScheduledExecutorService t = NamedExecutors.singleThreadScheduled(getName()+"-timer");
 		long period = Math.max(500, Math.min(lease/4, 5000));
 		t.scheduleWithFixedDelay(() -> housekeeping(idle), period, period, TimeUnit.MILLISECONDS);
 		timer = t;
@@ -431,15 +427,6 @@ public class NfsServer extends NioServer {
 		}
 	}
 
-	private static ThreadFactory threads(String name) {
-		AtomicInteger n = new AtomicInteger();
-		return r -> {
-			Thread t = new Thread(r, name+"-"+n.incrementAndGet());
-			t.setDaemon(true);
-			return t;
-		};
-	}
-
 	private static String defaultDomain() {
 		try {
 			String host = InetAddress.getLocalHost().getCanonicalHostName();
@@ -490,7 +477,7 @@ public class NfsServer extends NioServer {
 	@Override
 	public void stop() {
 		super.stop();
-		Thread t = new Thread(() -> {
+		Thread t = NamedExecutors.newThread(getName()+"-stop", () -> {
 			long end = System.currentTimeMillis()+ServerMain.STOP_TIMEOUT;
 			try {
 				while( isRunning() && System.currentTimeMillis() < end ) {
@@ -527,8 +514,7 @@ public class NfsServer extends NioServer {
 			for (IOException e : errors) {
 				logError("Closing a file failed", e);
 			}
-		}, getName()+"-stop");
-		t.setDaemon(true);
+		});
 		stopper = t;
 		t.start();
 	}

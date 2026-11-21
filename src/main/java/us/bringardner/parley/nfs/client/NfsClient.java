@@ -37,11 +37,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
+import us.bringardner.parley.core.NamedExecutors;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.rpc.AuthSys;
 import us.bringardner.parley.nfs.rpc.RecordMarkingDecoder;
@@ -1421,11 +1420,7 @@ public class NfsClient implements Closeable {
 		// DELEGRETURN goes over the client's connection, which an operation may be using: not in the callback's thread
 		synchronized (delegations) {
 			if( returner == null ) {
-				returner = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-					Thread t = new Thread(r, "parley-nfs-client-delegreturn");
-					t.setDaemon(true);
-					return t;
-				});
+				returner = NamedExecutors.singleThread("parley-nfs-client-delegreturn");
 			}
 		}
 		try {
@@ -1633,11 +1628,7 @@ public class NfsClient implements Closeable {
 	private void deliver(Runnable task) {
 		synchronized (delegations) {
 			if( dirExecutor == null ) {
-				dirExecutor = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-					Thread t = new Thread(r, "parley-nfs-client-watch");
-					t.setDaemon(true);
-					return t;
-				});
+				dirExecutor = NamedExecutors.singleThread("parley-nfs-client-watch");
 			}
 			try {
 				dirExecutor.execute(task);
@@ -1964,14 +1955,7 @@ public class NfsClient implements Closeable {
 
 	private void startRenewing() {
 		long period = Math.max(1, leaseSeconds/2);
-		renewer = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-			@Override
-			public Thread newThread(Runnable r) {
-				Thread t = new Thread(r, "parley-nfs-client-renew");
-				t.setDaemon(true);
-				return t;
-			}
-		});
+		renewer = NamedExecutors.singleThreadScheduled("parley-nfs-client-renew");
 		renewer.scheduleWithFixedDelay(new Runnable() {
 			@Override
 			public void run() {
@@ -2235,7 +2219,7 @@ public class NfsClient implements Closeable {
 	 */
 	private Link startReader(DataInputStream input, OutputStream output) {
 		Link l = new Link();
-		Thread t = new Thread(() -> {
+		Thread t = NamedExecutors.newThread("parley-nfs-client-reader", () -> {
 			try {
 				while( true ) {
 					byte[] rec = readRecord(input).buffer().array();
@@ -2263,8 +2247,7 @@ public class NfsClient implements Closeable {
 					f.completeExceptionally(failure);
 				}
 			}
-		}, "parley-nfs-client-reader");
-		t.setDaemon(true);
+		});
 		t.start();
 		return l;
 	}

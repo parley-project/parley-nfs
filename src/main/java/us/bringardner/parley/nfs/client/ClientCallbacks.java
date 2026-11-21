@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import us.bringardner.parley.core.NamedExecutors;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.rpc.XdrDecoder;
 import us.bringardner.parley.nfs.rpc.XdrEncoder;
@@ -63,8 +64,7 @@ final class ClientCallbacks implements AutoCloseable {
 		this.listener = listener;
 		this.notifier = notifier;
 		socket = new ServerSocket(0);
-		thread = new Thread(this::run, "parley-nfs-client-callbacks");
-		thread.setDaemon(true);
+		thread = NamedExecutors.newThread("parley-nfs-client-callbacks", this::run);
 		thread.start();
 	}
 
@@ -101,9 +101,7 @@ final class ClientCallbacks implements AutoCloseable {
 					continue;
 				}
 				open.add(s);
-				Thread t = new Thread(() -> serve(s), "parley-nfs-client-callbacks-conn");
-				t.setDaemon(true);
-				t.start();
+				NamedExecutors.start("parley-nfs-client-callbacks-conn", () -> serve(s));
 			} catch (IOException e) {
 				return;
 			}
