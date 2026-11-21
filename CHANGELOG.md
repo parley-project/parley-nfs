@@ -4,6 +4,7 @@
 
 ### Added (2026-11-20: what a FileSource needs of the client, T10, D87)
 
+- `NfsClientRestartLiveTest`: against a real server, a lock is reclaimed after the server restarts (D85) and another client still can't take the range. Skipped unless `nfs.live.host` is set and `nfs.live.restart.command` (a shell command that restarts the server) or `nfs.live.restart.manual=true` is.
 - The test classes are published in a `-tests` jar, and `TestKdc` (a Kerberos KDC for tests) is public, so modules built on the client can test Kerberos without a copy (parley-files-nfs, D88).
 - `NfsFileInfo` also has the owner, the group (as the server names them: "name@domain" or a number), the access, change
   and creation times (-1 when the server has none) and the number of links.
