@@ -393,6 +393,31 @@ public class NfsClient implements Closeable {
 		return attributes(null, fh, r.in);
 	}
 
+	/**
+	 * The change attribute (RFC 7530 section 5.8.1.4) of a file or folder: a number the server moves whenever the
+	 * object changes, for a folder when an entry is added, removed or renamed. One small GETATTR, no listing, so it
+	 * is the cheap way to learn that a folder is as it was. Compare two with equals; the number means nothing else.
+	 * @param path a file or folder
+	 * @return its change attribute
+	 * @throws NfsException with isNotFound() when it doesn't exist
+	 */
+	public synchronized long changeId(String path) throws IOException {
+		return run(true, () -> {
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_GETATTR).args.writeIntArray(bitmap(Nfs4.FATTR4_CHANGE));
+			Reply r = call(c, "changeId "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_GETATTR);
+			int[] map = r.in.readIntArray(8);
+			XdrDecoder a = new XdrDecoder(r.in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT*64));
+			if( map.length == 0 || (map[0] & (1 << Nfs4.FATTR4_CHANGE)) == 0 ) {
+				throw new NfsException(Nfs4.NFS4ERR_ATTRNOTSUPP, "the server sent no change attribute for "+path);
+			}
+			return a.readLong();
+		});
+	}
+
 	/** @return whether the path exists */
 	public boolean exists(String path) throws IOException {
 		try {
