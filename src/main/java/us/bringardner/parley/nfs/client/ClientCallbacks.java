@@ -109,7 +109,8 @@ final class ClientCallbacks implements AutoCloseable {
 		}
 	}
 
-	private XdrEncoder answer(XdrDecoder d) throws IOException {
+	/** @return the reply (its record marking header reserved) to a callback CALL message, from the callback socket or a session's back channel */
+	XdrEncoder answer(XdrDecoder d) throws IOException {
 		int xid = d.readInt();
 		d.readInt();
 		d.readInt();
@@ -145,7 +146,30 @@ final class ClientCallbacks implements AutoCloseable {
 		int done = 0;
 		for (int i = 0; i < count && status == Nfs4.NFS4_OK; i++) {
 			int op = d.readInt();
-			if( op == Nfs4.OP_CB_RECALL ) {
+			if( op == Nfs4.OP_CB_SEQUENCE ) {
+				// NFSv4.1 (RFC 8881 section 20.9): the session, the slot and its sequence id, answered as asked
+				byte[] session = d.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+				int seq = d.readInt();
+				int slot = d.readInt();
+				int highest = d.readInt();
+				d.readBoolean();
+				int lists = d.readInt();
+				if( lists < 0 || lists > 64 ) {
+					throw new IOException("referring_call_lists "+lists);
+				}
+				for (int l = 0; l < lists; l++) {
+					d.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+					int calls = d.readInt();
+					if( calls < 0 || calls > 1024 ) {
+						throw new IOException("referring_calls "+calls);
+					}
+					for (int k = 0; k < calls; k++) {
+						d.readInt();
+						d.readInt();
+					}
+				}
+				results.writeInt(op).writeInt(Nfs4.NFS4_OK).writeFixedOpaque(session).writeInt(seq).writeInt(slot).writeInt(highest).writeInt(highest);
+			} else if( op == Nfs4.OP_CB_RECALL ) {
 				d.readInt();
 				byte[] other = d.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
 				d.readBoolean();

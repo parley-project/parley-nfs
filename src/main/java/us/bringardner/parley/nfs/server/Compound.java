@@ -78,6 +78,8 @@ public class Compound {
 	private int statusPos;
 	/** true once an operation that mustn't run twice ran (its reply goes in the {@link ReplayCache}) */
 	private boolean nonIdempotent;
+	/** the connection of the call, which a session's back channel can be bound to */
+	private us.bringardner.parley.net.nio.INioConnection connection;
 	/** the COMPOUND is NFSv4.1 (minor version 1) */
 	private boolean v41;
 	/** where this COMPOUND's reply starts in the output, for the reply a session keeps */
@@ -99,6 +101,10 @@ public class Compound {
 		this.caller = caller;
 		this.client = client;
 		this.localPort = localPort;
+	}
+
+	public void setConnection(us.bringardner.parley.net.nio.INioConnection connection) {
+		this.connection = connection;
 	}
 
 	/**
@@ -266,8 +272,8 @@ public class Compound {
 		case Nfs4.OP_TEST_STATEID: testStateid(); break;
 		case Nfs4.OP_FREE_STATEID: freeStateid(); break;
 		case Nfs4.OP_SECINFO_NO_NAME: secinfoNoName(); break;
-		case Nfs4.OP_BACKCHANNEL_CTL:
-		case Nfs4.OP_BIND_CONN_TO_SESSION:
+		case Nfs4.OP_BACKCHANNEL_CTL: backchannelCtl(); break;
+		case Nfs4.OP_BIND_CONN_TO_SESSION: bindConnToSession(); break;
 		case Nfs4.OP_GET_DIR_DELEGATION:
 		case Nfs4.OP_WANT_DELEGATION:
 		case 47: case 48: case 49: case 50: case 51: case 54:
@@ -1457,6 +1463,10 @@ public class Compound {
 			throw new Replayed(Nfs4.NFS4_OK);
 		}
 		session = s;
+		if( s.takeProbe() && server.getDelegations() != null ) {
+			// the first call after the back channel was bound: the client has the session now, so a callback is understood
+			server.getDelegations().probe(s);
+		}
 		slot = use.slot;
 		cacheThis = cache;
 		out.writeFixedOpaque(id);
@@ -1539,10 +1549,37 @@ public class Compound {
 	private void createSession() throws Nfs4Exception, XdrException {
 		long clientid = in.readLong();
 		int seq = in.readInt();
-		in.readInt(); // csa_flags: no persistent sessions, RDMA or callback connection
+		int csaFlags = in.readInt();
 		Session.Channel fore = readChannel();
 		Session.Channel back = readChannel();
 		long cbProgram = in.readUnsignedInt();
+		boolean callbackFlavor = readCallbackParms();
+		Session s = state.createSession(clientid, seq, caller.getStateKey(), 0, fore, back, cbProgram,
+				server.getMaxRead()+NfsServer.RECORD_OVERHEAD, CACHED_REPLY_LIMIT);
+		if( s.getBackConnection() == null && (csaFlags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) != 0 && callbackFlavor
+				&& cbProgram != 0 && server.getDelegations() != null && connection != null ) {
+			s.setBackCapable(true);
+			s.bindBack(connection);
+			s.getClient().backSession = s;
+		}
+		out.writeFixedOpaque(s.getId());
+		out.writeInt(seq);
+		out.writeInt(s.getFlags() | (s.getBackConnection() != null ? CREATE_SESSION4_FLAG_CONN_BACK_CHAN : 0));
+		writeChannel(s.getFore());
+		writeChannel(s.getBack());
+	}
+
+	/** the most of a reply a slot keeps */
+	private static final int CACHED_REPLY_LIMIT = 128*1024;
+
+	private static final int CREATE_SESSION4_FLAG_CONN_BACK_CHAN = 0x2;
+
+	/**
+	 * Read callback_sec_parms4<> (RFC 8881 section 18.36.1).
+	 * @return true if one is a flavor the server's callbacks can use (AUTH_NONE or AUTH_SYS)
+	 */
+	private boolean readCallbackParms() throws XdrException {
+		boolean usable = false;
 		int parms = in.readInt();
 		if( parms < 0 || parms > 16 ) {
 			throw new XdrException("csa_sec_parms count "+parms);
@@ -1561,25 +1598,62 @@ public class Compound {
 				for (int g = 0; g < gids; g++) {
 					in.readInt();
 				}
+				usable = true;
 			} else if( flavor == Rpc.RPCSEC_GSS ) {
 				in.readInt();
 				in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
 				in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT);
-			} else if( flavor != Rpc.AUTH_NONE ) {
+			} else if( flavor == Rpc.AUTH_NONE ) {
+				usable = true;
+			} else {
 				throw new XdrException("callback_sec_parms4 "+flavor);
 			}
 		}
-		Session s = state.createSession(clientid, seq, caller.getStateKey(), 0, fore, back, cbProgram,
-				server.getMaxRead()+NfsServer.RECORD_OVERHEAD, CACHED_REPLY_LIMIT);
-		out.writeFixedOpaque(s.getId());
-		out.writeInt(seq);
-		out.writeInt(s.getFlags());
-		writeChannel(s.getFore());
-		writeChannel(s.getBack());
+		return usable;
 	}
 
-	/** the most of a reply a slot keeps */
-	private static final int CACHED_REPLY_LIMIT = 128*1024;
+	/** BACKCHANNEL_CTL (RFC 8881 section 18.33): the callback program and credentials; the credential the server uses doesn't change. */
+	private void backchannelCtl() throws Nfs4Exception, XdrException {
+		in.readUnsignedInt();
+		readCallbackParms();
+	}
+
+	/** BIND_CONN_TO_SESSION (RFC 8881 section 18.34): this connection carries the session's calls, and its callbacks if asked. */
+	private void bindConnToSession() throws Nfs4Exception, XdrException {
+		byte[] id = in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+		int dir = in.readInt();
+		in.readBoolean();
+		Session s = state.findSession(id);
+		if( !s.getClient().principal.equals(caller.getStateKey()) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "the connection's user isn't the session's");
+		}
+		boolean canBack = s.isBackCapable() && connection != null;
+		int granted;
+		switch (dir) {
+		case 1: granted = 1; break;
+		case 2:
+			if( !canBack ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "the session has no back channel");
+			}
+			granted = 2;
+			break;
+		case 3: granted = canBack ? 3 : 1; break;
+		case 7:
+			if( !canBack ) {
+				throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "the session has no back channel");
+			}
+			granted = 3;
+			break;
+		default: throw new XdrException("channel_dir_from_client4 "+dir);
+		}
+		if( granted != 1 ) {
+			s.bindBack(connection);
+			s.getClient().backSession = s;
+		}
+		out.writeFixedOpaque(id);
+		out.writeInt(granted);
+		out.writeBoolean(false);
+	}
 
 	private void destroySession() throws Nfs4Exception, XdrException {
 		state.destroySession(in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE));

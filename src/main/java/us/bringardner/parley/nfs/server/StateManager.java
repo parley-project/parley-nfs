@@ -136,6 +136,8 @@ public class StateManager {
 		Session lastSession;
 		/** the sessions of this (NFSv4.1) client, guarded by the StateManager */
 		final List<Session> sessions = new ArrayList<Session>();
+		/** the session whose back channel carries this (NFSv4.1) client's callbacks, or null */
+		volatile Session backSession;
 		/** true once RECLAIM_COMPLETE was done (NFSv4.1) */
 		volatile boolean reclaimComplete;
 		/** open-owners by owner, guarded by the StateManager */
