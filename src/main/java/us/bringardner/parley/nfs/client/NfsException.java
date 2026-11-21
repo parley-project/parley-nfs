@@ -27,9 +27,11 @@ package us.bringardner.parley.nfs.client;
 import java.io.IOException;
 
 import us.bringardner.parley.nfs.protocol.Nfs4;
+import us.bringardner.parley.nfs.protocol.Nfs4Errors;
 
 /**
- * A call the server answered with an NFS4ERR status.
+ * A call the server answered with an NFS4ERR status. The message says it in words ("no such file or directory"),
+ * with the status name; {@link #getStatus()} is the number.
  */
 public class NfsException extends IOException {
 
@@ -37,7 +39,7 @@ public class NfsException extends IOException {
 	private final int status;
 
 	public NfsException(int status, String what) {
-		super(what+": NFS4 status "+status);
+		super(what+": "+Nfs4Errors.describe(status));
 		this.status = status;
 	}
 
