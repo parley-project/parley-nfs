@@ -1526,17 +1526,32 @@ public class NfsClient implements Closeable {
 			Compound c = new Compound();
 			c.op(Nfs4.OP_RENEW).args.writeLong(clientId);
 			call(c, "renew").ok(Nfs4.OP_RENEW);
+		} catch (NfsException e) {
+			if( e.getStatus() != Nfs4.NFS4ERR_CB_PATH_DOWN ) {
+				renewFailed(e);
+				return;
+			}
+			// The lease was renewed (RFC 7530 and the Linux server renew first); the server only says it can't reach this
+			// client's callback address, so it could not recall a delegation. Give them back and keep everything else:
+			// a new client id would throw away the open files and locks the client holds.
+			LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" can't reach this client's callback address (RENEW: "
+					+"CB_PATH_DOWN): the lease is renewed; the delegations are given back");
+			returnAllDelegations();
 		} catch (IOException | RuntimeException e) {
-			// the lease or the connection is gone: get them back now, so the next call finds a client that works
-			LOG.log(System.Logger.Level.INFO, "NFS client's RENEW failed ("+e+"): making a new client id");
-			try {
-				reconnect();
-			} catch (IOException | RuntimeException again) {
-				if( !reportedLost ) {
-					reportedLost = true;
-					LOG.log(System.Logger.Level.WARNING, "NFS client lost its server "+host+":"+port+" ("+e+"); trying again every "
-							+Math.max(1, leaseSeconds/2)+" seconds");
-				}
+			renewFailed(e);
+		}
+	}
+
+	/** The lease or the connection is gone: get them back now, so the next call finds a client that works. */
+	private void renewFailed(Exception e) {
+		LOG.log(System.Logger.Level.INFO, "NFS client's RENEW failed ("+e+"): making a new client id");
+		try {
+			reconnect();
+		} catch (IOException | RuntimeException again) {
+			if( !reportedLost ) {
+				reportedLost = true;
+				LOG.log(System.Logger.Level.WARNING, "NFS client lost its server "+host+":"+port+" ("+e+"); trying again every "
+						+Math.max(1, leaseSeconds/2)+" seconds");
 			}
 		}
 	}
