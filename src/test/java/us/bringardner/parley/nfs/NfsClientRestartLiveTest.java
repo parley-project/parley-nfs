@@ -109,8 +109,9 @@ public class NfsClientRestartLiveTest {
 		String command = System.getProperty("nfs.live.restart.command");
 		if( command != null && !command.isEmpty() ) {
 			System.out.println("Restarting the server: "+command);
-			Process p = new ProcessBuilder("sh", "-c", command).inheritIO().start();
+			Process p = new ProcessBuilder("sh", "-c", command).redirectErrorStream(true).start();
 			try {
+				System.out.println(new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
 				if( !p.waitFor(120, TimeUnit.SECONDS) ) {
 					throw new IOException("The restart command did not end in 120 seconds");
 				}
@@ -134,7 +135,10 @@ public class NfsClientRestartLiveTest {
 		System.out.println("restart live test: the server's state "+when+":");
 		Process p = null;
 		try {
-			p = new ProcessBuilder("sh", "-c", command).redirectErrorStream(true).inheritIO().start();
+			p = new ProcessBuilder("sh", "-c", command).redirectErrorStream(true).start();
+			// read what it prints and print it here: a child writing straight to the console breaks the test runner's channel
+			String out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+			System.out.println(out);
 			if( !p.waitFor(60, TimeUnit.SECONDS) ) {
 				System.out.println("restart live test: the state command did not end in 60 seconds");
 			}
