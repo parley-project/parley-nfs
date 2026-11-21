@@ -774,6 +774,35 @@ public class StateManager {
 		}
 		if( !oneFs ) {
 			c.reclaimComplete = true;
+			endReclaimOf(c);
+		}
+	}
+
+	/**
+	 * The client says it has taken back all it will (RFC 8881 section 18.51): what it held before a restart and didn't
+	 * reclaim is given up now, so others don't wait for it for the rest of the grace period, and the grace period is over
+	 * when nobody is left to come back.
+	 */
+	private void endReclaimOf(ClientRecord c) {
+		if( reclaims.isEmpty() ) {
+			return;
+		}
+		for (DelegationStore.Entry e : new ArrayList<DelegationStore.Entry>(reclaims)) {
+			if( e.client.equals(c.name) ) {
+				if( e.reclaimed ) {
+					reclaims.remove(e);
+				} else {
+					giveUp(e, "the client said its reclaim is complete");
+				}
+			}
+		}
+		boolean waiting = false;
+		for (DelegationStore.Entry e : reclaims) {
+			waiting |= !e.reclaimed;
+		}
+		if( !waiting ) {
+			reclaiming = false;
+			reclaims.clear();
 		}
 	}
 
@@ -1800,6 +1829,9 @@ public class StateManager {
 	 */
 	public synchronized Reclaimed reclaim(ClientRecord c, Node node, int claimed, long now) throws Nfs4Exception {
 		endGrace(now);
+		if( c.reclaimComplete ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NO_GRACE, "the client said its reclaim was complete");
+		}
 		String export = node.getExport().getName();
 		DelegationStore.Entry found = null;
 		for (DelegationStore.Entry e : reclaims) {
