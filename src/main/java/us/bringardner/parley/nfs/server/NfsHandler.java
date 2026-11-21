@@ -71,6 +71,16 @@ public class NfsHandler implements INioHandler {
 	 */
 	XdrEncoder handle(INioConnection connection, ByteBuffer frame) {
 		ByteBuffer whole = frame.duplicate();
+		if( frame.remaining() >= 8 && frame.getInt(frame.position()+4) == Rpc.REPLY ) {
+			// the answer to a callback over a session's back channel (RFC 8881 section 2.10.3.1)
+			Delegations d = server.getDelegations();
+			if( d != null ) {
+				byte[] b = new byte[frame.remaining()];
+				frame.duplicate().get(b);
+				d.backReply(frame.getInt(frame.position()), b);
+			}
+			return null;
+		}
 		RpcCall call;
 		try {
 			call = RpcCall.decode(frame);
@@ -160,6 +170,7 @@ public class NfsHandler implements INioHandler {
 			XdrEncoder reply = Rpc.startAccepted(xid, Rpc.SUCCESS, 1024);
 			int start = reply.size();
 			Compound compound = new Compound(server, caller, from, port(connection.getLocalAddress()));
+			compound.setConnection(connection);
 			try {
 				compound.run(call.getArguments(), reply);
 			} catch (XdrException e) {
@@ -370,6 +381,7 @@ public class NfsHandler implements INioHandler {
 			} else {
 				XdrEncoder body = new XdrEncoder(1024);
 				Compound compound = new Compound(server, caller, from, port(connection.getLocalAddress()));
+				compound.setConnection(connection);
 				try {
 					compound.run(new XdrDecoder(plain), body);
 				} catch (XdrException e) {

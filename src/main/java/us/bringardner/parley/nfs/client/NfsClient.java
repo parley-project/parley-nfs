@@ -119,6 +119,16 @@ public class NfsClient implements Closeable {
 	private volatile java.util.function.Consumer<NfsLock> lockLostHandler;
 	private int lockCount;
 	private volatile NfsKerberos.Session session;
+	/** Replies waited for on a connection that has a reader thread (a 4.1 client that takes delegations: callbacks come in on it too). */
+	private static final class Link {
+		final Map<Integer, java.util.concurrent.CompletableFuture<byte[]>> awaiting = new java.util.concurrent.ConcurrentHashMap<Integer, java.util.concurrent.CompletableFuture<byte[]>>();
+		volatile IOException failed;
+	}
+
+	/** the reader of the current connection, or null when calls read their own replies */
+	private volatile Link link;
+	/** one writer at a time on the connection: the calls, and the replies to callbacks */
+	private final Object writeLock = new Object();
 	/**
 	 * The highest NFSv4 minor version this client tries: 1 (the default) tries NFSv4.1 and goes on with 4.0 when the
 	 * server doesn't have it; 0 uses 4.0 only. The system property {@value #PROPERTY_MINOR_VERSION} sets it.
@@ -169,8 +179,7 @@ public class NfsClient implements Closeable {
 
 	private NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, NfsKerberos kerberos, boolean wantDelegations) throws IOException {
 		this.kerberos = kerberos;
-		// delegations need the server's callbacks to reach the client, which a 4.1 session does only over its back channel (T5 step (b)): until then a client that wants delegations uses 4.0
-		this.wantedMinor = wantDelegations ? 0 : Math.max(0, Math.min(1, Integer.getInteger(PROPERTY_MINOR_VERSION, 1)));
+		this.wantedMinor = Math.max(0, Math.min(1, Integer.getInteger(PROPERTY_MINOR_VERSION, 1)));
 		this.callbacks = wantDelegations ? new ClientCallbacks(this::recalled) : null;
 		this.uid = uid;
 		this.gid = gid;
@@ -203,7 +212,8 @@ public class NfsClient implements Closeable {
 		Socket s = new Socket();
 		try {
 			s.connect(new InetSocketAddress(host, port), timeoutMillis);
-			s.setSoTimeout(timeoutMillis);
+			// with a reader thread the replies are waited for with a timeout of their own
+			s.setSoTimeout(callbacks != null && wantedMinor >= 1 ? 0 : timeoutMillis);
 			socket = s;
 			// a new client id has none of the state of the one before
 			synchronized (delegations) {
@@ -216,6 +226,7 @@ public class NfsClient implements Closeable {
 			}
 			in = new DataInputStream(s.getInputStream());
 			out = s.getOutputStream();
+			link = callbacks != null && wantedMinor >= 1 ? startReader(in, out) : null;
 			if( kerberos != null ) {
 				NfsKerberos.Session n = new NfsKerberos.Session(kerberos);
 				session = n;
@@ -1557,16 +1568,27 @@ public class NfsClient implements Closeable {
 
 		Compound cs = new Compound().withoutSession();
 		a = cs.op(Nfs4.OP_CREATE_SESSION).args;
-		a.writeLong(clientId).writeInt(sequence).writeInt(0);
+		// CREATE_SESSION4_FLAG_CONN_BACK_CHAN: the server's callbacks come back over this connection
+		a.writeLong(clientId).writeInt(sequence).writeInt(callbacks != null ? 2 : 0);
 		// the fore channel: one request at a time (every operation of this client is synchronized), none kept for a retry
 		a.writeInt(0).writeInt(SESSION_MAX_SIZE).writeInt(SESSION_MAX_SIZE).writeInt(0).writeInt(32).writeInt(1).writeInt(0);
 		// the back channel, which isn't used yet
 		a.writeInt(0).writeInt(4096).writeInt(4096).writeInt(0).writeInt(2).writeInt(1).writeInt(0);
-		a.writeInt(0x40000000).writeInt(1).writeInt(Rpc.AUTH_NONE);
+		a.writeInt(ClientCallbacks.PROGRAM).writeInt(1);
+		if( callbacks != null ) {
+			a.writeInt(Rpc.AUTH_SYS).writeInt((int) (System.currentTimeMillis()/1000)).writeString(machineName).writeInt((int) uid).writeInt((int) gid).writeInt(0);
+		} else {
+			a.writeInt(Rpc.AUTH_NONE);
+		}
 		r = call(cs, "create_session");
 		r.ok(Nfs4.OP_CREATE_SESSION);
 		sessionId = r.in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+		r.in.readInt();
+		int granted = r.in.readInt();
 		slotSeq = 0;
+		if( callbacks != null && (granted & 2) == 0 ) {
+			LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" gave no back channel: it gives this client no delegations");
+		}
 	}
 
 	private static final int EXCHGID4_FLAG_USE_NON_PNFS = 0x00010000;
@@ -1854,9 +1876,17 @@ public class NfsClient implements Closeable {
 			ByteBuffer f = RecordMarkingDecoder.frame(call);
 			byte[] b = new byte[f.remaining()];
 			f.get(b);
-			out.write(b);
-			out.flush();
-			XdrDecoder r = readRecord();
+			Link l = link;
+			XdrDecoder r;
+			if( l == null ) {
+				synchronized (writeLock) {
+					out.write(b);
+					out.flush();
+				}
+				r = readRecord(in);
+			} else {
+				r = new XdrDecoder(exchangeOnLink(l, x, b));
+			}
 			if( r.readInt() != x ) {
 				throw new IOException("the reply isn't for this call (xid)");
 			}
@@ -1867,7 +1897,72 @@ public class NfsClient implements Closeable {
 		}
 	};
 
-	private XdrDecoder readRecord() throws IOException {
+	/** Send a call and wait for its reply, which the reader thread of the connection hands over. */
+	private byte[] exchangeOnLink(Link l, int x, byte[] call) throws IOException {
+		if( l.failed != null ) {
+			throw new java.net.SocketException("the connection was lost: "+l.failed);
+		}
+		java.util.concurrent.CompletableFuture<byte[]> f = new java.util.concurrent.CompletableFuture<byte[]>();
+		l.awaiting.put(x, f);
+		try {
+			synchronized (writeLock) {
+				out.write(call);
+				out.flush();
+			}
+			return f.get(timeoutMillis, TimeUnit.MILLISECONDS);
+		} catch (java.util.concurrent.TimeoutException e) {
+			throw new java.net.SocketTimeoutException("no answer in "+timeoutMillis+" ms");
+		} catch (java.util.concurrent.ExecutionException e) {
+			throw new java.net.SocketException("the connection was lost: "+e.getCause());
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new IOException("interrupted");
+		} finally {
+			l.awaiting.remove(x);
+		}
+	}
+
+	/**
+	 * Read the connection in a thread of its own: a reply goes to the call that waits for it, and a call of the server
+	 * (a callback over the session's back channel, RFC 8881 section 2.10.3.1) is answered.
+	 */
+	private Link startReader(DataInputStream input, OutputStream output) {
+		Link l = new Link();
+		Thread t = new Thread(() -> {
+			try {
+				while( true ) {
+					byte[] rec = readRecord(input).buffer().array();
+					ByteBuffer b = ByteBuffer.wrap(rec);
+					int x = b.getInt(0);
+					int type = b.getInt(4);
+					if( type == Rpc.REPLY ) {
+						java.util.concurrent.CompletableFuture<byte[]> f = l.awaiting.remove(x);
+						if( f != null ) {
+							f.complete(rec);
+						}
+					} else if( type == Rpc.CALL && callbacks != null ) {
+						XdrEncoder r = callbacks.answer(new XdrDecoder(rec));
+						r.setInt(0, RecordMarkingDecoder.LAST_FRAGMENT | (r.size()-4));
+						synchronized (writeLock) {
+							output.write(r.array(), 0, r.size());
+							output.flush();
+						}
+					}
+				}
+			} catch (IOException | RuntimeException e) {
+				IOException failure = e instanceof IOException ? (IOException) e : new IOException(e);
+				l.failed = failure;
+				for (java.util.concurrent.CompletableFuture<byte[]> f : l.awaiting.values()) {
+					f.completeExceptionally(failure);
+				}
+			}
+		}, "parley-nfs-client-reader");
+		t.setDaemon(true);
+		t.start();
+		return l;
+	}
+
+	private XdrDecoder readRecord(DataInputStream in) throws IOException {
 		XdrEncoder rec = new XdrEncoder();
 		while( true ) {
 			int h = in.readInt();

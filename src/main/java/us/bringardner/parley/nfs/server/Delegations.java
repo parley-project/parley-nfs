@@ -28,7 +28,9 @@ import java.io.Closeable;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -38,6 +40,7 @@ import us.bringardner.parley.net.nio.INioConnection;
 import us.bringardner.parley.net.nio.INioHandler;
 import us.bringardner.parley.net.nio.NioClient;
 import us.bringardner.parley.nfs.protocol.Nfs4;
+import us.bringardner.parley.nfs.protocol.Nfs4Errors;
 import us.bringardner.parley.nfs.rpc.RecordMarkingDecoder;
 import us.bringardner.parley.nfs.rpc.AuthSys;
 import us.bringardner.parley.nfs.rpc.Rpc;
@@ -66,6 +69,8 @@ public class Delegations implements Closeable {
 	private final NioClient client;
 	private final ExecutorService executor;
 	private final AtomicInteger xids = new AtomicInteger((int) System.nanoTime());
+	/** the calls on back channels waiting for their reply, by xid */
+	private final Map<Integer, CompletableFuture<byte[]>> backPending = new ConcurrentHashMap<Integer, CompletableFuture<byte[]>>();
 
 	public Delegations(NfsServer server) {
 		this.server = server;
@@ -97,9 +102,107 @@ public class Delegations implements Closeable {
 		});
 	}
 
+	/** A REPLY message arrived on a connection: the answer to a call over a back channel. */
+	void backReply(int xid, byte[] message) {
+		CompletableFuture<byte[]> f = backPending.remove(xid);
+		if( f != null ) {
+			f.complete(message);
+		}
+	}
+
+	/**
+	 * Try the back channel of a session (RFC 8881 section 20.9: CB_SEQUENCE alone) in a thread of its own; {@code cbUp}
+	 * of its client says whether it works.
+	 */
+	public void probe(Session s) {
+		ClientRecord c = s.getClient();
+		c.cbUp = false;
+		executor.execute(() -> {
+			try {
+				callBack(s, new XdrEncoder(), 0);
+				c.backSession = s;
+				c.cbUp = true;
+				server.logDebug(() -> "back channel of client "+c+" is up");
+			} catch (Exception e) {
+				c.cbUp = false;
+				server.logInfo("Client "+c+" has no working back channel: "+e.getMessage()+"; it gets no delegations");
+			}
+		});
+	}
+
+	/**
+	 * CB_COMPOUND over the connection bound to a session's back channel: CB_SEQUENCE and then ops.
+	 * @param ops the operations after CB_SEQUENCE
+	 * @param count how many there are
+	 * @return the results after CB_SEQUENCE's
+	 */
+	private XdrDecoder callBack(Session s, XdrEncoder ops, int count) throws Exception {
+		INioConnection connection = s.getBackConnection();
+		if( connection == null ) {
+			throw new IllegalStateException("no connection is bound for callbacks");
+		}
+		synchronized (s.getBackLock()) {
+			int seq = s.nextBackSeq();
+			XdrEncoder args = new XdrEncoder(128);
+			args.writeString("").writeInt(1).writeInt(0).writeInt(count+1);
+			args.writeInt(Nfs4.OP_CB_SEQUENCE).writeFixedOpaque(s.getId()).writeInt(seq).writeInt(0).writeInt(0).writeBoolean(false).writeInt(0);
+			args.write(ops);
+			int xid = xids.incrementAndGet();
+			XdrEncoder e = new XdrEncoder(128);
+			e.writeInt(0);
+			e.writeInt(xid).writeInt(Rpc.CALL).writeInt(Rpc.RPC_VERSION).writeUnsignedInt(s.getCbProgram())
+				.writeInt(Nfs4.NFS4_CALLBACK_VERSION).writeInt(Nfs4.CB_COMPOUND);
+			e.writeInt(Rpc.AUTH_SYS).writeOpaque(new AuthSys((int) System.currentTimeMillis(), "parley-nfs", 0, 0, new long[0]).encode());
+			e.writeInt(Rpc.AUTH_NONE).writeOpaque(new byte[0]);
+			e.write(args);
+			Rpc.finishRecord(e);
+			CompletableFuture<byte[]> reply = new CompletableFuture<byte[]>();
+			backPending.put(xid, reply);
+			try {
+				connection.write(ByteBuffer.wrap(e.array(), 0, e.size()));
+				XdrDecoder in = new XdrDecoder(reply.get(CALL_TIMEOUT, TimeUnit.MILLISECONDS));
+				if( in.readInt() != xid || in.readInt() != Rpc.REPLY ) {
+					throw new IllegalStateException("not the reply to the call");
+				}
+				if( in.readInt() != Rpc.MSG_ACCEPTED ) {
+					throw new IllegalStateException("the call was denied");
+				}
+				in.readInt();
+				in.readOpaque(Rpc.MAX_AUTH_BYTES);
+				int accept = in.readInt();
+				if( accept != Rpc.SUCCESS ) {
+					throw new IllegalStateException("accept status "+accept);
+				}
+				int status = in.readInt();
+				in.readOpaque(1024);
+				int results = in.readInt();
+				if( results < 1 ) {
+					throw new IllegalStateException("CB_COMPOUND answered "+status+" with no results");
+				}
+				int op = in.readInt();
+				int seqStatus = in.readInt();
+				if( op != Nfs4.OP_CB_SEQUENCE || seqStatus != Nfs4.NFS4_OK ) {
+					throw new IllegalStateException("CB_SEQUENCE answered "+seqStatus+" ("+Nfs4Errors.describe(seqStatus)+")");
+				}
+				in.readFixedOpaque(Nfs4.NFS4_SESSIONID_SIZE);
+				for (int i = 0; i < 4; i++) {
+					in.readInt();
+				}
+				s.backSeqUsed();
+				return in;
+			} finally {
+				backPending.remove(xid);
+			}
+		}
+	}
+
 	/** Send the CB_RECALL of a delegation, once, in a thread of its own. */
 	public void recall(DelegationState d, byte[] fh) {
 		if( !d.recallSent.compareAndSet(false, true) ) {
+			return;
+		}
+		if( d.getClient().isV41() ) {
+			recallOverSession(d, fh);
 			return;
 		}
 		executor.execute(() -> {
@@ -117,6 +220,31 @@ public class Delegations implements Closeable {
 			} catch (Exception e) {
 				c.cbUp = false;
 				server.logInfo("Recalling a delegation from client "+c+" failed: "+e.getMessage()
+					+"; it is revoked when the lease runs out");
+			}
+		});
+	}
+
+	private void recallOverSession(DelegationState d, byte[] fh) {
+		executor.execute(() -> {
+			ClientRecord c = d.getClient();
+			Session s = c.backSession;
+			try {
+				if( s == null ) {
+					throw new IllegalStateException("the client has no back channel");
+				}
+				XdrEncoder ops = new XdrEncoder(64);
+				ops.writeInt(Nfs4.OP_CB_RECALL).writeInt(d.stateId().seqid).writeFixedOpaque(d.stateId().other);
+				ops.writeBoolean(false).writeOpaque(fh);
+				XdrDecoder r = callBack(s, ops, 1);
+				r.readInt();
+				int status = r.readInt();
+				if( status != Nfs4.NFS4_OK ) {
+					server.logDebug(() -> "CB_RECALL to client "+c+" answered "+status);
+				}
+			} catch (Exception e) {
+				c.cbUp = false;
+				server.logInfo("Recalling a delegation from client "+c+" over its back channel failed: "+e.getMessage()
 					+"; it is revoked when the lease runs out");
 			}
 		});

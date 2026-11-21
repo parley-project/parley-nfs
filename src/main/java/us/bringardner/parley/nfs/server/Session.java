@@ -24,6 +24,9 @@
  */
 package us.bringardner.parley.nfs.server;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import us.bringardner.parley.net.nio.INioConnection;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.server.StateManager.ClientRecord;
 
@@ -62,6 +65,14 @@ public final class Session {
 	private final Channel back;
 	private final int flags;
 	private final long cbProgram;
+	/** the connection the server's callbacks go over (RFC 8881 section 2.10.3.1), once one is bound */
+	private volatile INioConnection backConnection;
+	/** the client offered a callback credential this server can use, and the server gives delegations */
+	private volatile boolean backCapable;
+	/** the next CB_SEQUENCE sequence id (the back channel has one slot), guarded by {@link #backLock} */
+	private int backSeq;
+	private final Object backLock = new Object();
+	private final AtomicBoolean probe = new AtomicBoolean();
 
 	Session(byte[] id, ClientRecord client, Channel fore, Channel back, int flags, long cbProgram) {
 		this.id = id;
@@ -107,6 +118,41 @@ public final class Session {
 
 	public long getCbProgram() {
 		return cbProgram;
+	}
+
+	public INioConnection getBackConnection() {
+		return backConnection;
+	}
+
+	public boolean isBackCapable() {
+		return backCapable;
+	}
+
+	void setBackCapable(boolean capable) {
+		this.backCapable = capable;
+	}
+
+	/** Callbacks go over this connection from now on; the path is to be probed. */
+	void bindBack(INioConnection connection) {
+		this.backConnection = connection;
+		probe.set(true);
+	}
+
+	/** @return true once for each binding of the back channel: the path is to be tried (CB_SEQUENCE) */
+	boolean takeProbe() {
+		return backConnection != null && probe.compareAndSet(true, false);
+	}
+
+	Object getBackLock() {
+		return backLock;
+	}
+
+	int nextBackSeq() {
+		return backSeq+1;
+	}
+
+	void backSeqUsed() {
+		backSeq++;
 	}
 
 	public int getSlotCount() {

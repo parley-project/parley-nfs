@@ -345,6 +345,8 @@ public final class Nfs4 {
 	public static final int CB_NULL = 0;
 	public static final int CB_COMPOUND = 1;
 	public static final int OP_CB_RECALL = 4;
+	/** NFSv4.1 callback operations (RFC 8881 section 20) */
+	public static final int OP_CB_SEQUENCE = 11;
 
 	public static final int OPEN_DELEGATE_NONE = 0;
 	public static final int OPEN_DELEGATE_READ = 1;
