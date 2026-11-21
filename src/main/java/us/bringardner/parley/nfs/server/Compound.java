@@ -82,6 +82,8 @@ public class Compound {
 	private us.bringardner.parley.net.nio.INioConnection connection;
 	/** the COMPOUND is NFSv4.1 (minor version 1) */
 	private boolean v41;
+	/** the COMPOUND is NFSv4.2 (minor version 2): NFSv4.1 and the operations of RFC 7862 */
+	private boolean v42;
 	/** where this COMPOUND's reply starts in the output, for the reply a session keeps */
 	private int compoundStart;
 	private int opIndex;
@@ -119,7 +121,8 @@ public class Compound {
 		long numops = in.readUnsignedInt();
 		compoundStart = out.size();
 		totalOps = numops;
-		v41 = minor == 1;
+		v41 = minor == 1 || minor == 2;
+		v42 = minor == 2;
 		int compoundStatus = out.reserve(4);
 		out.writeOpaque(tag);
 		int countPos = out.reserve(4);
@@ -185,7 +188,8 @@ public class Compound {
 
 	private int operation(int op) {
 		boolean known = op >= Nfs4.OP_ACCESS && op <= Nfs4.OP_RELEASE_LOCKOWNER
-				|| v41 && op >= Nfs4.OP_BACKCHANNEL_CTL && op <= Nfs4.OP_RECLAIM_COMPLETE;
+				|| v41 && op >= Nfs4.OP_BACKCHANNEL_CTL && op <= Nfs4.OP_RECLAIM_COMPLETE
+				|| v42 && op >= Nfs4.OP_ALLOCATE && op <= Nfs4.OP_CLONE;
 		switch (op) {
 		case Nfs4.OP_CREATE:
 		case Nfs4.OP_REMOVE:
@@ -274,6 +278,19 @@ public class Compound {
 		case Nfs4.OP_SECINFO_NO_NAME: secinfoNoName(); break;
 		case Nfs4.OP_BACKCHANNEL_CTL: backchannelCtl(); break;
 		case Nfs4.OP_BIND_CONN_TO_SESSION: bindConnToSession(); break;
+		case Nfs4.OP_SEEK: seek(); break;
+		case Nfs4.OP_ALLOCATE: allocate(); break;
+		case Nfs4.OP_DEALLOCATE: deallocate(); break;
+		case Nfs4.OP_COPY: copy(); break;
+		case Nfs4.OP_CLONE:
+		case Nfs4.OP_COPY_NOTIFY:
+		case Nfs4.OP_IO_ADVISE:
+		case Nfs4.OP_LAYOUTERROR:
+		case Nfs4.OP_LAYOUTSTATS:
+		case Nfs4.OP_OFFLOAD_CANCEL:
+		case Nfs4.OP_OFFLOAD_STATUS:
+		case Nfs4.OP_READ_PLUS:
+		case Nfs4.OP_WRITE_SAME:
 		case Nfs4.OP_GET_DIR_DELEGATION:
 		case Nfs4.OP_WANT_DELEGATION:
 		case 47: case 48: case 49: case 50: case 51: case 54:
@@ -1415,7 +1432,160 @@ public class Compound {
 	private static final int SP4_NONE = 0;
 
 	/** @throws Nfs4Exception for an operation that isn't allowed here: not in 4.1, or outside a session */
+	// ================================================================ NFSv4.2 (RFC 7862)
+
+	/** SEEK: the next data or hole. A file here has no holes but the one at its end. */
+	private void seek() throws Nfs4Exception, IOException {
+		StateId id = stateid();
+		long offset = in.readLong();
+		int what = in.readInt();
+		Node node = current();
+		FileSource f = currentRegular();
+		allowRead();
+		aclCheck(node, f, Nfs4.ACE4_READ_DATA);
+		checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_READ);
+		if( what != Nfs4.NFS4_CONTENT_DATA && what != Nfs4.NFS4_CONTENT_HOLE ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_UNION_NOTSUPP);
+		}
+		Long len = files.length(node);
+		long size = len != null ? len : f.length();
+		if( offset < 0 || offset >= size ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NXIO);
+		}
+		if( what == Nfs4.NFS4_CONTENT_DATA ) {
+			out.writeBoolean(false);
+			out.writeLong(offset);
+		} else {
+			// the hole is the end of the file (RFC 7862 section 15.11.3)
+			out.writeBoolean(true);
+			out.writeLong(size);
+		}
+	}
+
+	/** ALLOCATE: make sure the range is there; a range past the end makes the file longer (zeros). */
+	private void allocate() throws Nfs4Exception, IOException {
+		StateId id = stateid();
+		long offset = in.readLong();
+		long length = in.readLong();
+		Node node = current();
+		FileSource f = currentRegular();
+		allowWrite();
+		aclCheck(node, f, Nfs4.ACE4_WRITE_DATA);
+		checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_WRITE);
+		if( offset < 0 || length <= 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
+		}
+		if( offset+length < 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_FBIG);
+		}
+		Long len = files.length(node);
+		long size = len != null ? len : f.length();
+		if( offset+length > size ) {
+			files.setLength(node, f, offset+length);
+		}
+		node.changed();
+	}
+
+	/** DEALLOCATE: the range reads as zeros (a hole punched); the file's length stays. */
+	private void deallocate() throws Nfs4Exception, IOException {
+		StateId id = stateid();
+		long offset = in.readLong();
+		long length = in.readLong();
+		Node node = current();
+		FileSource f = currentRegular();
+		allowWrite();
+		aclCheck(node, f, Nfs4.ACE4_WRITE_DATA);
+		checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_WRITE);
+		if( offset < 0 || length <= 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
+		}
+		Long len = files.length(node);
+		long size = len != null ? len : f.length();
+		long end = length > size-offset ? size : offset+length;
+		byte[] zeros = new byte[(int) Math.min(65536, Math.max(0, end-offset))];
+		for (long p = offset; p < end; p += zeros.length) {
+			files.write(node, f, p, zeros, 0, (int) Math.min(zeros.length, end-p), false);
+		}
+		node.changed();
+	}
+
+	/**
+	 * COPY inside this server, done before the reply (a synchronous copy, RFC 7862 section 15.2): the saved file is the
+	 * source, the current file the destination. A copy to another server is NFS4ERR_NOTSUPP.
+	 */
+	private void copy() throws Nfs4Exception, IOException {
+		StateId srcId = stateid();
+		StateId dstId = stateid();
+		long srcOffset = in.readLong();
+		long dstOffset = in.readLong();
+		long count = in.readLong();
+		in.readBoolean();	// consecutive: this copy is
+		in.readBoolean();	// synchronous: this copy is
+		long servers = in.readUnsignedInt();
+		if( servers != 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP, "a copy from another server");
+		}
+		if( saved == null ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_RESTOREFH);
+		}
+		Node dst = current();
+		Node src = saved;
+		FileSource df = currentRegular();
+		FileSource sf = existing(src);
+		if( Attributes.isLink(sf) ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_SYMLINK);
+		}
+		if( sf.isDirectory() ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_ISDIR);
+		}
+		allowWrite();
+		aclCheck(dst, df, Nfs4.ACE4_WRITE_DATA);
+		checkIo(dstId, dst, Nfs4.OPEN4_SHARE_ACCESS_WRITE);
+		Node keep = current;
+		try {
+			current = src;
+			allowRead();
+			aclCheck(src, sf, Nfs4.ACE4_READ_DATA);
+			checkIo(srcId, src, Nfs4.OPEN4_SHARE_ACCESS_READ);
+		} finally {
+			current = keep;
+		}
+		if( srcOffset < 0 || dstOffset < 0 || count < 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
+		}
+		Long sl = files.length(src);
+		long srcSize = sl != null ? sl : sf.length();
+		if( srcOffset >= srcSize && count > 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
+		}
+		long want = count == 0 ? srcSize-srcOffset : Math.min(count, srcSize-srcOffset);
+		if( src.getExport() == dst.getExport() && src.getFileid() == dst.getFileid() && srcOffset < dstOffset+want && dstOffset < srcOffset+want ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL, "the ranges of a copy in one file overlap");
+		}
+		byte[] buf = new byte[(int) Math.min(65536, Math.max(1, want))];
+		long done = 0;
+		while( done < want ) {
+			int n = files.read(src, sf, srcOffset+done, buf, 0, (int) Math.min(buf.length, want-done));
+			if( n <= 0 ) {
+				break;
+			}
+			files.write(dst, df, dstOffset+done, buf, 0, n, false);
+			done += n;
+		}
+		files.commit(dst);
+		dst.changed();
+		out.writeInt(0);	// no callback ids: the copy is done
+		out.writeLong(done);
+		out.writeInt(Nfs4.FILE_SYNC4);
+		out.writeFixedOpaque(server.getWriteVerifier());
+		out.writeBoolean(true);
+		out.writeBoolean(true);
+	}
+
 	private void v41Gate(int op) throws Nfs4Exception {
+		if( op >= Nfs4.OP_ALLOCATE && op <= Nfs4.OP_CLONE && !v42 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_OP_ILLEGAL, Nfs4.opName(op)+" isn't in NFSv4.1");
+		}
 		switch (op) {
 		case Nfs4.OP_SETCLIENTID:
 		case Nfs4.OP_SETCLIENTID_CONFIRM:

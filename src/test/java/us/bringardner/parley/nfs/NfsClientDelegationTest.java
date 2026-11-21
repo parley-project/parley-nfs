@@ -75,8 +75,8 @@ public class NfsClientDelegationTest {
 	private NfsClient holder() throws IOException {
 		NfsClient c = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1000, 100, 10000, true);
 		clients.add(c);
-		// the default is NFSv4.1, where the recalls come over the session's back channel; -Dparley.nfs.client.minorVersion=0 runs 4.0
-		assertEquals(Integer.getInteger(NfsClient.PROPERTY_MINOR_VERSION, 1).intValue(), c.getMinorVersion());
+		// the default is NFSv4.2, where the recalls come over the session's back channel; -Dparley.nfs.client.minorVersion=0 runs 4.0
+		assertEquals(Integer.getInteger(NfsClient.PROPERTY_MINOR_VERSION, 2).intValue(), c.getMinorVersion());
 		return c;
 	}
 

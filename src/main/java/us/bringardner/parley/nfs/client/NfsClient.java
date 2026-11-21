@@ -130,7 +130,7 @@ public class NfsClient implements Closeable {
 	/** one writer at a time on the connection: the calls, and the replies to callbacks */
 	private final Object writeLock = new Object();
 	/**
-	 * The highest NFSv4 minor version this client tries: 1 (the default) tries NFSv4.1 and goes on with 4.0 when the
+	 * The highest NFSv4 minor version this client tries: 2 (the default) tries NFSv4.2, then 4.1, and goes on with 4.0 when the
 	 * server doesn't have it; 0 uses 4.0 only. The system property {@value #PROPERTY_MINOR_VERSION} sets it.
 	 */
 	public static final String PROPERTY_MINOR_VERSION = "parley.nfs.client.minorVersion";
@@ -179,7 +179,7 @@ public class NfsClient implements Closeable {
 
 	private NfsClient(String host, int port, String mount, long uid, long gid, int timeoutMillis, NfsKerberos kerberos, boolean wantDelegations) throws IOException {
 		this.kerberos = kerberos;
-		this.wantedMinor = Math.max(0, Math.min(1, Integer.getInteger(PROPERTY_MINOR_VERSION, 1)));
+		this.wantedMinor = Math.max(0, Math.min(2, Integer.getInteger(PROPERTY_MINOR_VERSION, 2)));
 		this.callbacks = wantDelegations ? new ClientCallbacks(this::recalled) : null;
 		this.uid = uid;
 		this.gid = gid;
@@ -520,6 +520,115 @@ public class NfsClient implements Closeable {
 		} finally {
 			closeOpen(o);
 		}
+	}
+
+	// ------------------------------------------------------------------ NFSv4.2 (RFC 7862)
+
+	/** @return true when the server in use is NFSv4.2 (the operations below need it); true after a connect only */
+	public boolean supportsV42() {
+		return minorVersion >= 2;
+	}
+
+	private void need42(String what) throws IOException {
+		if( minorVersion < 2 ) {
+			throw new NfsException(Nfs4.NFS4ERR_NOTSUPP, what+" needs NFSv4.2");
+		}
+	}
+
+	/**
+	 * Find the next data or hole of a file (SEEK).
+	 * @param hole true to look for a hole, false for data
+	 * @return the offset of the next data or hole at or after offset; the end of the file is a hole; -1 when there is
+	 * no data at or after offset (the offset is at or past the end)
+	 * @throws NfsException NFS4ERR_NOTSUPP when the server is not NFSv4.2
+	 */
+	public synchronized long seek(String path, long offset, boolean hole) throws IOException {
+		return run(true, () -> {
+			need42("seek");
+			Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
+			try {
+				Compound c = new Compound().putfh(o.fh);
+				c.op(Nfs4.OP_SEEK).args.writeInt(o.seqid).writeFixedOpaque(o.other).writeLong(offset)
+					.writeInt(hole ? Nfs4.NFS4_CONTENT_HOLE : Nfs4.NFS4_CONTENT_DATA);
+				try {
+					Reply r = call(c, "seek "+path);
+					r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_SEEK);
+					r.in.readBoolean();
+					return r.in.readLong();
+				} catch (NfsException e) {
+					if( e.getStatus() == Nfs4.NFS4ERR_NXIO ) {
+						return -1L;
+					}
+					throw e;
+				}
+			} finally {
+				closeOpen(o);
+			}
+		});
+	}
+
+	/** Make sure the range of the file is there (ALLOCATE); a range past the end makes the file longer. */
+	public synchronized void allocate(String path, long offset, long length) throws IOException {
+		rangeOp(Nfs4.OP_ALLOCATE, "allocate", path, offset, length);
+	}
+
+	/** Make the range of the file read as zeros without changing its length (DEALLOCATE). */
+	public synchronized void deallocate(String path, long offset, long length) throws IOException {
+		rangeOp(Nfs4.OP_DEALLOCATE, "deallocate", path, offset, length);
+	}
+
+	private void rangeOp(int op, String what, String path, long offset, long length) throws IOException {
+		run(true, () -> {
+			need42(what);
+			dropCached();
+			Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_WRITE, false);
+			try {
+				Compound c = new Compound().putfh(o.fh);
+				c.op(op).args.writeInt(o.seqid).writeFixedOpaque(o.other).writeLong(offset).writeLong(length);
+				Reply r = call(c, what+" "+path);
+				r.ok(Nfs4.OP_PUTFH).ok(op);
+			} finally {
+				closeOpen(o);
+			}
+			return null;
+		});
+	}
+
+	/**
+	 * Copy bytes between two files on the server without them passing through this client (COPY).
+	 * @param count the bytes to copy; 0 copies to the end of the source
+	 * @return the bytes the server copied (it may copy fewer than asked: call again for the rest)
+	 */
+	public synchronized long copy(String from, long fromOffset, String to, long toOffset, long count) throws IOException {
+		return run(true, () -> {
+			need42("copy");
+			dropCached();
+			Opened s = open(from, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
+			try {
+				Opened d = open(to, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, false);
+				try {
+					Compound c = new Compound().putfh(s.fh);
+					c.op(Nfs4.OP_SAVEFH);
+					c.putfh(d.fh);
+					XdrEncoder a = c.op(Nfs4.OP_COPY).args;
+					a.writeInt(s.seqid).writeFixedOpaque(s.other).writeInt(d.seqid).writeFixedOpaque(d.other);
+					a.writeLong(fromOffset).writeLong(toOffset).writeLong(count);
+					a.writeBoolean(true).writeBoolean(true).writeInt(0);
+					Reply r = call(c, "copy "+from+" to "+to);
+					r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_SAVEFH).ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_COPY);
+					int ids = r.in.readInt();
+					for (int i = 0; i < ids; i++) {
+						r.in.readInt();
+						r.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+					}
+					return r.in.readLong();
+				} finally {
+					closeOpen(d);
+				}
+			} finally {
+				closeOpen(s);
+			}
+		});
 	}
 
 	/**
@@ -1518,8 +1627,8 @@ public class NfsClient implements Closeable {
 	private void setClientId() throws IOException {
 		sessionId = null;
 		slotSeq = 0;
-		if( wantedMinor >= 1 ) {
-			minorVersion = 1;
+		for (int minor = wantedMinor; minor >= 1; minor--) {
+			minorVersion = minor;
 			try {
 				setClientIdV41();
 				return;
@@ -1527,7 +1636,7 @@ public class NfsClient implements Closeable {
 				if( e.getStatus() != Nfs4.NFS4ERR_MINOR_VERS_MISMATCH ) {
 					throw e;
 				}
-				LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" has no NFSv4.1: using NFSv4.0");
+				LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" has no NFSv4."+minor+": trying a lower minor version");
 			}
 		}
 		minorVersion = 0;
@@ -1598,7 +1707,7 @@ public class NfsClient implements Closeable {
 	/** NFSv4.1: give the session and the client id back, so the server doesn't keep them for a lease; no error matters here. */
 	private synchronized void destroySession() {
 		byte[] id = sessionId;
-		if( minorVersion != 1 || id == null || socket == null || socket.isClosed() ) {
+		if( minorVersion < 1 || id == null || socket == null || socket.isClosed() ) {
 			return;
 		}
 		try {
@@ -1775,7 +1884,7 @@ public class NfsClient implements Closeable {
 			XdrEncoder a = new XdrEncoder();
 			a.writeString("parley");
 			a.writeInt(minorVersion);
-			boolean sequenced = minorVersion == 1 && !c.sessionless;
+			boolean sequenced = minorVersion >= 1 && !c.sessionless;
 			if( sequenced && sessionId == null ) {
 				throw new IOException(what+": the session is closed");
 			}

@@ -88,7 +88,7 @@ import us.bringardner.parley.net.server.ServerMain;
  * @author Tony Bringardner
  */
 public class NfsServer extends NioServer {
-	private volatile int maxMinorVersion = 1;
+	private volatile int maxMinorVersion = 2;
 
 	public static final String PROPERTY_PREFIX = "parley.nfs";
 	public static final String PROPERTY_EXPORT = "export";
@@ -291,7 +291,7 @@ public class NfsServer extends NioServer {
 			Node n = e.getNodes().find(fileid);
 			return n != null ? n.getPath() : e.getNodes().storedPath(fileid);
 		});
-		maxMinorVersion = Math.max(0, Math.min(1, getIntProperty(propertyName(PROPERTY_MINOR_VERSION), 1)));
+		maxMinorVersion = Math.max(0, Math.min(2, getIntProperty(propertyName(PROPERTY_MINOR_VERSION), 2)));
 		if( getBooleanProperty(propertyName(PROPERTY_MIRROR_LOCKS), false) ) {
 			stateManager.setLockMirror(new LockMirror(node -> node.getExport().resolve(node), message -> logWarn(message)));
 			logInfo("Server "+getName()+": byte-range locks of clients are also held as file locks ("+propertyName(PROPERTY_MIRROR_LOCKS)+"=true)");
@@ -767,7 +767,7 @@ public class NfsServer extends NioServer {
 		return authorizer;
 	}
 
-	/** @return the highest NFSv4 minor version this server answers: 0 or 1 */
+	/** @return the highest NFSv4 minor version this server answers: 0, 1 or 2 */
 	public int getMaxMinorVersion() {
 		return maxMinorVersion;
 	}
