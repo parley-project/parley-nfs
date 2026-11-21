@@ -2,6 +2,12 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-21: the change attribute of a folder, D97)
+
+- **`NfsClient.changeId(path)`**: the change attribute (RFC 7530 section 5.8.1.4) of a file or folder, one
+  small GETATTR. A folder's moves when an entry is added, removed or renamed, so a watcher can tell that a folder
+  is as it was without listing it.
+
 ### Changed (2026-11-21: threads from Parley, D96)
 
 - Every thread the server and client start is made with parley-core's `NamedExecutors` (named daemon
