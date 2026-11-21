@@ -2,6 +2,14 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-21: READ_PLUS, D100)
+
+- **READ_PLUS (NFSv4.2, RFC 7862 section 15.10)**: the server answers it with data and hole segments. A file here
+  has no holes of its own, so a run of 4096 or more zero bytes in what is read is sent as a hole (the client reads it
+  as zeros all the same, and the zeros are not sent); the rest is data. `NfsClient.readPlus(path, offset, count)` reads
+  with it and returns an `NfsReadPlus` (the bytes, the holes as zeros, end of file, how many bytes were holes);
+  NFS4ERR_NOTSUPP below NFSv4.2. SEEK still reports only the hole at the end of the file.
+
 ### Added (2026-11-21: the change attribute of a folder, D97)
 
 - **`NfsClient.changeId(path)`**: the change attribute (RFC 7530 section 5.8.1.4) of a file or folder, one

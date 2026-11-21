@@ -41,11 +41,12 @@ import us.bringardner.parley.files.FileSource;
 import us.bringardner.parley.files.memory.MemoryFileSourceFactory;
 import us.bringardner.parley.nfs.client.NfsClient;
 import us.bringardner.parley.nfs.client.NfsException;
+import us.bringardner.parley.nfs.client.NfsReadPlus;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.server.Export;
 import us.bringardner.parley.nfs.server.NfsServer;
 
-/** The NFSv4.2 operations: SEEK, ALLOCATE, DEALLOCATE and COPY (D92). */
+/** The NFSv4.2 operations: SEEK, ALLOCATE, DEALLOCATE, COPY (D92) and READ_PLUS (D100). */
 public class NfsV42Test {
 
 	private MemoryFileSourceFactory mem;
@@ -168,5 +169,74 @@ public class NfsV42Test {
 		make("a", "abc");
 		NfsException e = assertThrows(NfsException.class, () -> client.seek("a", 0, false));
 		assertEquals(Nfs4.NFS4ERR_NOTSUPP, e.getStatus());
+		assertEquals(Nfs4.NFS4ERR_NOTSUPP, assertThrows(NfsException.class, () -> client.readPlus("a", 0, 10)).getStatus());
+	}
+
+	/** head, a hole of 'zeros' bytes, tail, a hole of 'endZeros' bytes */
+	private byte[] sparse(int zeros, int endZeros) throws Exception {
+		java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+		b.write("head".getBytes(StandardCharsets.UTF_8));
+		b.write(new byte[zeros]);
+		b.write("tail".getBytes(StandardCharsets.UTF_8));
+		b.write(new byte[endZeros]);
+		byte[] ret = b.toByteArray();
+		assertTrue(client.createNew("s"));
+		client.write("s", 0, ret);
+		return ret;
+	}
+
+	@Test
+	public void readPlusOfPlainDataIsTheDataAndNoHole() throws Exception {
+		make("a", "hello world");
+		NfsReadPlus r = client.readPlus("a", 0, 100);
+		assertEquals("hello world", new String(r.getData(), StandardCharsets.UTF_8));
+		assertTrue(r.isEof());
+		assertEquals(0, r.getHoleBytes());
+	}
+
+	@Test
+	public void aLongRunOfZerosIsAHoleThatIsNotSent() throws Exception {
+		byte[] file = sparse(10000, 5000);
+		NfsReadPlus r = client.readPlus("s", 0, file.length);
+		assertArrayEquals(file, r.getData());
+		assertEquals(15000, r.getHoleBytes());
+		assertTrue(r.isEof());
+	}
+
+	@Test
+	public void aShortRunOfZerosStaysData() throws Exception {
+		byte[] file = sparse(NfsV42Test.minHole()-1, 0);
+		NfsReadPlus r = client.readPlus("s", 0, file.length);
+		assertArrayEquals(file, r.getData());
+		assertEquals(0, r.getHoleBytes());
+	}
+
+	@Test
+	public void aRangeInTheMiddleHonorsTheOffsetAndCount() throws Exception {
+		byte[] file = sparse(10000, 0);
+		// starts inside the hole (which runs from 4 to 10004), ends after "tail"'s first two bytes
+		NfsReadPlus r = client.readPlus("s", 100, 9904+2);
+		assertArrayEquals(java.util.Arrays.copyOfRange(file, 100, 100+9904+2), r.getData());
+		assertEquals(9904, r.getHoleBytes());
+		assertEquals(false, r.isEof());
+		// the rest, to the end
+		NfsReadPlus rest = client.readPlus("s", 10004+2, 100);
+		assertEquals("il", new String(rest.getData(), StandardCharsets.UTF_8));
+		assertTrue(rest.isEof());
+	}
+
+	@Test
+	public void readPlusPastTheEndIsEmptyAndEof() throws Exception {
+		make("a", "abc");
+		NfsReadPlus r = client.readPlus("a", 3, 10);
+		assertEquals(0, r.getData().length);
+		assertTrue(r.isEof());
+		NfsReadPlus far = client.readPlus("a", 1000, 10);
+		assertEquals(0, far.getData().length);
+		assertTrue(far.isEof());
+	}
+
+	private static int minHole() {
+		return us.bringardner.parley.nfs.server.NfsServer.READ_PLUS_MIN_HOLE;
 	}
 }

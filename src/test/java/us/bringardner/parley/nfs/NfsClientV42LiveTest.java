@@ -26,6 +26,7 @@
 package us.bringardner.parley.nfs;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.IOException;
@@ -37,6 +38,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import us.bringardner.parley.nfs.client.NfsClient;
+import us.bringardner.parley.nfs.client.NfsReadPlus;
 import us.bringardner.parley.nfs.client.NfsDirectoryEvent;
 import us.bringardner.parley.nfs.client.NfsDirectoryListener;
 import us.bringardner.parley.nfs.client.NfsDirectoryWatch;
@@ -105,6 +107,28 @@ public class NfsClientV42LiveTest {
 		assertArrayEquals(new byte[] {'0', '1', 0, 0, 0, '5', '6', '7', '8', '9'}, client.readAll(p));
 		client.allocate(p, 10, 6);
 		assertEquals(16, client.readAll(p).length);
+	}
+
+	@Test
+	public void readPlusGivesTheSameBytesAsRead() throws Exception {
+		// data, a long run of zeros, data, zeros at the end: whatever the server calls a hole, the bytes are the file's
+		java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+		b.write(bytes("head"));
+		b.write(new byte[20000]);
+		b.write(bytes("tail"));
+		b.write(new byte[6000]);
+		byte[] file = b.toByteArray();
+		String p = work + "/readplus";
+		assertTrue(client.createNew(p));
+		client.write(p, 0, file);
+		NfsReadPlus r = client.readPlus(p, 0, file.length);
+		assertArrayEquals(file, r.getData());
+		assertTrue(r.isEof());
+		assertTrue(r.getHoleBytes() >= 0 && r.getHoleBytes() <= 26000);
+		// a range in the middle, and one past the end
+		NfsReadPlus mid = client.readPlus(p, 10, 100);
+		assertArrayEquals(java.util.Arrays.copyOfRange(file, 10, 110), mid.getData());
+		assertEquals(0, client.readPlus(p, file.length+10, 100).getData().length);
 	}
 
 	@Test
