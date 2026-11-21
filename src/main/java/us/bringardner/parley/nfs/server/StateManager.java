@@ -1329,16 +1329,27 @@ public class StateManager {
 		final Node node;
 		/** a write delegation: the client may hold changes that the server hasn't seen (decision D62) */
 		final boolean write;
+		/** a directory delegation (RFC 8881 section 10.9): the client is told of the changes of the folder */
+		final boolean dir;
 		/** when the recall began, 0 before; the client has the lease time from then to return it */
 		volatile long recalledAt;
 		/** set by whoever sends the CB_RECALL, so one is sent */
 		final java.util.concurrent.atomic.AtomicBoolean recallSent = new java.util.concurrent.atomic.AtomicBoolean();
 
 		DelegationState(byte[] other, ClientRecord client, Node node, boolean write) {
+			this(other, client, node, write, false);
+		}
+
+		DelegationState(byte[] other, ClientRecord client, Node node, boolean write, boolean dir) {
 			this.other = other;
 			this.client = client;
 			this.node = node;
 			this.write = write;
+			this.dir = dir;
+		}
+
+		public boolean isDirectory() {
+			return dir;
 		}
 
 		public boolean isWrite() {
@@ -1419,6 +1430,47 @@ public class StateManager {
 		c.delegations.add(d);
 		delegationStates.put(stateKey(d.other), d);
 		return d;
+	}
+
+	/**
+	 * Hand a client a directory delegation (NFSv4.1, RFC 8881 section 10.9): the server tells it of the changes other
+	 * clients make to the folder (CB_NOTIFY). Given when the client's back channel is up and it has none of the folder
+	 * already. It isn't kept across a restart: the client asks again.
+	 * @return the delegation, null if none is given
+	 */
+	public synchronized DelegationState grantDirectory(ClientRecord c, Node node) {
+		if( !c.cbUp || !c.v41 || !c.confirmed || confirmedById.get(c.clientid) != c ) {
+			return null;
+		}
+		for (DelegationState d : node.delegations) {
+			if( d.dir && d.client == c ) {
+				return null;
+			}
+		}
+		DelegationState d = new DelegationState(newOther(c), c, node, false, true);
+		node.delegations.add(d);
+		c.delegations.add(d);
+		delegationStates.put(stateKey(d.other), d);
+		return d;
+	}
+
+	/** @return the directory delegations of a folder that another client than {@code except} holds */
+	public synchronized List<DelegationState> directoryDelegations(Node node, ClientRecord except) {
+		List<DelegationState> ret = new ArrayList<DelegationState>();
+		for (DelegationState d : node.delegations) {
+			if( d.dir && d.client != except && d.recalledAt == 0 ) {
+				ret.add(d);
+			}
+		}
+		return ret;
+	}
+
+	/** A directory delegation whose holder can't be told of changes is taken back. */
+	public synchronized void dropDirectory(DelegationState d) {
+		if( delegationStates.get(stateKey(d.other)) == d ) {
+			warn("Took back the directory delegation of "+d.node+" from client "+d.client+": it could not be told of a change");
+			forget(d);
+		}
 	}
 
 	/** @return why a write delegation of the file isn't given to the client now, for the log */

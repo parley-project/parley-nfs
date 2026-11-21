@@ -37,6 +37,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import us.bringardner.parley.nfs.client.NfsClient;
+import us.bringardner.parley.nfs.client.NfsDirectoryEvent;
+import us.bringardner.parley.nfs.client.NfsDirectoryListener;
+import us.bringardner.parley.nfs.client.NfsDirectoryWatch;
 import us.bringardner.parley.nfs.client.NfsFileInfo;
 
 /**
@@ -113,5 +116,42 @@ public class NfsClientV42LiveTest {
 		assertEquals("hello world", new String(client.readAll(dst), StandardCharsets.UTF_8));
 		assertEquals(5, client.copy(src, 6, dst, 0, 5));
 		assertEquals("world world", new String(client.readAll(dst), StandardCharsets.UTF_8));
+	}
+
+	/**
+	 * A directory delegation (D93). A server that doesn't give one (Linux nfsd may not) makes this pass with the client
+	 * told to poll; one that does must tell of another client's change.
+	 */
+	@Test
+	public void aDirectoryDelegationIsGivenOrRefusedCleanly() throws Exception {
+		java.util.concurrent.BlockingQueue<String> told = new java.util.concurrent.LinkedBlockingQueue<String>();
+		try (NfsClient holder = new NfsClient(System.getProperty("nfs.live.host"), Integer.getInteger("nfs.live.port", 2049),
+				System.getProperty("nfs.live.mount", "/"), Long.getLong("nfs.live.uid", 1000L), Long.getLong("nfs.live.gid", 1000L), 20000, true)) {
+			NfsDirectoryWatch w = null;
+			long end = System.currentTimeMillis()+5000;
+			while( w == null && System.currentTimeMillis() < end ) {
+				w = holder.watchDirectory(work, new NfsDirectoryListener() {
+					@Override
+					public void changed(NfsDirectoryEvent event) {
+						told.add(event.toString());
+					}
+
+					@Override
+					public void lost(String reason) {
+						told.add("lost: "+reason);
+					}
+				});
+				if( w == null ) {
+					Thread.sleep(200);
+				}
+			}
+			System.out.println("directory delegation on "+System.getProperty("nfs.live.host")+": "+(w == null ? "not given" : "given"));
+			if( w != null ) {
+				make("watched", "x");
+				String e = told.poll(10, java.util.concurrent.TimeUnit.SECONDS);
+				assertEquals("ADDED "+work+"/watched", e);
+				w.close();
+			}
+		}
 	}
 }

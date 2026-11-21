@@ -47,6 +47,7 @@ public class NfsClientMinorVersionTest {
 	private MemoryFileSourceFactory mem;
 	private NfsServer server;
 	private NfsClient client;
+	private final String savedMinor = System.getProperty(NfsClient.PROPERTY_MINOR_VERSION);
 
 	private void start(String setting) throws Exception {
 		mem = new MemoryFileSourceFactory();
@@ -64,7 +65,11 @@ public class NfsClientMinorVersionTest {
 	@AfterEach
 	public void stop() throws Exception {
 		System.clearProperty("test.nfs.minor.minorVersion");
-		System.clearProperty(NfsClient.PROPERTY_MINOR_VERSION);
+		if( savedMinor == null ) {
+			System.clearProperty(NfsClient.PROPERTY_MINOR_VERSION);
+		} else {
+			System.setProperty(NfsClient.PROPERTY_MINOR_VERSION, savedMinor);
+		}
 		if( client != null ) {
 			client.close();
 		}
@@ -89,6 +94,7 @@ public class NfsClientMinorVersionTest {
 	@Test
 	public void bothHave42() throws Exception {
 		start(null);
+		System.setProperty(NfsClient.PROPERTY_MINOR_VERSION, "2");
 		client = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1000, 1000, 10000);
 		assertEquals(2, client.getMinorVersion());
 		work();
@@ -97,6 +103,7 @@ public class NfsClientMinorVersionTest {
 	@Test
 	public void aServerOf41GetsAClientOf41() throws Exception {
 		start("1");
+		System.setProperty(NfsClient.PROPERTY_MINOR_VERSION, "2");
 		client = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1000, 1000, 10000);
 		assertEquals(1, client.getMinorVersion());
 		work();
@@ -105,6 +112,7 @@ public class NfsClientMinorVersionTest {
 	@Test
 	public void aServerOf40GetsAClientOf40() throws Exception {
 		start("0");
+		System.setProperty(NfsClient.PROPERTY_MINOR_VERSION, "2");
 		client = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1000, 1000, 10000);
 		assertEquals(0, client.getMinorVersion());
 		work();

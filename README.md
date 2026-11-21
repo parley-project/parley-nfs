@@ -179,6 +179,12 @@ GETATTR shows a list made from its mode. Without a state folder the server says 
 
 ## Delegations
 
+With `parley.nfs.delegations=true` an NFSv4.1 or 4.2 client can also ask for a directory delegation
+(`GET_DIR_DELEGATION`): the server then tells it, over the session's back channel (`CB_NOTIFY`), when another client adds,
+removes or renames an entry in that folder, so a viewer needn't poll. `NfsClient.watchDirectory(path, listener)` is the
+client side. Changes made to the shared files outside the server are not seen, and the delegation isn't kept across
+a restart.
+
 `parley.nfs.delegations=true` lets the server give a client a read delegation when it opens a file for reading, so
 the client can serve reads from its cache until another client wants to write. It needs a callback address that
 works: the client's SETCLIENTID names it, the server calls it (CB_NULL) when the client confirms, and a client that
