@@ -1588,6 +1588,16 @@ public class NfsClient implements Closeable {
 			r.in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
 			int seqid = r.in.readInt();
 			byte[] other = r.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+			int[] types = r.in.readIntArray(8);
+			int wanted = (1 << Nfs4.NOTIFY4_REMOVE_ENTRY) | (1 << Nfs4.NOTIFY4_ADD_ENTRY) | (1 << Nfs4.NOTIFY4_RENAME_ENTRY);
+			if( types.length == 0 || (types[0] & wanted) != wanted ) {
+				// a server that keeps the folder's delegation but doesn't tell of changes (Linux nfsd recalls it instead) is
+				// no use for a watch: give it back, and the caller polls
+				LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" gave a directory delegation of "+path
+						+" that tells of no changes (notification types "+(types.length == 0 ? 0 : types[0])+"): it is given back");
+				returnDelegation(new Delegation(fh, seqid, other, false, path));
+				return null;
+			}
 			DirWatch w = new DirWatch(fh, seqid, other, path, listener);
 			synchronized (delegations) {
 				dirWatches.put(key(other), w);
