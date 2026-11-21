@@ -80,6 +80,8 @@ settings file is `parley-nfs.properties` in Parley's configuration folder, or th
 | `parley.nfs.delegations` | false | true to give read delegations (see "Delegations"); none are given while `mirrorLocks` is on |
 | `parley.nfs.writeDelegations` | false | true (with `delegations`) to give write delegations too |
 | `parley.nfs.mirrorLocks` | false | true to hold the clients' byte-range locks as FileSource locks too (see "Locks") |
+| `parley.nfs.minorVersion` | 1 | The server's highest NFSv4 minor version: 1 serves NFSv4.1 (sessions) and 4.0, 0 serves 4.0 only |
+| `parley.nfs.client.minorVersion` | 1 | The client's highest NFSv4 minor version (a system property): 1 tries NFSv4.1 and uses 4.0 if the server has no 4.1, 0 uses 4.0 only. A client that takes delegations uses 4.0 until the 4.1 callback channel is done |
 | `parley.nfs.enforceModes` | false | true to check the mode bits of files that have no access control list, by the caller's registry name (see "Permissions") |
 | `parley.nfs.maxNodes` | 100000 | The most files per export kept in memory; those nobody has asked for lately go first |
 | `parley.nfs.replayCacheSize` | 1024 | How many replies of COMPOUNDs that changed something are kept for a client that sends the call again; 0 for none |

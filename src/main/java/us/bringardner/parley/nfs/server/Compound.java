@@ -119,7 +119,7 @@ public class Compound {
 		int countPos = out.reserve(4);
 		int count = 0;
 		int status = Nfs4.NFS4_OK;
-		if( minor != 0 && minor != 1 ) {
+		if( minor < 0 || minor > server.getMaxMinorVersion() ) {
 			status = Nfs4.NFS4ERR_MINOR_VERS_MISMATCH;
 		} else if( numops > MAX_OPERATIONS ) {
 			status = Nfs4.NFS4ERR_RESOURCE;

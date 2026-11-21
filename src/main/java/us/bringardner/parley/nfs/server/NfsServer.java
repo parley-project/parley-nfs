@@ -88,6 +88,7 @@ import us.bringardner.parley.net.server.ServerMain;
  * @author Tony Bringardner
  */
 public class NfsServer extends NioServer {
+	private volatile int maxMinorVersion = 1;
 
 	public static final String PROPERTY_PREFIX = "parley.nfs";
 	public static final String PROPERTY_EXPORT = "export";
@@ -112,6 +113,8 @@ public class NfsServer extends NioServer {
 	public static final String PROPERTY_DELEGATIONS = "delegations";
 	public static final String PROPERTY_WRITE_DELEGATIONS = "writeDelegations";
 	public static final String PROPERTY_MIRROR_LOCKS = "mirrorLocks";
+	/** the highest NFSv4 minor version served: 1 (the default, NFSv4.1 and 4.0) or 0 (4.0 only) */
+	public static final String PROPERTY_MINOR_VERSION = "minorVersion";
 	public static final String PROPERTY_ENFORCE_MODES = "enforceModes";
 	/** The most nodes kept in memory per export (decision D42). */
 	public static final String PROPERTY_MAX_NODES = "maxNodes";
@@ -288,6 +291,7 @@ public class NfsServer extends NioServer {
 			Node n = e.getNodes().find(fileid);
 			return n != null ? n.getPath() : e.getNodes().storedPath(fileid);
 		});
+		maxMinorVersion = Math.max(0, Math.min(1, getIntProperty(propertyName(PROPERTY_MINOR_VERSION), 1)));
 		if( getBooleanProperty(propertyName(PROPERTY_MIRROR_LOCKS), false) ) {
 			stateManager.setLockMirror(new LockMirror(node -> node.getExport().resolve(node), message -> logWarn(message)));
 			logInfo("Server "+getName()+": byte-range locks of clients are also held as file locks ("+propertyName(PROPERTY_MIRROR_LOCKS)+"=true)");
@@ -761,6 +765,11 @@ public class NfsServer extends NioServer {
 
 	public Authorizer getAuthorizer() {
 		return authorizer;
+	}
+
+	/** @return the highest NFSv4 minor version this server answers: 0 or 1 */
+	public int getMaxMinorVersion() {
+		return maxMinorVersion;
 	}
 
 	public int getMaxRead() {
