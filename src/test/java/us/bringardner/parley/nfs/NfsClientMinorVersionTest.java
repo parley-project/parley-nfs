@@ -87,8 +87,16 @@ public class NfsClientMinorVersionTest {
 	}
 
 	@Test
-	public void bothHave41() throws Exception {
+	public void bothHave42() throws Exception {
 		start(null);
+		client = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1000, 1000, 10000);
+		assertEquals(2, client.getMinorVersion());
+		work();
+	}
+
+	@Test
+	public void aServerOf41GetsAClientOf41() throws Exception {
+		start("1");
 		client = new NfsClient("127.0.0.1", server.getLocalPort(), "/", 1000, 1000, 10000);
 		assertEquals(1, client.getMinorVersion());
 		work();

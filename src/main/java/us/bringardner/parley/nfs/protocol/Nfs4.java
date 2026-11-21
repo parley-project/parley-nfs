@@ -95,6 +95,22 @@ public final class Nfs4 {
 	public static final int OP_WANT_DELEGATION = 56;
 	public static final int OP_DESTROY_CLIENTID = 57;
 	public static final int OP_RECLAIM_COMPLETE = 58;
+	public static final int OP_ALLOCATE = 59;
+	public static final int OP_COPY = 60;
+	public static final int OP_COPY_NOTIFY = 61;
+	public static final int OP_DEALLOCATE = 62;
+	public static final int OP_IO_ADVISE = 63;
+	public static final int OP_LAYOUTERROR = 64;
+	public static final int OP_LAYOUTSTATS = 65;
+	public static final int OP_OFFLOAD_CANCEL = 66;
+	public static final int OP_OFFLOAD_STATUS = 67;
+	public static final int OP_READ_PLUS = 68;
+	public static final int OP_SEEK = 69;
+	public static final int OP_WRITE_SAME = 70;
+	public static final int OP_CLONE = 71;
+	/** SEEK: what to look for (RFC 7862 section 15.11) */
+	public static final int NFS4_CONTENT_DATA = 0;
+	public static final int NFS4_CONTENT_HOLE = 1;
 	public static final int OP_ILLEGAL = 10044;
 	/** the size of a session id (RFC 8881 section 3.3.12) */
 	public static final int NFS4_SESSIONID_SIZE = 16;
@@ -190,6 +206,13 @@ public final class Nfs4 {
 	public static final int NFS4ERR_NOT_ONLY_OP = 10081;
 	public static final int NFS4ERR_WRONG_CRED = 10082;
 	public static final int NFS4ERR_WRONG_TYPE = 10083;
+	public static final int NFS4ERR_PARTNER_NOTSUPP = 10088;
+	public static final int NFS4ERR_PARTNER_NO_AUTH = 10089;
+	public static final int NFS4ERR_UNION_NOTSUPP = 10090;
+	public static final int NFS4ERR_OFFLOAD_DENIED = 10091;
+	public static final int NFS4ERR_WRONG_LFS = 10092;
+	public static final int NFS4ERR_BADLABEL = 10093;
+	public static final int NFS4ERR_OFFLOAD_NO_REQS = 10094;
 
 	// ---------------------------------------------------------------- nfs_ftype4
 	public static final int NF4REG = 1;
@@ -429,6 +452,19 @@ public final class Nfs4 {
 		case OP_WANT_DELEGATION: return "WANT_DELEGATION";
 		case OP_DESTROY_CLIENTID: return "DESTROY_CLIENTID";
 		case OP_RECLAIM_COMPLETE: return "RECLAIM_COMPLETE";
+		case OP_ALLOCATE: return "ALLOCATE";
+		case OP_COPY: return "COPY";
+		case OP_COPY_NOTIFY: return "COPY_NOTIFY";
+		case OP_DEALLOCATE: return "DEALLOCATE";
+		case OP_IO_ADVISE: return "IO_ADVISE";
+		case OP_LAYOUTERROR: return "LAYOUTERROR";
+		case OP_LAYOUTSTATS: return "LAYOUTSTATS";
+		case OP_OFFLOAD_CANCEL: return "OFFLOAD_CANCEL";
+		case OP_OFFLOAD_STATUS: return "OFFLOAD_STATUS";
+		case OP_READ_PLUS: return "READ_PLUS";
+		case OP_SEEK: return "SEEK";
+		case OP_WRITE_SAME: return "WRITE_SAME";
+		case OP_CLONE: return "CLONE";
 		default: return "ILLEGAL("+op+")";
 		}
 	}

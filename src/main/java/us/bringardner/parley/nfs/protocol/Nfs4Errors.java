@@ -126,6 +126,13 @@ public final class Nfs4Errors {
 		case Nfs4.NFS4ERR_NOT_ONLY_OP: return "that operation must be the only one in its compound";
 		case Nfs4.NFS4ERR_WRONG_CRED: return "a different credential was used than the one that made the client";
 		case Nfs4.NFS4ERR_WRONG_TYPE: return "the file isn't the right type for that operation";
+		case Nfs4.NFS4ERR_PARTNER_NOTSUPP: return "the other server doesn't support that copy";
+		case Nfs4.NFS4ERR_PARTNER_NO_AUTH: return "the other server refused this server's access";
+		case Nfs4.NFS4ERR_UNION_NOTSUPP: return "the server doesn't support that kind of data in a union";
+		case Nfs4.NFS4ERR_OFFLOAD_DENIED: return "the server won't do the copy in the background";
+		case Nfs4.NFS4ERR_WRONG_LFS: return "the file handle's file system isn't the one the operation needs";
+		case Nfs4.NFS4ERR_BADLABEL: return "the security label is not valid";
+		case Nfs4.NFS4ERR_OFFLOAD_NO_REQS: return "the copy can't be done as the request asks";
 		default: return "unknown NFS status "+status;
 		}
 	}
@@ -223,6 +230,13 @@ public final class Nfs4Errors {
 		case Nfs4.NFS4ERR_NOT_ONLY_OP: return "NFS4ERR_NOT_ONLY_OP";
 		case Nfs4.NFS4ERR_WRONG_CRED: return "NFS4ERR_WRONG_CRED";
 		case Nfs4.NFS4ERR_WRONG_TYPE: return "NFS4ERR_WRONG_TYPE";
+		case Nfs4.NFS4ERR_PARTNER_NOTSUPP: return "NFS4ERR_PARTNER_NOTSUPP";
+		case Nfs4.NFS4ERR_PARTNER_NO_AUTH: return "NFS4ERR_PARTNER_NO_AUTH";
+		case Nfs4.NFS4ERR_UNION_NOTSUPP: return "NFS4ERR_UNION_NOTSUPP";
+		case Nfs4.NFS4ERR_OFFLOAD_DENIED: return "NFS4ERR_OFFLOAD_DENIED";
+		case Nfs4.NFS4ERR_WRONG_LFS: return "NFS4ERR_WRONG_LFS";
+		case Nfs4.NFS4ERR_BADLABEL: return "NFS4ERR_BADLABEL";
+		case Nfs4.NFS4ERR_OFFLOAD_NO_REQS: return "NFS4ERR_OFFLOAD_NO_REQS";
 		default: return Integer.toString(status);
 		}
 	}
