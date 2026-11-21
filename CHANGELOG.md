@@ -5,6 +5,7 @@
 ### Added (2026-11-20: what a FileSource needs of the client, T10, D87)
 
 - Fixed: a server that can't reach the client's callback address answers RENEW with NFS4ERR_CB_PATH_DOWN, which still renews the lease. The client took it for a lost lease, made a new client id every renewal and so lost its locks. It now keeps its state and gives its delegations back. Found by the live restart test against Linux nfsd.
+- Fixed: the reply to a lock's reclaim after a server restart can carry a delegation (Linux nfsd sends a write delegation, to be returned at once when it can't reach the callback address). The client didn't read it, so it was never given back: another client could not open the file (DELAY) and RENEW answered CB_PATH_DOWN for ever. It is now read and returned at once. Found by the live restart test, with the server's own list of its state.
 - `NfsClientRestartLiveTest`: against a real server, a lock is reclaimed after the server restarts (D85) and another client still can't take the range. Skipped unless `nfs.live.host` is set and `nfs.live.restart.command` (a shell command that restarts the server) or `nfs.live.restart.manual=true` is.
 - The test classes are published in a `-tests` jar, and `TestKdc` (a Kerberos KDC for tests) is public, so modules built on the client can test Kerberos without a copy (parley-files-nfs, D88).
 - `NfsFileInfo` also has the owner, the group (as the server names them: "name@domain" or a number), the access, change
