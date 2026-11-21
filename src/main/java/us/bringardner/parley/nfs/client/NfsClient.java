@@ -968,6 +968,11 @@ public class NfsClient implements Closeable {
 				r.in.readLong();
 				r.in.readLong();
 				int rflags = r.in.readInt();
+				r.in.readIntArray(8);
+				// A server may answer a reclaim with a delegation (Linux does, marked to be returned at once when it can't
+				// reach the client's callback address). This client keeps none on an open it holds for a lock: give it back,
+				// or the server can't let another client open the file and answers RENEW with CB_PATH_DOWN for ever.
+				DelegationReply given = readDelegationReply(r.in, "reclaim open "+l.getPath());
 				if( (rflags & Nfs4.OPEN4_RESULT_CONFIRM) != 0 ) {
 					Compound cc = new Compound().putfh(l.fh);
 					cc.op(Nfs4.OP_OPEN_CONFIRM).args.writeInt(l.openSeqid).writeFixedOpaque(l.openOther).writeInt(l.openOwnerSeq++);
@@ -978,6 +983,9 @@ public class NfsClient implements Closeable {
 				}
 				sendLock(l, true);
 				LOG.log(System.Logger.Level.INFO, "NFS client reclaimed "+l);
+				if( given.other != null ) {
+					returnDelegation(new Delegation(l.fh, given.seqid, given.other, given.type == Nfs4.OPEN_DELEGATE_WRITE, l.getPath()));
+				}
 			} catch (NfsException e) {
 				lose(l, "the server did not give it back: "+e.getMessage());
 			} catch (IOException e) {
@@ -1133,28 +1141,10 @@ public class NfsClient implements Closeable {
 		r.in.readLong();
 		int rflags = r.in.readInt();
 		r.in.readIntArray(8);
-		int delegation = r.in.readInt();
-		int dseqid = 0;
-		byte[] dother = null;
-		if( delegation == Nfs4.OPEN_DELEGATE_READ || delegation == Nfs4.OPEN_DELEGATE_WRITE ) {
-			dseqid = r.in.readInt();
-			dother = r.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
-			r.in.readBoolean();
-			if( delegation == Nfs4.OPEN_DELEGATE_WRITE ) {
-				if( r.in.readInt() == Nfs4.NFS_LIMIT_SIZE ) {
-					r.in.readLong();
-				} else {
-					r.in.readInt();
-					r.in.readInt();
-				}
-			}
-			r.in.readInt();
-			r.in.readInt();
-			r.in.readInt();
-			r.in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
-		} else if( delegation != Nfs4.OPEN_DELEGATE_NONE ) {
-			throw new IOException("open "+path+": the server gave a delegation of a kind this client doesn't know: "+delegation);
-		}
+		DelegationReply dr = readDelegationReply(r.in, "open "+path);
+		int delegation = dr.type;
+		int dseqid = dr.seqid;
+		byte[] dother = dr.other;
 		r.ok(Nfs4.OP_GETFH);
 		o.fh = r.in.readOpaque(Nfs4.NFS4_FHSIZE);
 		if( dother != null ) {
@@ -1181,6 +1171,38 @@ public class NfsClient implements Closeable {
 			}
 		}
 		return o;
+	}
+
+	/** The delegation (if any) in the reply to an OPEN, which follows the attribute bitmap. */
+	private static final class DelegationReply {
+		int type = Nfs4.OPEN_DELEGATE_NONE;
+		int seqid;
+		byte[] other;
+	}
+
+	private static DelegationReply readDelegationReply(XdrDecoder in, String what) throws IOException {
+		DelegationReply d = new DelegationReply();
+		d.type = in.readInt();
+		if( d.type == Nfs4.OPEN_DELEGATE_READ || d.type == Nfs4.OPEN_DELEGATE_WRITE ) {
+			d.seqid = in.readInt();
+			d.other = in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
+			in.readBoolean();
+			if( d.type == Nfs4.OPEN_DELEGATE_WRITE ) {
+				if( in.readInt() == Nfs4.NFS_LIMIT_SIZE ) {
+					in.readLong();
+				} else {
+					in.readInt();
+					in.readInt();
+				}
+			}
+			in.readInt();
+			in.readInt();
+			in.readInt();
+			in.readString(Nfs4.NFS4_OPAQUE_LIMIT);
+		} else if( d.type != Nfs4.OPEN_DELEGATE_NONE ) {
+			throw new IOException(what+": the server gave a delegation of a kind this client doesn't know: "+d.type);
+		}
+		return d;
 	}
 
 	private byte[] readOpen(Opened o, long offset, int count) throws IOException {
