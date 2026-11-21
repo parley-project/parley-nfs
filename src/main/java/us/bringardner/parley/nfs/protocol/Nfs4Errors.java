@@ -103,6 +103,29 @@ public final class Nfs4Errors {
 		case Nfs4.NFS4ERR_ADMIN_REVOKED: return "the server's administrator revoked the open or lock";
 		case Nfs4.NFS4ERR_CB_PATH_DOWN: return "the server can't reach the client's callback address";
 		case Nfs4.NFS4ERR_DELEG_REVOKED: return "the server revoked the delegation";
+		case Nfs4.NFS4ERR_BADSESSION: return "the server doesn't know this session";
+		case Nfs4.NFS4ERR_BADSLOT: return "the session has no such slot";
+		case Nfs4.NFS4ERR_COMPLETE_ALREADY: return "the reclaim was already declared complete";
+		case Nfs4.NFS4ERR_CONN_NOT_BOUND_TO_SESSION: return "this connection isn't bound to the session";
+		case Nfs4.NFS4ERR_BACK_CHAN_BUSY: return "the session already has a callback channel";
+		case Nfs4.NFS4ERR_SEQ_MISORDERED: return "the request's sequence number is out of order";
+		case Nfs4.NFS4ERR_SEQUENCE_POS: return "SEQUENCE must be the first operation of a compound";
+		case Nfs4.NFS4ERR_REQ_TOO_BIG: return "the request is bigger than the session allows";
+		case Nfs4.NFS4ERR_REP_TOO_BIG: return "the reply would be bigger than the session allows";
+		case Nfs4.NFS4ERR_REP_TOO_BIG_TO_CACHE: return "the reply is too big to keep for a retry";
+		case Nfs4.NFS4ERR_RETRY_UNCACHED_REP: return "a retry asked for a reply the server didn't keep";
+		case Nfs4.NFS4ERR_UNSAFE_COMPOUND: return "that combination of operations isn't safe to retry";
+		case Nfs4.NFS4ERR_TOO_MANY_OPS: return "the compound has more operations than the session allows";
+		case Nfs4.NFS4ERR_OP_NOT_IN_SESSION: return "that operation isn't allowed inside a session";
+		case Nfs4.NFS4ERR_HASH_ALG_UNSUPP: return "the server doesn't support that hash algorithm";
+		case Nfs4.NFS4ERR_CLIENTID_BUSY: return "the client id still has sessions or state";
+		case Nfs4.NFS4ERR_SEQ_FALSE_RETRY: return "a request reused a sequence number with different content";
+		case Nfs4.NFS4ERR_BAD_HIGH_SLOT: return "the highest slot in the request is out of range";
+		case Nfs4.NFS4ERR_DEADSESSION: return "the session has been destroyed";
+		case Nfs4.NFS4ERR_ENCR_ALG_UNSUPP: return "the server doesn't support that encryption algorithm";
+		case Nfs4.NFS4ERR_NOT_ONLY_OP: return "that operation must be the only one in its compound";
+		case Nfs4.NFS4ERR_WRONG_CRED: return "a different credential was used than the one that made the client";
+		case Nfs4.NFS4ERR_WRONG_TYPE: return "the file isn't the right type for that operation";
 		default: return "unknown NFS status "+status;
 		}
 	}
@@ -177,6 +200,29 @@ public final class Nfs4Errors {
 		case Nfs4.NFS4ERR_ADMIN_REVOKED: return "NFS4ERR_ADMIN_REVOKED";
 		case Nfs4.NFS4ERR_CB_PATH_DOWN: return "NFS4ERR_CB_PATH_DOWN";
 		case Nfs4.NFS4ERR_DELEG_REVOKED: return "NFS4ERR_DELEG_REVOKED";
+		case Nfs4.NFS4ERR_BADSESSION: return "NFS4ERR_BADSESSION";
+		case Nfs4.NFS4ERR_BADSLOT: return "NFS4ERR_BADSLOT";
+		case Nfs4.NFS4ERR_COMPLETE_ALREADY: return "NFS4ERR_COMPLETE_ALREADY";
+		case Nfs4.NFS4ERR_CONN_NOT_BOUND_TO_SESSION: return "NFS4ERR_CONN_NOT_BOUND_TO_SESSION";
+		case Nfs4.NFS4ERR_BACK_CHAN_BUSY: return "NFS4ERR_BACK_CHAN_BUSY";
+		case Nfs4.NFS4ERR_SEQ_MISORDERED: return "NFS4ERR_SEQ_MISORDERED";
+		case Nfs4.NFS4ERR_SEQUENCE_POS: return "NFS4ERR_SEQUENCE_POS";
+		case Nfs4.NFS4ERR_REQ_TOO_BIG: return "NFS4ERR_REQ_TOO_BIG";
+		case Nfs4.NFS4ERR_REP_TOO_BIG: return "NFS4ERR_REP_TOO_BIG";
+		case Nfs4.NFS4ERR_REP_TOO_BIG_TO_CACHE: return "NFS4ERR_REP_TOO_BIG_TO_CACHE";
+		case Nfs4.NFS4ERR_RETRY_UNCACHED_REP: return "NFS4ERR_RETRY_UNCACHED_REP";
+		case Nfs4.NFS4ERR_UNSAFE_COMPOUND: return "NFS4ERR_UNSAFE_COMPOUND";
+		case Nfs4.NFS4ERR_TOO_MANY_OPS: return "NFS4ERR_TOO_MANY_OPS";
+		case Nfs4.NFS4ERR_OP_NOT_IN_SESSION: return "NFS4ERR_OP_NOT_IN_SESSION";
+		case Nfs4.NFS4ERR_HASH_ALG_UNSUPP: return "NFS4ERR_HASH_ALG_UNSUPP";
+		case Nfs4.NFS4ERR_CLIENTID_BUSY: return "NFS4ERR_CLIENTID_BUSY";
+		case Nfs4.NFS4ERR_SEQ_FALSE_RETRY: return "NFS4ERR_SEQ_FALSE_RETRY";
+		case Nfs4.NFS4ERR_BAD_HIGH_SLOT: return "NFS4ERR_BAD_HIGH_SLOT";
+		case Nfs4.NFS4ERR_DEADSESSION: return "NFS4ERR_DEADSESSION";
+		case Nfs4.NFS4ERR_ENCR_ALG_UNSUPP: return "NFS4ERR_ENCR_ALG_UNSUPP";
+		case Nfs4.NFS4ERR_NOT_ONLY_OP: return "NFS4ERR_NOT_ONLY_OP";
+		case Nfs4.NFS4ERR_WRONG_CRED: return "NFS4ERR_WRONG_CRED";
+		case Nfs4.NFS4ERR_WRONG_TYPE: return "NFS4ERR_WRONG_TYPE";
 		default: return Integer.toString(status);
 		}
 	}

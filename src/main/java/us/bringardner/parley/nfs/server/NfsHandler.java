@@ -165,6 +165,8 @@ public class NfsHandler implements INioHandler {
 			} catch (XdrException e) {
 				reply.truncate(start-4);
 				reply.writeInt(Rpc.GARBAGE_ARGS);
+			} finally {
+				compound.abandon();
 			}
 			if( cache != null && compound.isNonIdempotent() ) {
 				cache.save(from, xid, whole, reply.toByteArray());
@@ -372,6 +374,8 @@ public class NfsHandler implements INioHandler {
 					compound.run(new XdrDecoder(plain), body);
 				} catch (XdrException e) {
 					return accepted(xid, gc, Rpc.GARBAGE_ARGS, 64);
+				} finally {
+					compound.abandon();
 				}
 				results = body.toByteArray();
 				if( cache != null && compound.isNonIdempotent() ) {

@@ -303,7 +303,7 @@ public class NfsServerTest {
 		r.readOpaque(400);
 		assertEquals(Rpc.PROC_UNAVAIL, r.readInt());
 
-		Result res = c.compound(new Ops().putroot(), 1);
+		Result res = c.compound(new Ops().putroot(), 2);
 		assertEquals(Nfs4.NFS4ERR_MINOR_VERS_MISMATCH, res.status);
 		assertEquals(0, res.count);
 
