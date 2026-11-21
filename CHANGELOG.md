@@ -4,6 +4,7 @@
 
 ### Added (2026-11-20: what a FileSource needs of the client, T10, D87)
 
+- The test classes are published in a `-tests` jar, and `TestKdc` (a Kerberos KDC for tests) is public, so modules built on the client can test Kerberos without a copy (parley-files-nfs, D88).
 - `NfsFileInfo` also has the owner, the group (as the server names them: "name@domain" or a number), the access, change
   and creation times (-1 when the server has none) and the number of links.
 - `setAttributes(path, NfsSetAttributes)` changes the permission bits, owner, group, access time and modify time (SETATTR);
