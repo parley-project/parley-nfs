@@ -298,6 +298,7 @@ public class Compound {
 		case Nfs4.OP_OFFLOAD_CANCEL:
 		case Nfs4.OP_OFFLOAD_STATUS:
 		case Nfs4.OP_WRITE_SAME:
+			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP);
 		case Nfs4.OP_GET_DIR_DELEGATION: getDirDelegation(); break;
 		case Nfs4.OP_WANT_DELEGATION:
 		case 47: case 48: case 49: case 50: case 51: case 54:
