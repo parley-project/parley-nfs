@@ -848,6 +848,43 @@ public class NfsClient implements Closeable {
 	}
 
 	/**
+	 * Tell the server how a range of a file will be used (IO_ADVISE, RFC 7862): hints such as
+	 * {@link Nfs4#IO_ADVISE4_SEQUENTIAL} or {@link Nfs4#IO_ADVISE4_WILLNEED}. A server is free to ignore them.
+	 * @param count the length of the range; 0 means to the end of the file
+	 * @param hints the hints, as the IO_ADVISE4_ numbers of {@link Nfs4}
+	 * @return the hints the server says it used (often none)
+	 */
+	public synchronized int[] ioAdvise(String path, long offset, long count, int... hints) throws IOException {
+		return run(true, () -> {
+			need42("ioAdvise");
+			Opened o = open(path, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
+			try {
+				Compound c = new Compound().putfh(o.fh);
+				c.op(Nfs4.OP_IO_ADVISE).args.writeInt(o.seqid).writeFixedOpaque(o.other).writeLong(offset).writeLong(count)
+					.writeIntArray(hints.length == 0 ? new int[0] : bitmap(hints));
+				Reply r = call(c, "ioAdvise "+path);
+				r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_IO_ADVISE);
+				int[] map = r.in.readIntArray(8);
+				java.util.List<Integer> used = new java.util.ArrayList<Integer>();
+				for (int w = 0; w < map.length; w++) {
+					for (int b = 0; b < 32; b++) {
+						if( (map[w] & (1 << b)) != 0 ) {
+							used.add(w*32+b);
+						}
+					}
+				}
+				int[] ret = new int[used.size()];
+				for (int i = 0; i < ret.length; i++) {
+					ret[i] = used.get(i);
+				}
+				return ret;
+			} finally {
+				closeOpen(o);
+			}
+		});
+	}
+
+	/**
 	 * The unit CLONE works in on the file system of the path (the clone_blksize attribute): the offsets and the length
 	 * of a {@link #clone} must be multiples of it.
 	 * @return 0 when the server isn't NFSv4.2 or doesn't say, which means it can't clone there

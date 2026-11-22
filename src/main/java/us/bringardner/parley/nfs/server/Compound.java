@@ -286,13 +286,13 @@ public class Compound {
 		case Nfs4.OP_ALLOCATE: allocate(); break;
 		case Nfs4.OP_DEALLOCATE: deallocate(); break;
 		case Nfs4.OP_COPY: copy(); break;
+		case Nfs4.OP_IO_ADVISE: ioAdvise(); break;
 		case Nfs4.OP_GETXATTR: getXattr(); break;
 		case Nfs4.OP_SETXATTR: setXattr(); break;
 		case Nfs4.OP_LISTXATTRS: listXattrs(); break;
 		case Nfs4.OP_REMOVEXATTR: removeXattr(); break;
 		case Nfs4.OP_CLONE:
 		case Nfs4.OP_COPY_NOTIFY:
-		case Nfs4.OP_IO_ADVISE:
 		case Nfs4.OP_LAYOUTERROR:
 		case Nfs4.OP_LAYOUTSTATS:
 		case Nfs4.OP_OFFLOAD_CANCEL:
@@ -1589,6 +1589,31 @@ public class Compound {
 			out.writeBoolean(true);
 			out.writeLong(size);
 		}
+	}
+
+	/**
+	 * IO_ADVISE (RFC 7862 section 15.5): the client's hints about how a range will be used. A FileSource takes no hints, so
+	 * the answer is that none was used (an empty bitmap), which the RFC allows; the stateid is still checked.
+	 */
+	private void ioAdvise() throws Nfs4Exception, IOException {
+		StateId id = stateid();
+		long offset = in.readLong();
+		in.readLong();                       // the count: 0 or all ones means to the end, nothing here needs it
+		in.readIntArray(Attributes.MAX_BITMAP_WORDS);
+		Node node = current();
+		currentRegular();
+		try {
+			checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_READ);
+		} catch (Nfs4Exception e) {
+			if( e.getStatus() != Nfs4.NFS4ERR_OPENMODE ) {
+				throw e;
+			}
+			checkIo(id, node, Nfs4.OPEN4_SHARE_ACCESS_WRITE);       // an open for writing only can advise too
+		}
+		if( offset < 0 ) {
+			throw new Nfs4Exception(Nfs4.NFS4ERR_INVAL);
+		}
+		out.writeIntArray(new int[0]);
 	}
 
 	/** ALLOCATE: make sure the range is there; a range past the end makes the file longer (zeros). */

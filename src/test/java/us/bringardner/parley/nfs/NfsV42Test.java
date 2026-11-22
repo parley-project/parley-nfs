@@ -116,6 +116,17 @@ public class NfsV42Test {
 		assertEquals("0123456789", text("a"));
 	}
 
+	/** the hints are taken and none is used: a FileSource has no way to act on them */
+	@Test
+	public void ioAdviseIsAnsweredAndUsesNoHint() throws Exception {
+		make("a", "0123456789");
+		assertEquals(0, client.ioAdvise("a", 0, 10, Nfs4.IO_ADVISE4_SEQUENTIAL, Nfs4.IO_ADVISE4_WILLNEED).length);
+		assertEquals(0, client.ioAdvise("a", 5, 0).length);
+		assertEquals("0123456789", text("a"));
+		// a file that isn't there
+		assertThrows(NfsException.class, () -> client.ioAdvise("nothere", 0, 0, Nfs4.IO_ADVISE4_RANDOM));
+	}
+
 	@Test
 	public void allocateMakesTheFileLongerWithZeros() throws Exception {
 		make("a", "abc");

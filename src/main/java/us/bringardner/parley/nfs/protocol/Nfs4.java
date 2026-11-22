@@ -302,6 +302,18 @@ public final class Nfs4 {
 	public static final int FATTR4_TIME_MODIFY_SET = 54;
 	public static final int FATTR4_MOUNTED_ON_FILEID = 55;
 	/** RFC 8276: true when the file system keeps extended attributes */
+	// IO_ADVISE hints (RFC 7862 section 15.5.1): the number of a hint is its bit in the hints bitmap
+	public static final int IO_ADVISE4_NORMAL = 0;
+	public static final int IO_ADVISE4_SEQUENTIAL = 1;
+	public static final int IO_ADVISE4_SEQUENTIAL_BACKWARDS = 2;
+	public static final int IO_ADVISE4_RANDOM = 3;
+	public static final int IO_ADVISE4_WILLNEED = 4;
+	public static final int IO_ADVISE4_WILLNEED_OPPORTUNISTIC = 5;
+	public static final int IO_ADVISE4_DONTNEED = 6;
+	public static final int IO_ADVISE4_NOREUSE = 7;
+	public static final int IO_ADVISE4_READ = 8;
+	public static final int IO_ADVISE4_WRITE = 9;
+	public static final int IO_ADVISE4_INIT_PROXIMITY = 10;
 	/** the unit CLONE works in (RFC 7862), a uint32 */
 	public static final int FATTR4_CLONE_BLKSIZE = 77;
 	public static final int FATTR4_XATTR_SUPPORT = 82;

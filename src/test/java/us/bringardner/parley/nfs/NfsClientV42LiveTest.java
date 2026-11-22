@@ -163,6 +163,22 @@ public class NfsClientV42LiveTest {
 		System.out.println("CLONE done: "+got.length+" bytes, clone_blksize "+block);
 	}
 
+	/** IO_ADVISE (RFC 7862): a server takes the hints, uses some or none, or says NOTSUPP; the file is not changed either way. */
+	@Test
+	public void ioAdviseIsAnsweredOrRefusedCleanly() throws Exception {
+		String p = work + "/advise";
+		assertTrue(client.createNew(p));
+		client.write(p, 0, bytes("some data"));
+		try {
+			int[] used = client.ioAdvise(p, 0, 0, Nfs4.IO_ADVISE4_SEQUENTIAL, Nfs4.IO_ADVISE4_WILLNEED);
+			System.out.println("IO_ADVISE answered, hints used: "+java.util.Arrays.toString(used));
+		} catch (NfsException e) {
+			assertEquals(Nfs4.NFS4ERR_NOTSUPP, e.getStatus(), "unexpected "+e.getMessage());
+			System.out.println("IO_ADVISE refused: "+e.getMessage());
+		}
+		assertArrayEquals(bytes("some data"), client.readAll(p));
+	}
+
 	@Test
 	public void copyInsideTheServer() throws Exception {
 		String src = make("src", "hello world");

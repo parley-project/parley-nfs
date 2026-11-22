@@ -2,6 +2,13 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-22: IO_ADVISE, D105)
+
+- **IO_ADVISE (NFSv4.2, RFC 7862)** on the server and `NfsClient.ioAdvise(path, offset, count, hints...)`. The server
+  checks the stateid and the range and answers that it used no hint (an empty bitmap, which the RFC allows), because a
+  `FileSource` has no way to act on one; the hint numbers are `Nfs4.IO_ADVISE4_*`. Linux nfsd on mx1 answers
+  NFS4ERR_NOTSUPP, which the live test accepts.
+
 ### Added (2026-11-22: CLONE in the client, D104)
 
 - **`NfsClient.clone(from, fromOffset, to, toOffset, count)` and `cloneBlockSize(path)`** (NFSv4.2, RFC 7862): ask the

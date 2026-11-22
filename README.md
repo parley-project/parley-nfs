@@ -29,6 +29,8 @@ Supported:
    FileSource keeps them (local files and the memory provider do); `setfattr` and `getfattr` on a Linux 5.9 or later
    client work with the `user.` names. Names up to 255 bytes, values up to 64 KiB. `tools/xattr-test.sh` checks it with a Linux client (a Multipass VM), as the scripts below do for other features.
 
+9. IO_ADVISE (NFSv4.2): the hints are taken and answered, and none is used (a FileSource has no way to act on one).
+
 Not yet (answered with NFS4ERR_NOTSUPP):
 
 1. Named attributes (OPENATTR).
