@@ -25,8 +25,9 @@
 #   IN_VM         1 when the script itself runs in the VM            (default empty)
 #
 # The VM needs a kernel of 5.9 or later (the Linux client has had RFC 8276 since then) and the attr package, which
-# this script installs when setfattr is missing. The Linux client sends the name without its "user." prefix and the
-# Java provider adds it, so a name set here as user.origin is "user.origin" on a Linux server and "origin" on macOS.
+# this script installs when setfattr is missing. The Linux client sends the whole name, user.origin included, and the
+# server keeps it as sent: a macOS server has user.origin on the file. On a Linux server the JDK puts its own "user."
+# in front, so the file there has user.user.origin; over NFS the name is still user.origin.
 
 : "${EXPORT_DIR:=/Volumes/Data/nfs-test}"
 : "${EXPORT_NAME:=docs}"
@@ -66,11 +67,14 @@ value() {
 	vm getfattr --only-values -n "$1" "$2" 2>/dev/null
 }
 
-# the value as this machine's file system has it: Linux says user.<name>, macOS says <name>
+# the value as this machine's file system has it: user.<name> on macOS, user.user.<name> on a Linux server
 here() {
-	local name=$1 file=$2
-	if command -v xattr >/dev/null 2>&1 && xattr -p "$name" "$file" 2>/dev/null; then return 0; fi
-	getfattr --only-values -n "user.$name" "$file" 2>/dev/null
+	local name=$1 file=$2 n
+	for n in "user.$name" "user.user.$name"; do
+		if command -v xattr >/dev/null 2>&1 && xattr -p "$n" "$file" 2>/dev/null; then return 0; fi
+		if command -v getfattr >/dev/null 2>&1 && getfattr --only-values -n "$n" "$file" 2>/dev/null; then return 0; fi
+	done
+	return 1
 }
 
 cleanup() {
@@ -168,9 +172,9 @@ if [ -n "$IN_VM" ]; then
 	skip "an attribute set on the server machine is seen by the mount (not checked from inside the VM)"
 else
 	if command -v xattr >/dev/null 2>&1 && [ "$(uname)" = "Darwin" ]; then
-		xattr -w fromhere there "$FILE" 2>/dev/null
+		xattr -w user.fromhere there "$FILE" 2>/dev/null
 	else
-		setfattr -n user.fromhere -v there "$FILE" 2>/dev/null
+		setfattr -n user.user.fromhere -v there "$FILE" 2>/dev/null
 	fi
 	sleep 2
 	expect "an attribute set on this machine is seen by the mount" "there" "$(value user.fromhere "$F")"
