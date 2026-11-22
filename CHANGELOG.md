@@ -2,6 +2,21 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Added (2026-11-22: CLONE in the client, D104)
+
+- **`NfsClient.clone(from, fromOffset, to, toOffset, count)` and `cloneBlockSize(path)`** (NFSv4.2, RFC 7862): ask the
+  server to make a range of one file share its storage with a range of another, copy-on-write, so nothing is copied.
+  It works where the server's file system keeps clones (btrfs, XFS with reflinks, ...); the offsets and the count must
+  be multiples of the `clone_blksize` attribute, which `cloneBlockSize` reads (0 when the server doesn't say). Elsewhere
+  the server answers NFS4ERR_NOTSUPP (or NFS4ERR_XDEV across file systems, NFS4ERR_INVAL for a misaligned range), which
+  comes back as an `NfsException`. The server side is not built: this server answers CLONE with NFS4ERR_NOTSUPP, as
+  `FileSource` has no operation for it.
+
+### Fixed (2026-11-22)
+
+- **CLONE, COPY_NOTIFY, IO_ADVISE, LAYOUTERROR, LAYOUTSTATS, OFFLOAD_CANCEL, OFFLOAD_STATUS and WRITE_SAME answered
+  NFS4ERR_BADXDR** instead of NFS4ERR_NOTSUPP: they fell through into GET_DIR_DELEGATION in the server's operation switch.
+
 ### Added (2026-11-21: extended attributes, RFC 8276, D101)
 
 - **GETXATTR, SETXATTR, LISTXATTRS, REMOVEXATTR (NFSv4.2) and the `xattr_support` attribute** (RFC 8276). The server

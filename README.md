@@ -32,6 +32,9 @@ Supported:
 Not yet (answered with NFS4ERR_NOTSUPP):
 
 1. Named attributes (OPENATTR).
+   (CLONE is not served either; the client has it: `NfsClient.clone` asks a server whose file system keeps clones, such
+   as btrfs or XFS with reflinks, to share a range of one file with another without copying, and `cloneBlockSize` gives
+   the unit its offsets and count must be multiples of.)
 2. Hard links, devices, sockets and fifos. A FileSource can't make them, so a client gets errors it can name:
    `ln` says "Invalid cross-device link" (NFS4ERR_XDEV) and `mkfifo` and `mknod` say "Operation not permitted"
    (NFS4ERR_PERM). Symbolic links are served (see below).

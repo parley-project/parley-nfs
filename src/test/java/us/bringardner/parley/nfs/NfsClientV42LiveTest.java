@@ -37,6 +37,8 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import us.bringardner.parley.nfs.client.NfsException;
+import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.client.NfsClient;
 import us.bringardner.parley.nfs.client.NfsReadPlus;
 import us.bringardner.parley.nfs.client.NfsDirectoryEvent;
@@ -129,6 +131,36 @@ public class NfsClientV42LiveTest {
 		NfsReadPlus mid = client.readPlus(p, 10, 100);
 		assertArrayEquals(java.util.Arrays.copyOfRange(file, 10, 110), mid.getData());
 		assertEquals(0, client.readPlus(p, file.length+10, 100).getData().length);
+	}
+
+	/**
+	 * CLONE (RFC 7862). A server whose file system keeps reflinks (btrfs, XFS with reflinks) clones a block-aligned range
+	 * and the destination reads as the source does; one that doesn't says NOTSUPP, which is also a pass.
+	 */
+	@Test
+	public void cloneIsDoneOrRefusedCleanly() throws Exception {
+		int block = client.cloneBlockSize(work);
+		byte[] data = new byte[Math.max(block, 4096) * 2];
+		for (int i = 0; i < data.length; i++) {
+			data[i] = (byte) (i * 31 + 7);
+		}
+		String src = work + "/clone-src";
+		String dst = work + "/clone-dst";
+		assertTrue(client.createNew(src));
+		client.write(src, 0, data);
+		try {
+			client.clone(src, 0, dst, 0, block > 0 ? data.length - data.length % block : 0);
+		} catch (NfsException e) {
+			// not cloned: the server or its file system can't, or the files aren't on one file system
+			assertTrue(e.getStatus() == Nfs4.NFS4ERR_NOTSUPP || e.getStatus() == Nfs4.NFS4ERR_XDEV || e.getStatus() == Nfs4.NFS4ERR_INVAL,
+					"unexpected "+e.getMessage());
+			System.out.println("CLONE refused: "+e.getMessage()+" (clone_blksize "+block+")");
+			return;
+		}
+		assertTrue(block > 0);
+		byte[] got = client.readAll(dst);
+		assertArrayEquals(java.util.Arrays.copyOf(data, got.length), got);
+		System.out.println("CLONE done: "+got.length+" bytes, clone_blksize "+block);
 	}
 
 	@Test

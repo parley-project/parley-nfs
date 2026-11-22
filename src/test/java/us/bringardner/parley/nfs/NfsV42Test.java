@@ -106,6 +106,16 @@ public class NfsV42Test {
 		assertEquals(-1, client.seek("a", 99, true));
 	}
 
+	/** this server keeps no clones (the FileSource has no such operation): it says NOTSUPP and the client reads that cleanly */
+	@Test
+	public void cloneIsRefusedByAServerThatCannotDoIt() throws Exception {
+		make("a", "0123456789");
+		assertEquals(0, client.cloneBlockSize("a"));
+		NfsException e = assertThrows(NfsException.class, () -> client.clone("a", 0, "b", 0, 0));
+		assertEquals(Nfs4.NFS4ERR_NOTSUPP, e.getStatus());
+		assertEquals("0123456789", text("a"));
+	}
+
 	@Test
 	public void allocateMakesTheFileLongerWithZeros() throws Exception {
 		make("a", "abc");

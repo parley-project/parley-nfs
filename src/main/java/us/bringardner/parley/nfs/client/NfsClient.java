@@ -848,6 +848,67 @@ public class NfsClient implements Closeable {
 	}
 
 	/**
+	 * The unit CLONE works in on the file system of the path (the clone_blksize attribute): the offsets and the length
+	 * of a {@link #clone} must be multiples of it.
+	 * @return 0 when the server isn't NFSv4.2 or doesn't say, which means it can't clone there
+	 */
+	public synchronized int cloneBlockSize(String path) throws IOException {
+		if( minorVersion < 2 ) {
+			return 0;
+		}
+		return run(true, () -> {
+			Compound c = new Compound();
+			lookup(c, path);
+			c.op(Nfs4.OP_GETATTR).args.writeIntArray(bitmap(Nfs4.FATTR4_CLONE_BLKSIZE));
+			Reply r = call(c, "cloneBlockSize "+path);
+			skipLookup(r, path);
+			r.ok(Nfs4.OP_GETATTR);
+			int[] map = r.in.readIntArray(8);
+			XdrDecoder a = new XdrDecoder(r.in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT*64));
+			int word = Nfs4.FATTR4_CLONE_BLKSIZE / 32;
+			if( map.length <= word || (map[word] & (1 << (Nfs4.FATTR4_CLONE_BLKSIZE % 32))) == 0 ) {
+				return 0;
+			}
+			return a.readInt();
+		});
+	}
+
+	/**
+	 * Make a range of one file share its storage with a range of another, copy-on-write, so nothing is copied (CLONE,
+	 * RFC 7862). Both files must be on the same file system of the server, which must keep clones (btrfs, XFS with
+	 * reflinks, ZFS, ...); the offsets and the count must be multiples of {@link #cloneBlockSize}. The destination is
+	 * made when it isn't there.
+	 * @param count the bytes to clone; 0 clones to the end of the source
+	 * @throws NfsException NFS4ERR_NOTSUPP when the server or its file system can't clone, NFS4ERR_XDEV when the files are on
+	 *         different file systems, NFS4ERR_INVAL when an offset or the count isn't a multiple of the block size
+	 */
+	public synchronized void clone(String from, long fromOffset, String to, long toOffset, long count) throws IOException {
+		run(true, () -> {
+			need42("clone");
+			dropCached();
+			Opened s = open(from, Nfs4.OPEN4_SHARE_ACCESS_READ, false);
+			try {
+				Opened d = open(to, Nfs4.OPEN4_SHARE_ACCESS_WRITE, true, false);
+				try {
+					Compound c = new Compound().putfh(s.fh);
+					c.op(Nfs4.OP_SAVEFH);
+					c.putfh(d.fh);
+					XdrEncoder a = c.op(Nfs4.OP_CLONE).args;
+					a.writeInt(s.seqid).writeFixedOpaque(s.other).writeInt(d.seqid).writeFixedOpaque(d.other);
+					a.writeLong(fromOffset).writeLong(toOffset).writeLong(count);
+					Reply r = call(c, "clone "+from+" to "+to);
+					r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_SAVEFH).ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_CLONE);
+				} finally {
+					closeOpen(d);
+				}
+			} finally {
+				closeOpen(s);
+			}
+			return null;
+		});
+	}
+
+	/**
 	 * Read up to count bytes of a file.
 	 * @return the bytes (fewer, even none, at the end of the file)
 	 */

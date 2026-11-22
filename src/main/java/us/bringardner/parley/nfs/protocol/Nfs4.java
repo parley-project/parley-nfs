@@ -302,6 +302,8 @@ public final class Nfs4 {
 	public static final int FATTR4_TIME_MODIFY_SET = 54;
 	public static final int FATTR4_MOUNTED_ON_FILEID = 55;
 	/** RFC 8276: true when the file system keeps extended attributes */
+	/** the unit CLONE works in (RFC 7862), a uint32 */
+	public static final int FATTR4_CLONE_BLKSIZE = 77;
 	public static final int FATTR4_XATTR_SUPPORT = 82;
 
 	// time_how4
