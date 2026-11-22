@@ -75,8 +75,9 @@ echo "xattr test: $MAC_IP:/$EXPORT_NAME mounted with vers=4.2,sec=sys at $MOUNT 
 
 rm -rf "$FILE" "$EXPORT_DIR/$DIRNAME" 2>/dev/null
 if ! vm which setfattr >/dev/null 2>&1; then
-	echo "installing attr in the VM"
-	LIMIT=180 vm sudo apt-get install -y attr >/dev/null 2>&1 || { echo "can't install attr in the VM"; exit 1; }
+	echo "installing attr in the VM (apt-get, at most 180 seconds; its output follows)"
+	LIMIT=180 vm sudo DEBIAN_FRONTEND=noninteractive apt-get install -y attr \
+		|| { echo "can't install attr in the VM (no network, or another apt holds the lock?); install it there and run this again"; exit 1; }
 fi
 echo "        VM kernel: $($CLIENT_EXEC uname -r)"
 vm sudo mkdir -p "$MOUNT" || { echo "can't make $MOUNT in the VM"; exit 1; }
