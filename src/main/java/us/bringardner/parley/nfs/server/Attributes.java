@@ -308,7 +308,7 @@ public class Attributes {
 	/** RFC 8276 xattr_support: the provider keeps extended attributes for the file (D101) */
 	private static boolean xattrSupported(FileSource f) {
 		try {
-			return f.isExtendedAttributesSupported();
+			return f.getUserDefinedFileAttributeView() != null;
 		} catch (IOException | RuntimeException e) {
 			return false;
 		}

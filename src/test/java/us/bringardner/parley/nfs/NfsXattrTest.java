@@ -132,8 +132,11 @@ public class NfsXattrTest {
 		make("a");
 		client.setXattr("a", "user.k", b("v"));
 		FileSource f = mem.createFileSource("/export/a");
-		assertArrayEquals(b("v"), f.getExtendedAttribute("user.k"));
-		f.setExtendedAttribute("other", b("w"));
+		java.nio.file.attribute.UserDefinedFileAttributeView v = f.getUserDefinedFileAttributeView();
+		java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(v.size("user.k"));
+		v.read("user.k", buf);
+		assertArrayEquals(b("v"), buf.array());
+		v.write("other", java.nio.ByteBuffer.wrap(b("w")));
 		assertArrayEquals(b("w"), client.getXattr("a", "other"));
 	}
 

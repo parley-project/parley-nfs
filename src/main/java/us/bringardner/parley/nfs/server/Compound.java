@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.attribute.UserDefinedFileAttributeView;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -920,7 +921,7 @@ public class Compound {
 				}
 			}
 		}
-		if( v42 && f.isExtendedAttributesSupported() && !Attributes.isLink(f) ) {
+		if( v42 && !Attributes.isLink(f) && f.getUserDefinedFileAttributeView() != null ) {
 			// RFC 8276 section 8.5: reading and listing follow READ, setting and removing follow MODIFY
 			supported |= asked & (Nfs4.ACCESS4_XAREAD | Nfs4.ACCESS4_XALIST | Nfs4.ACCESS4_XAWRITE);
 			if( (allowed & Nfs4.ACCESS4_READ) != 0 ) {
@@ -1637,10 +1638,20 @@ public class Compound {
 		if( Attributes.isLink(f) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_SYMLINK);
 		}
-		if( !f.isExtendedAttributesSupported() ) {
+		if( f.getUserDefinedFileAttributeView() == null ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOTSUPP, "no extended attributes here");
 		}
 		return f;
+	}
+
+	/** the value of the attribute, or null when the file has none of that name */
+	private static byte[] xattrValue(UserDefinedFileAttributeView view, String name) throws IOException {
+		if( !view.list().contains(name) ) {
+			return null;
+		}
+		java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(view.size(name));
+		view.read(name, buf);
+		return buf.array();
 	}
 
 	private void getXattr() throws Nfs4Exception, IOException {
@@ -1649,7 +1660,7 @@ public class Compound {
 		FileSource f = xattrFile();
 		allowRead();
 		aclCheck(node, f, Nfs4.ACE4_READ_DATA);
-		byte[] value = f.getExtendedAttribute(name);
+		byte[] value = xattrValue(f.getUserDefinedFileAttributeView(), name);
 		if( value == null ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOXATTR);
 		}
@@ -1670,7 +1681,8 @@ public class Compound {
 		if( value.length > XATTR_VALUE_MAX ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_XATTR2BIG);
 		}
-		byte[] old = f.getExtendedAttribute(name);
+		UserDefinedFileAttributeView view = f.getUserDefinedFileAttributeView();
+		byte[] old = xattrValue(view, name);
 		if( option == Nfs4.SETXATTR4_CREATE && old != null ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_EXIST);
 		}
@@ -1680,7 +1692,7 @@ public class Compound {
 		long before = change(node, f);
 		// the change attribute moves only when the attribute is new or its value differs (RFC 8276 section 8.4.2)
 		if( old == null || !java.util.Arrays.equals(old, value) ) {
-			f.setExtendedAttribute(name, value);
+			view.write(name, java.nio.ByteBuffer.wrap(value));
 			node.changed();
 		}
 		changeInfo(before, change(node, f));
@@ -1694,7 +1706,7 @@ public class Compound {
 		allowRead();
 		aclCheck(node, f, Nfs4.ACE4_READ_DATA);
 		// sorted, so the cookie (the position of the next name) means the same on the next call
-		List<String> names = new java.util.ArrayList<>(f.getExtendedAttributeNames());
+		List<String> names = new java.util.ArrayList<>(f.getUserDefinedFileAttributeView().list());
 		java.util.Collections.sort(names);
 		if( cookie < 0 || cookie > names.size() ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_BAD_COOKIE);
@@ -1731,9 +1743,11 @@ public class Compound {
 		allowWrite();
 		aclCheck(node, f, Nfs4.ACE4_WRITE_DATA);
 		long before = change(node, f);
-		if( !f.removeExtendedAttribute(name) ) {
+		UserDefinedFileAttributeView view = f.getUserDefinedFileAttributeView();
+		if( !view.list().contains(name) ) {
 			throw new Nfs4Exception(Nfs4.NFS4ERR_NOXATTR);
 		}
+		view.delete(name);
 		node.changed();
 		changeInfo(before, change(node, f));
 	}
