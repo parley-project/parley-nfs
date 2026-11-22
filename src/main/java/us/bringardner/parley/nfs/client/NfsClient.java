@@ -977,7 +977,7 @@ public class NfsClient implements Closeable {
 			java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream();
 			long offset = 0;
 			while( true ) {
-				byte[] b = readOpen(o, offset, CHUNK);
+				byte[] b = readOpen(o, offset, getMaxRead());
 				if( b.length == 0 ) {
 					byte[] bytes = all.toByteArray();
 					Delegation d = o.delegation != null && !o.delegation.write ? o.delegation : delegationOf(o.fh);
@@ -1055,9 +1055,22 @@ public class NfsClient implements Closeable {
 	}
 
 	private void writeOpen(Opened o, String path, long offset, byte[] data, int off, int len) throws IOException {
+		int max = getMaxWrite();
+		if( len > max ) {
+			// several WRITEs: send them unstable and make them stable with one COMMIT, so the server syncs once
+			if( writeUnstable(o, path, offset, data, off, len, max) ) {
+				return;
+			}
+			// the server's write verifier changed (it restarted): what it had unstable is lost, so write it all again, stable
+		}
+		writeStable(o, path, offset, data, off, len, max);
+	}
+
+	/** every WRITE is FILE_SYNC4: the server has the bytes on disk before it answers */
+	private void writeStable(Opened o, String path, long offset, byte[] data, int off, int len, int max) throws IOException {
 		int done = 0;
 		while( done < len || len == 0 && done == 0 ) {
-			int n = Math.min(CHUNK, len-done);
+			int n = Math.min(max, len-done);
 			Compound c = new Compound().putfh(o.fh);
 			XdrEncoder a = c.op(Nfs4.OP_WRITE).args;
 			a.writeInt(o.seqid).writeFixedOpaque(o.other);
@@ -1073,6 +1086,95 @@ public class NfsClient implements Closeable {
 				break;
 			}
 		}
+	}
+
+	/**
+	 * WRITE with UNSTABLE4 for each piece, then one COMMIT for the range. The bytes are stable when this returns true.
+	 * @return false when the verifier of a WRITE and the one of the COMMIT differ, which says the server restarted and
+	 *         may have lost the unstable bytes: the caller writes them again, stable
+	 */
+	private boolean writeUnstable(Opened o, String path, long offset, byte[] data, int off, int len, int max) throws IOException {
+		int done = 0;
+		byte[] verifier = null;
+		boolean same = true;
+		while( done < len ) {
+			int n = Math.min(max, len-done);
+			Compound c = new Compound().putfh(o.fh);
+			XdrEncoder a = c.op(Nfs4.OP_WRITE).args;
+			a.writeInt(o.seqid).writeFixedOpaque(o.other);
+			a.writeLong(offset+done).writeInt(Nfs4.UNSTABLE4).writeOpaque(data, off+done, n);
+			Reply r = call(c, "write "+path);
+			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_WRITE);
+			int count = r.in.readInt();
+			if( count <= 0 ) {
+				throw new IOException("write "+path+": the server wrote nothing");
+			}
+			r.in.readInt();                                              // how stable it is: the COMMIT settles it
+			byte[] v = r.in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
+			if( verifier == null ) {
+				verifier = v;
+			} else if( !java.util.Arrays.equals(verifier, v) ) {
+				same = false;
+			}
+			done += count;
+		}
+		Compound c = new Compound().putfh(o.fh);
+		c.op(Nfs4.OP_COMMIT).args.writeLong(offset).writeInt(len);
+		Reply r = call(c, "commit "+path);
+		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_COMMIT);
+		byte[] committed = r.in.readFixedOpaque(Nfs4.NFS4_VERIFIER_SIZE);
+		return same && java.util.Arrays.equals(verifier, committed);
+	}
+
+	// ------------------------------------------------------------------ the sizes of one READ and one WRITE
+
+	/** the most this client asks of one READ or WRITE, whatever a server allows */
+	public static final int MAX_IO = 1024*1024;
+	private volatile int maxRead = CHUNK;
+	private volatile int maxWrite = CHUNK;
+	private volatile boolean limitsKnown;
+
+	/** the most bytes one READ takes: what the server's maxread says, up to {@link #MAX_IO} (32 KiB when it doesn't say) */
+	public int getMaxRead() throws IOException {
+		learnLimits();
+		return maxRead;
+	}
+
+	/** the most bytes one WRITE takes, as {@link #maxRead} */
+	public int getMaxWrite() throws IOException {
+		learnLimits();
+		return maxWrite;
+	}
+
+	private void learnLimits() throws IOException {
+		if( limitsKnown ) {
+			return;
+		}
+		try {
+			Compound c = new Compound();
+			lookup(c, "");
+			c.op(Nfs4.OP_GETATTR).args.writeIntArray(bitmap(Nfs4.FATTR4_MAXREAD, Nfs4.FATTR4_MAXWRITE));
+			Reply r = call(c, "limits");
+			skipLookup(r, "");
+			r.ok(Nfs4.OP_GETATTR);
+			int[] map = r.in.readIntArray(8);
+			XdrDecoder a = new XdrDecoder(r.in.readOpaque(Nfs4.NFS4_OPAQUE_LIMIT*64));
+			boolean hasRead = map.length > 0 && (map[0] & (1 << Nfs4.FATTR4_MAXREAD)) != 0;
+			boolean hasWrite = map.length > 0 && (map[0] & (1 << Nfs4.FATTR4_MAXWRITE)) != 0;
+			// the values come in the order of their numbers
+			long rd = hasRead ? a.readLong() : -1;
+			long wr = hasWrite ? a.readLong() : -1;
+			if( rd > 0 ) {
+				maxRead = (int) Math.min(rd, MAX_IO);
+			}
+			if( wr > 0 ) {
+				maxWrite = (int) Math.min(wr, MAX_IO);
+			}
+			limitsKnown = true;
+		} catch (NfsException | RuntimeException e) {
+			limitsKnown = true;              // a server that says no, or says something odd, keeps the 32 KiB it has always had
+		}
+		// a failed connection is not caught: the call that comes next meets it and the retry asks again
 	}
 
 	// ------------------------------------------------------------------ more of a file (D87)
@@ -1199,7 +1301,7 @@ public class NfsClient implements Closeable {
 	synchronized byte[] readFrom(NfsOpenFile f, long offset, int count) throws IOException {
 		return run(true, () -> {
 			OpenState st = current(f);
-			java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream(Math.min(count, CHUNK));
+			java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream(Math.min(count, getMaxRead()));
 			while( all.size() < count ) {
 				byte[] b = readOpen(st.opened, offset+all.size(), count-all.size());
 				if( b.length == 0 ) {
@@ -1670,7 +1772,7 @@ public class NfsClient implements Closeable {
 
 	private byte[] readOpen(Opened o, long offset, int count) throws IOException {
 		Compound c = new Compound().putfh(o.fh);
-		c.op(Nfs4.OP_READ).args.writeInt(o.seqid).writeFixedOpaque(o.other).writeLong(offset).writeInt(Math.min(count, CHUNK));
+		c.op(Nfs4.OP_READ).args.writeInt(o.seqid).writeFixedOpaque(o.other).writeLong(offset).writeInt(Math.min(count, getMaxRead()));
 		Reply r = call(c, "read");
 		r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_READ);
 		r.in.readBoolean();

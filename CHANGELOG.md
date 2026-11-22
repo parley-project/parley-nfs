@@ -2,6 +2,18 @@
 
 ## parley-nfs 2.0.0 (unreleased)
 
+### Changed (2026-11-22: the client's I/O sizes and unstable writes, D106)
+
+- **One READ or WRITE is as big as the server allows, up to 1 MiB (`NfsClient.MAX_IO`), not 32 KiB.** The client reads the
+  server's `maxread` and `maxwrite` attributes once (`getMaxRead()`, `getMaxWrite()`); a server that doesn't say keeps
+  the 32 KiB it had. Against mx1 (maxread 512 KiB) a sequential read in 1 MiB calls went from 2.0 to 11.0 MB/s and a
+  random read of 64 KiB from 33 ms to 18 ms (one round trip, not two), at a round trip of about 14 ms.
+- **A write that needs several WRITEs is sent UNSTABLE and made stable by one COMMIT**, so the server syncs once, not
+  for every piece (writes in calls of 1 MiB or more went from about 1.2 to 3 MB/s on mx1). When the write verifiers of
+  the pieces and the COMMIT differ (the server restarted, and may have lost the unstable bytes) the whole write is sent
+  again, FILE_SYNC4. A write that fits in one WRITE is still FILE_SYNC4. `NfsOpenFile.write` still means stable when it
+  returns.
+
 ### Added (2026-11-22: IO_ADVISE, D105)
 
 - **IO_ADVISE (NFSv4.2, RFC 7862)** on the server and `NfsClient.ioAdvise(path, offset, count, hints...)`. The server

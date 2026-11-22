@@ -45,6 +45,7 @@ import us.bringardner.parley.nfs.client.NfsDirectoryEvent;
 import us.bringardner.parley.nfs.client.NfsDirectoryListener;
 import us.bringardner.parley.nfs.client.NfsDirectoryWatch;
 import us.bringardner.parley.nfs.client.NfsFileInfo;
+import us.bringardner.parley.nfs.client.NfsOpenFile;
 
 /**
  * The NFSv4.2 operations (D92) against a real server. Skipped unless nfs.live.host is set, and unless the server
@@ -177,6 +178,26 @@ public class NfsClientV42LiveTest {
 			System.out.println("IO_ADVISE refused: "+e.getMessage());
 		}
 		assertArrayEquals(bytes("some data"), client.readAll(p));
+	}
+
+	/** the sizes come from the server and a write of several pieces (unstable, then one COMMIT) reads back whole */
+	@Test
+	public void bigReadsAndWritesGiveTheSameBytes() throws Exception {
+		System.out.println("maxread "+client.getMaxRead()+", maxwrite "+client.getMaxWrite());
+		assertTrue(client.getMaxRead() >= 4096 && client.getMaxRead() <= NfsClient.MAX_IO);
+		assertTrue(client.getMaxWrite() >= 4096 && client.getMaxWrite() <= NfsClient.MAX_IO);
+		byte[] d = new byte[client.getMaxWrite()*2 + 4321];
+		new java.util.Random(7).nextBytes(d);
+		String p = work + "/big";
+		assertTrue(client.createNew(p));
+		try (NfsOpenFile f = client.openFile(p, true, false)) {
+			f.write(0, d, 0, d.length);
+			assertEquals(d.length, f.size());
+		}
+		assertArrayEquals(d, client.readAll(p));
+		try (NfsOpenFile f = client.openFile(p, false, false)) {
+			assertArrayEquals(java.util.Arrays.copyOfRange(d, 1000, d.length-1000), f.read(1000, d.length-2000));
+		}
 	}
 
 	@Test
