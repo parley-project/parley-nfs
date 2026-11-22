@@ -5,6 +5,12 @@
 #
 #   tools/xattr-test.sh
 #
+# To run it inside the VM instead (log in with multipass shell, copy the script there with `multipass transfer`):
+#
+#   IN_VM=1 MAC_IP=192.168.252.1 ./xattr-test.sh
+#
+# The commands then run directly, and the two checks that need this machine's file system (steps 1 and 9) are skipped.
+#
 # The server must be running (tools/run-server.sh) with sec including sys (the default), exporting a folder whose file
 # system keeps user attributes through Java. If it doesn't, the server says xattr_support false and the first step
 # shows "Operation not supported"; that is the server's correct answer, not a failure of the code.
@@ -16,6 +22,7 @@
 #   MAC_IP        the server's address as the VM sees it            (default 192.168.252.1)
 #   MOUNT         where the VM mounts it                            (default /mnt/sys-xattr)
 #   CLIENT_EXEC   how a command runs in the VM                      (default multipass exec $VM --)
+#   IN_VM         1 when the script itself runs in the VM            (default empty)
 #
 # The VM needs a kernel of 5.9 or later (the Linux client has had RFC 8276 since then) and the attr package, which
 # this script installs when setfattr is missing. The Linux client sends the name without its "user." prefix and the
@@ -27,6 +34,7 @@
 : "${MAC_IP:=192.168.252.1}"
 : "${MOUNT:=/mnt/sys-xattr}"
 : "${CLIENT_EXEC:=multipass exec $VM --}"
+if [ -n "$IN_VM" ]; then CLIENT_EXEC=""; fi
 
 NAME=xattr-test.dat
 DIRNAME=xattr-test.dir
@@ -67,7 +75,7 @@ here() {
 
 cleanup() {
 	echo "cleaning up (each step waits at most ${LIMIT})"
-	rm -rf "$FILE" "$EXPORT_DIR/$DIRNAME" 2>/dev/null
+	[ -z "$IN_VM" ] && rm -rf "$FILE" "$EXPORT_DIR/$DIRNAME" 2>/dev/null
 	vm sudo umount "$MOUNT" >/dev/null 2>&1
 	vm sudo rmdir "$MOUNT" >/dev/null 2>&1
 }
@@ -75,7 +83,7 @@ trap cleanup EXIT
 
 echo "xattr test: $MAC_IP:/$EXPORT_NAME mounted with vers=4.2,sec=sys at $MOUNT in $VM; server side $EXPORT_DIR"
 
-rm -rf "$FILE" "$EXPORT_DIR/$DIRNAME" 2>/dev/null
+[ -z "$IN_VM" ] && rm -rf "$FILE" "$EXPORT_DIR/$DIRNAME" 2>/dev/null
 echo "checking the VM"
 if ! $CLIENT_EXEC sh -c 'command -v setfattr' </dev/null >/dev/null 2>&1; then
 	echo "installing attr in the VM (apt-get, at most 180 seconds; its output follows)"
@@ -103,7 +111,11 @@ else
 	exit 1
 fi
 expect "getfattr user.origin" "hello" "$(value user.origin "$F")"
-expect "this machine's file system has it too" "hello" "$(here origin "$FILE")"
+if [ -z "$IN_VM" ]; then
+	expect "this machine's file system has it too" "hello" "$(here origin "$FILE")"
+else
+	skip "this machine's file system has it too (not checked from inside the VM)"
+fi
 
 echo "2. a list"
 vm setfattr -n user.second -v two "$F" >/dev/null 2>&1
@@ -152,13 +164,17 @@ vm setfattr -n user.tag -v folder "$MOUNT/$DIRNAME" >/dev/null 2>&1
 expect "user.tag on a folder" "folder" "$(value user.tag "$MOUNT/$DIRNAME")"
 
 echo "9. the other direction: set here, read in the VM"
-if command -v xattr >/dev/null 2>&1 && [ "$(uname)" = "Darwin" ]; then
-	xattr -w fromhere there "$FILE" 2>/dev/null
+if [ -n "$IN_VM" ]; then
+	skip "an attribute set on the server machine is seen by the mount (not checked from inside the VM)"
 else
-	setfattr -n user.fromhere -v there "$FILE" 2>/dev/null
+	if command -v xattr >/dev/null 2>&1 && [ "$(uname)" = "Darwin" ]; then
+		xattr -w fromhere there "$FILE" 2>/dev/null
+	else
+		setfattr -n user.fromhere -v there "$FILE" 2>/dev/null
+	fi
+	sleep 2
+	expect "an attribute set on this machine is seen by the mount" "there" "$(value user.fromhere "$F")"
 fi
-sleep 2
-expect "an attribute set on this machine is seen by the mount" "there" "$(value user.fromhere "$F")"
 
 echo
 echo "passed $passed, failed $failed, skipped $skipped"
