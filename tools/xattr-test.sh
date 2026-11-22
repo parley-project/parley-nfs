@@ -37,9 +37,11 @@ skipped=0
 LIMIT=${LIMIT:-30}                               # seconds a command in the VM may take
 
 # a command in the VM, shown first, and cut off after LIMIT seconds so that nothing waits for ever
+# stdin is /dev/null: multipass exec otherwise holds the terminal as its input, which can stop a command whose output
+# is captured or discarded
 vm() {
 	echo "        \$ $*" >&2
-	$CLIENT_EXEC timeout "$LIMIT" "$@"
+	$CLIENT_EXEC timeout "$LIMIT" "$@" </dev/null
 }
 
 ok()   { passed=$((passed+1)); echo "  PASS  $1"; }
@@ -74,12 +76,13 @@ trap cleanup EXIT
 echo "xattr test: $MAC_IP:/$EXPORT_NAME mounted with vers=4.2,sec=sys at $MOUNT in $VM; server side $EXPORT_DIR"
 
 rm -rf "$FILE" "$EXPORT_DIR/$DIRNAME" 2>/dev/null
-if ! vm which setfattr >/dev/null 2>&1; then
+echo "checking the VM"
+if ! $CLIENT_EXEC sh -c 'command -v setfattr' </dev/null >/dev/null 2>&1; then
 	echo "installing attr in the VM (apt-get, at most 180 seconds; its output follows)"
 	LIMIT=180 vm sudo DEBIAN_FRONTEND=noninteractive apt-get install -y attr \
 		|| { echo "can't install attr in the VM (no network, or another apt holds the lock?); install it there and run this again"; exit 1; }
 fi
-echo "        VM kernel: $($CLIENT_EXEC uname -r)"
+echo "        VM kernel: $($CLIENT_EXEC uname -r </dev/null)"
 vm sudo mkdir -p "$MOUNT" || { echo "can't make $MOUNT in the VM"; exit 1; }
 if ! vm sudo mount -t nfs4 -o vers=4.2,sec=sys "$MAC_IP:/$EXPORT_NAME" "$MOUNT" 2>&1; then
 	echo "can't mount $MAC_IP:/$EXPORT_NAME with vers=4.2,sec=sys (is the server running, and does parley.nfs.sec include sys?)"
