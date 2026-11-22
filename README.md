@@ -27,7 +27,7 @@ Supported:
 
 8. Extended attributes (RFC 8276, NFSv4.2): GETXATTR, SETXATTR, LISTXATTRS and REMOVEXATTR for files whose
    FileSource keeps them (local files and the memory provider do); `setfattr` and `getfattr` on a Linux 5.9 or later
-   client work with the `user.` names. Names up to 255 bytes, values up to 64 KiB.
+   client work with the `user.` names. Names up to 255 bytes, values up to 64 KiB. `tools/xattr-test.sh` checks it with a Linux client (a Multipass VM), as the scripts below do for other features.
 
 Not yet (answered with NFS4ERR_NOTSUPP):
 
