@@ -1055,10 +1055,17 @@ public class NfsServerTest {
 		values.setProperty(prefix+".export.docs", folder.toString());
 		values.setProperty(prefix+".export.docs.readOnly", "true");
 		KnownSettings.RecordingProperties recording = new KnownSettings.RecordingProperties(values);
-		server = new NfsServer(prefix, 0);
-		server.setConfiguration(recording);
-		server.startAndWait(10000);
+		java.util.Properties savedProperties = System.getProperties();
+		recording.putAll(savedProperties);
+		System.setProperties(recording);
+		try {
+			server = new NfsServer(prefix, 0);
+			server.startAndWait(10000);
+		} finally {
+			System.setProperties(savedProperties);
+		}
 		List<String> asked = new ArrayList<String>(recording.asked());
+		asked.removeIf(n -> !n.startsWith("parley."));
 		assertTrue(asked.contains(prefix+".leaseTime"), asked.toString());
 		assertTrue(asked.contains(prefix+".export.docs.readOnly"), asked.toString());
 		assertTrue(asked.contains(prefix+".hideUnreadableExports"), asked.toString());
