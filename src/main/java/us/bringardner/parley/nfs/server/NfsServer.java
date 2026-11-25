@@ -159,8 +159,6 @@ public class NfsServer extends NioServer {
 	private volatile Attributes attributes;
 	private volatile Authorizer authorizer;
 	private volatile AclPolicy aclPolicy;
-	/** startAndWait has read the settings, so the start() it calls doesn't */
-	private boolean prepared;
 	private volatile ReplayCache replayCache;
 	private volatile int ioSize = DEFAULT_IO_SIZE;
 	private volatile boolean authNoneAllowed = true;
@@ -183,7 +181,7 @@ public class NfsServer extends NioServer {
 	 * Run the server as a service or a standalone process ({@link ServerMain}).
 	 */
 	public static void main(String[] args) throws Exception {
-		ServerMain.run("NfsServer", args, CONFIG_PROPERTY, "parley-nfs.properties",
+		ServerMain.run("NfsServer", args,
 				() -> java.util.Collections.singletonList(ServerMain.service(new NfsServer(), "NfsServer")));
 	}
 
@@ -199,7 +197,7 @@ public class NfsServer extends NioServer {
 	public NfsServer(String prefix, int defaultPort) {
 		setPropertyPrefix(prefix);
 		setName(prefix);
-		setPort(getIntProperty(propertyName(PROPERTY_PORT), defaultPort));
+		setDefaultPort(defaultPort);
 		setHandlerFactory(() -> new NfsHandler(this));
 		new SecureRandom().nextBytes(writeVerifier);
 	}
@@ -210,32 +208,25 @@ public class NfsServer extends NioServer {
 		return false;
 	}
 
-	/**
-	 * Read the settings, then start.
-	 * @throws IOException if they are wrong, or the server doesn't start
-	 */
 	@Override
-	public void startAndWait(long timeoutMillis) throws IOException {
-		prepare();
-		// the start() that startAndWait calls must not read the settings and start the executors again
-		prepared = true;
-		super.startAndWait(timeoutMillis);
+	protected String getSettingsFileName() {
+		return "parley-nfs.properties";
 	}
 
-	/** Read the settings, then start; a problem with them is logged and the server doesn't start. */
 	@Override
-	public synchronized void start() {
-		if( prepared ) {
-			prepared = false;
-		} else {
-			try {
-				prepare();
-			} catch (IOException e) {
-				logError("Server "+getName()+" not started: "+e.getMessage(), e);
-				return;
-			}
+	protected String getSettingsFileProperty() {
+		return CONFIG_PROPERTY;
+	}
+
+	/** The exports and the executors are made from the settings, so a server that has no usable ones doesn't start. */
+	@Override
+	protected void checkSettings(java.util.List<String> problems) {
+		super.checkSettings(problems);
+		try {
+			prepare();
+		} catch (IOException e) {
+			problems.add(e.getMessage());
 		}
-		super.start();
 	}
 
 	private synchronized void prepare() throws IOException {
