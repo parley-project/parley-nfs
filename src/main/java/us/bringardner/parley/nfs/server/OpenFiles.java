@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import us.bringardner.parley.core.BaseObject;
 import us.bringardner.parley.files.FileSource;
 import us.bringardner.parley.files.IRandomAccessStream;
 import us.bringardner.parley.nfs.protocol.Nfs4;
@@ -52,7 +53,7 @@ import us.bringardner.parley.nfs.protocol.Nfs4;
  *
  * @author Tony Bringardner
  */
-public class OpenFiles {
+public class OpenFiles extends BaseObject {
 
 	private static final class Handle {
 		final IRandomAccessStream stream;
@@ -69,8 +70,6 @@ public class OpenFiles {
 
 	private final Map<Node, Handle> handles = new HashMap<Node, Handle>();
 
-	private static final System.Logger LOG = System.getLogger(OpenFiles.class.getName());
-
 	/** The files already reported as having no random access: once is enough, a provider without it does so on every request. */
 	private final Set<String> reported = new HashSet<String>();
 
@@ -81,7 +80,7 @@ public class OpenFiles {
 				return;
 			}
 		}
-		LOG.log(System.Logger.Level.INFO, "No random access to "+key+" ("+file.getClass().getSimpleName()+": "+cause
+		logInfo("No random access to "+key+" ("+file.getClass().getSimpleName()+": "+cause
 				+"): it is read from the start and can only be appended to");
 	}
 

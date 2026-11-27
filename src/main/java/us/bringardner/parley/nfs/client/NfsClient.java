@@ -40,6 +40,7 @@ import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import us.bringardner.parley.core.BaseObject;
 import us.bringardner.parley.core.NamedExecutors;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.rpc.AuthSys;
@@ -59,7 +60,7 @@ import us.bringardner.parley.nfs.rpc.XdrEncoder;
  * <p>
  * Every file is opened by a new open-owner, so the open-owner's sequence ids stay simple.
  */
-public class NfsClient implements Closeable {
+public class NfsClient extends BaseObject implements Closeable {
 
 	/** The most bytes of one READ or WRITE call. */
 	public static final int CHUNK = 32768;
@@ -77,8 +78,6 @@ public class NfsClient implements Closeable {
 	private static final byte[] NO_STATE = new byte[12];
 	private static final int RETRIES = 10;
 	private static final long RETRY_WAIT = 500;
-
-	private static final System.Logger LOG = System.getLogger(NfsClient.class.getName());
 
 	// the connection is replaced when it is lost (reconnect)
 	private volatile Socket socket;
@@ -266,7 +265,7 @@ public class NfsClient implements Closeable {
 		}
 		connect();
 		reportedLost = false;
-		LOG.log(System.Logger.Level.INFO, "NFS client reconnected to "+host+":"+port);
+		logInfo("NFS client reconnected to "+host+":"+port);
 		reclaimLocks();
 		reclaimComplete();
 	}
@@ -1547,7 +1546,7 @@ public class NfsClient implements Closeable {
 					l.openOther = cr.in.readFixedOpaque(Nfs4.NFS4_OTHER_SIZE);
 				}
 				sendLock(l, true);
-				LOG.log(System.Logger.Level.INFO, "NFS client reclaimed "+l);
+				logInfo("NFS client reclaimed "+l);
 				if( given.other != null ) {
 					returnDelegation(new Delegation(l.fh, given.seqid, given.other, given.type == Nfs4.OPEN_DELEGATE_WRITE, l.getPath()));
 				}
@@ -1566,13 +1565,13 @@ public class NfsClient implements Closeable {
 		l.lost = true;
 		l.lostReason = why;
 		locks.remove(l);
-		LOG.log(System.Logger.Level.WARNING, "NFS client lost "+l+": "+why);
+		logWarn("NFS client lost "+l+": "+why);
 		java.util.function.Consumer<NfsLock> h = lockLostHandler;
 		if( h != null ) {
 			try {
 				h.accept(l);
 			} catch (RuntimeException e) {
-				LOG.log(System.Logger.Level.WARNING, "the lock lost handler failed: "+e);
+				logWarn("the lock lost handler failed: "+e);
 			}
 		}
 	}
@@ -1824,7 +1823,7 @@ public class NfsClient implements Closeable {
 		synchronized (delegations) {
 			pendingReturns.add(d);
 		}
-		LOG.log(System.Logger.Level.DEBUG, "NFS server recalls the delegation of "+d.path);
+		logDebug("NFS server recalls the delegation of "+d.path);
 		// DELEGRETURN goes over the client's connection, which an operation may be using: not in the callback's thread
 		synchronized (delegations) {
 			if( returner == null ) {
@@ -1873,7 +1872,7 @@ public class NfsClient implements Closeable {
 			Reply r = call(c, "delegreturn");
 			r.ok(Nfs4.OP_PUTFH).ok(Nfs4.OP_DELEGRETURN);
 		} catch (IOException | RuntimeException e) {
-			LOG.log(System.Logger.Level.DEBUG, "delegation of "+d.path+" not returned: "+e);
+			logDebug("delegation of "+d.path+" not returned: "+e);
 		}
 	}
 
@@ -1996,7 +1995,7 @@ public class NfsClient implements Closeable {
 			if( types.length == 0 || (types[0] & wanted) != wanted ) {
 				// a server that keeps the folder's delegation but doesn't tell of changes (Linux nfsd recalls it instead) is
 				// no use for a watch: give it back, and the caller polls
-				LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" gave a directory delegation of "+path
+				logInfo("NFS server "+host+":"+port+" gave a directory delegation of "+path
 						+" that tells of no changes (notification types "+(types.length == 0 ? 0 : types[0])+"): it is given back");
 				returnDelegation(new Delegation(fh, seqid, other, false, path));
 				return null;
@@ -2026,7 +2025,7 @@ public class NfsClient implements Closeable {
 				try {
 					w.listener.changed(e);
 				} catch (RuntimeException ex) {
-					LOG.log(System.Logger.Level.WARNING, "A directory listener of "+w.path+" failed: "+ex);
+					logWarn("A directory listener of "+w.path+" failed: "+ex);
 				}
 			});
 		}
@@ -2054,7 +2053,7 @@ public class NfsClient implements Closeable {
 				try {
 					w.listener.lost(reason);
 				} catch (RuntimeException ex) {
-					LOG.log(System.Logger.Level.WARNING, "A directory listener of "+w.path+" failed: "+ex);
+					logWarn("A directory listener of "+w.path+" failed: "+ex);
 				}
 			});
 		}
@@ -2233,7 +2232,7 @@ public class NfsClient implements Closeable {
 				if( e.getStatus() != Nfs4.NFS4ERR_MINOR_VERS_MISMATCH ) {
 					throw e;
 				}
-				LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" has no NFSv4."+minor+": trying a lower minor version");
+				logInfo("NFS server "+host+":"+port+" has no NFSv4."+minor+": trying a lower minor version");
 			}
 		}
 		minorVersion = 0;
@@ -2293,7 +2292,7 @@ public class NfsClient implements Closeable {
 		int granted = r.in.readInt();
 		slotSeq = 0;
 		if( callbacks != null && (granted & 2) == 0 ) {
-			LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" gave no back channel: it gives this client no delegations");
+			logInfo("NFS server "+host+":"+port+" gave no back channel: it gives this client no delegations");
 		}
 	}
 
@@ -2316,7 +2315,7 @@ public class NfsClient implements Closeable {
 			d.op(Nfs4.OP_DESTROY_CLIENTID).args.writeLong(clientId);
 			call(d, "destroy_clientid", false).ok(Nfs4.OP_DESTROY_CLIENTID);
 		} catch (IOException | RuntimeException e) {
-			LOG.log(System.Logger.Level.DEBUG, "NFS client: the session was not given back: "+e);
+			logDebug("NFS client: the session was not given back: "+e);
 		}
 	}
 
@@ -2393,7 +2392,7 @@ public class NfsClient implements Closeable {
 			// The lease was renewed (RFC 7530 and the Linux server renew first); the server only says it can't reach this
 			// client's callback address, so it could not recall a delegation. Give them back and keep everything else:
 			// a new client id would throw away the open files and locks the client holds.
-			LOG.log(System.Logger.Level.INFO, "NFS server "+host+":"+port+" can't reach this client's callback address (RENEW: "
+			logInfo("NFS server "+host+":"+port+" can't reach this client's callback address (RENEW: "
 					+"CB_PATH_DOWN): the lease is renewed; the delegations are given back");
 			returnAllDelegations();
 		} catch (IOException | RuntimeException e) {
@@ -2403,13 +2402,13 @@ public class NfsClient implements Closeable {
 
 	/** The lease or the connection is gone: get them back now, so the next call finds a client that works. */
 	private void renewFailed(Exception e) {
-		LOG.log(System.Logger.Level.INFO, "NFS client's RENEW failed ("+e+"): making a new client id");
+		logInfo("NFS client's RENEW failed ("+e+"): making a new client id");
 		try {
 			reconnect();
 		} catch (IOException | RuntimeException again) {
 			if( !reportedLost ) {
 				reportedLost = true;
-				LOG.log(System.Logger.Level.WARNING, "NFS client lost its server "+host+":"+port+" ("+e+"); trying again every "
+				logWarn("NFS client lost its server "+host+":"+port+" ("+e+"); trying again every "
 						+Math.max(1, leaseSeconds/2)+" seconds");
 			}
 		}

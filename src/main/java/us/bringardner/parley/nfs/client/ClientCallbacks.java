@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import us.bringardner.parley.core.BaseObject;
 import us.bringardner.parley.core.NamedExecutors;
 import us.bringardner.parley.nfs.protocol.Nfs4;
 import us.bringardner.parley.nfs.rpc.XdrDecoder;
@@ -19,7 +20,7 @@ import us.bringardner.parley.nfs.rpc.XdrEncoder;
  * The callback server of a client (RFC 7530 section 16, decision D86): the server connects to it to check that it can
  * call, and to recall a delegation (CB_RECALL). It answers CB_NULL and CB_COMPOUND with CB_RECALL and nothing else.
  */
-final class ClientCallbacks implements AutoCloseable {
+final class ClientCallbacks extends BaseObject implements AutoCloseable {
 
 	/** The program number the client gives the server (any number in the range for programs of an application). */
 	static final int PROGRAM = 0x40000000;
@@ -50,7 +51,6 @@ final class ClientCallbacks implements AutoCloseable {
 	}
 
 	private static final int CB_GETATTR = 3;
-	private static final System.Logger LOG = System.getLogger(ClientCallbacks.class.getName());
 
 	private final ServerSocket socket;
 	private final Thread thread;
@@ -96,7 +96,7 @@ final class ClientCallbacks implements AutoCloseable {
 				InetAddress from = s.getInetAddress();
 				InetAddress expected = server;
 				if( expected != null && !from.equals(expected) && !from.isLoopbackAddress() ) {
-					LOG.log(System.Logger.Level.WARNING, "NFS client callback from "+from+" refused: the server is "+expected);
+					logWarn("NFS client callback from "+from+" refused: the server is "+expected);
 					s.close();
 					continue;
 				}
