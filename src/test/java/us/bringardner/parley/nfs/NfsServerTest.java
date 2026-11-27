@@ -1271,7 +1271,7 @@ public class NfsServerTest {
 		// one folder and a list of names is a mistake
 		property("test.nfs.set.export", a.toString());
 		NfsServer both = new NfsServer("test.nfs.set", 0);
-		try {
+		try (ExpectedErrors quiet = new ExpectedErrors()) {
 			both.startAndWait(5000);
 			org.junit.jupiter.api.Assertions.fail("started");
 		} catch (IOException e) {
@@ -1281,7 +1281,7 @@ public class NfsServerTest {
 		// a name with no folder
 		System.clearProperty("test.nfs.set.export.media");
 		NfsServer missing = new NfsServer("test.nfs.set", 0);
-		try {
+		try (ExpectedErrors quiet = new ExpectedErrors()) {
 			missing.startAndWait(5000);
 			org.junit.jupiter.api.Assertions.fail("started");
 		} catch (IOException e) {
@@ -1296,7 +1296,7 @@ public class NfsServerTest {
 		mem.connect(new Properties());
 		NfsServer s = new NfsServer("test.nfs.dup", 0);
 		s.setExports(Arrays.asList(new Export("docs", makeExportRoot("/one"), false), new Export("docs", makeExportRoot("/two"), false)));
-		try {
+		try (ExpectedErrors quiet = new ExpectedErrors()) {
 			s.startAndWait(5000);
 			org.junit.jupiter.api.Assertions.fail("started");
 		} catch (IOException e) {

@@ -415,7 +415,10 @@ public class AclNfsTest {
 	@Test
 	public void aStateFolderThatIsAFileIsSaidSo(@TempDir Path tmp) throws Exception {
 		Files.write(tmp.resolve("state"), new byte[] {1});
-		Exception e = assertThrows(Exception.class, () -> start(tmp, true));
+		Exception e;
+		try (ExpectedErrors quiet = new ExpectedErrors()) {
+			e = assertThrows(Exception.class, () -> start(tmp, true));
+		}
 		StringBuilder all = new StringBuilder();
 		for (Throwable t = e; t != null; t = t.getCause()) {
 			all.append(t.getMessage()).append(" | ");

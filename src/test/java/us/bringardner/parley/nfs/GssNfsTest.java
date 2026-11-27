@@ -584,11 +584,13 @@ public class GssNfsTest {
 		property("test.nfs.gss2.sec", "krb5");
 		NfsServer s = new NfsServer("test.nfs.gss2", 0);
 		s.setExport(new Export("test", root, false));
-		IOException e = assertThrows(IOException.class, () -> s.startAndWait(10000));
-		assertTrue(e.getMessage().contains("krb5.principal"), e.getMessage());
-		System.setProperty("test.nfs.gss2.sec", "kerberos");
-		e = assertThrows(IOException.class, () -> s.startAndWait(10000));
-		assertTrue(e.getMessage().contains("kerberos"), e.getMessage());
-		assertNotNull(e);
+		try (ExpectedErrors quiet = new ExpectedErrors()) {
+			IOException e = assertThrows(IOException.class, () -> s.startAndWait(10000));
+			assertTrue(e.getMessage().contains("krb5.principal"), e.getMessage());
+			System.setProperty("test.nfs.gss2.sec", "kerberos");
+			e = assertThrows(IOException.class, () -> s.startAndWait(10000));
+			assertTrue(e.getMessage().contains("kerberos"), e.getMessage());
+			assertNotNull(e);
+		}
 	}
 }
